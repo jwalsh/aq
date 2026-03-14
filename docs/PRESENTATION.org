@@ -1,0 +1,362 @@
+#+TITLE: Gossip is Harder Than You Thought
+#+SUBTITLE: Lessons from Building L1.5
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-13
+#+STARTUP: overview
+#+DESCRIPTION: One machine. Four agents. Eight failures. Zero network.
+
+#+LATEX_CLASS: beamer
+#+LATEX_CLASS_OPTIONS: [presentation,aspectratio=169]
+#+BEAMER_THEME: metropolis
+#+OPTIONS: H:2 toc:nil num:nil
+#+COLUMNS: %45ITEM %10BEAMER_env(Env) %10BEAMER_act(Act) %4BEAMER_col(Col)
+#+LATEX_HEADER: \usepackage{booktabs}
+#+LATEX_HEADER: \usepackage{tabularx}
+
+* Executive Summary
+:PROPERTIES:
+:BEAMER_env: ignoreheading
+:END:
+
+#+BEGIN_EXPORT latex
+\begin{frame}[plain]
+\titlepage
+\end{frame}
+\newpage
+#+END_EXPORT
+
+** Executive Summary (Standalone Stakeholder Document)
+:PROPERTIES:
+:BEAMER_env: ignoreheading
+:END:
+
+#+BEGIN_EXPORT latex
+{
+\setbeamertemplate{frametitle}{}
+\begin{frame}[plain,t]
+\begin{center}
+{\Large \textbf{Executive Summary}}
+\end{center}
+\vspace{0.5em}
+
+\textbf{Context.} Multi-agent AI development lacks a presence layer. Agents
+working in parallel discover conflicts at merge time, not work time. No
+standard exists between work state (L1) and knowledge retrieval (L2) for
+answering: ``Who else is working on this file right now?''
+
+\vspace{0.3em}
+\textbf{What we built.} \texttt{aq}---a filesystem-backed gossip layer for
+local worktrees. JSON files in a directory. No network, no broker, no daemon.
+Four AI agents used it to build itself in parallel worktrees on one machine.
+
+\vspace{0.3em}
+\textbf{What happened.} It failed in 8 documented ways in 58 minutes. All
+failures occurred on localhost. Bootstrap paradox, 100\% false positive rate,
+TTL amnesia, identity instability, ghost broadcasts, SOA d\'{e}j\`{a} vu,
+forgot-to-announce irony, and stale binary invisibility.
+
+\vspace{0.3em}
+\textbf{What survived.} Filesystem-first transport works. NDJSON + TTL is the
+right wire format. CPRR phase as gossip payload has no prior art in production
+gossip protocols (Cassandra, SWIM, Serf). The axiom held: gossip, not
+coordination.
+
+\vspace{0.3em}
+\textbf{Verdict.} A thesis disguised as a tool, 12--18 months early. The
+documentation of failure is more valuable than the code. Local presence is a
+prerequisite for distributed presence, and we haven't solved local yet. Ship
+the insight; keep the tool warm.
+
+\vspace{0.3em}
+\textbf{Output.} 1,601 LOC Go, 59 tests, 8 protocol gaps, 3 partial
+conjecture refutations, 3 independent reviews. The dogfooding document is the
+primary artifact.
+
+\end{frame}
+}
+#+END_EXPORT
+
+#+BEGIN_EXPORT latex
+\newpage
+#+END_EXPORT
+
+* The Problem
+** Multi-Agent Development Has No Presence Layer
+
+#+ATTR_BEAMER: :overlay <+->
+- L1 exists: *work state* (issues, tasks, beads)
+- L2 exists: *knowledge retrieval* (indexed memory, RAG)
+- L1.5 does not exist: *who is working on what right now?*
+- Result: agents discover conflicts at *merge time*, not *work time*
+
+#+BEGIN_NOTES
+The seven-concern stack has authoritative work state at L1 (bd/beads) and
+knowledge retrieval at L2 (JITIR). The gap between them---ambient presence---
+has no standard tooling. MCP handles tool invocation. A2A handles agent
+messaging. Neither handles ``Agent A is editing auth.py in proof phase right
+now.'' This gap is felt most acutely by teams running 4+ agents in parallel
+on real codebases, where merge conflicts from uncoordinated parallel work
+waste 20-30% of agent compute.
+#+END_NOTES
+
+* The Hypothesis
+** Filesystem Gossip with TTL Expiry is Sufficient
+
+Four conjectures, each with explicit refutation criteria:
+
+| ID  | Conjecture                          | Refutation                  |
+|-----+-------------------------------------+-----------------------------|
+| C-1 | Filesystem transport is sufficient  | p99 > 500ms at 10 agents   |
+| C-2 | Conjecture identity prevents conflicts | False negatives on overlap |
+| C-3 | Wave presence without Wave data model | NDJSON+TTL too limited    |
+| C-4 | CPRR phase modulates severity       | More false positives than flat |
+
+Lineage: mDNS, Google Wave presence, Cassandra gossip, GEACL (arXiv 2025)
+
+#+BEGIN_NOTES
+The key design bet: the filesystem is the only required transport. Every
+feature must work with ls and cat as your debugger. No network services, no
+databases, no brokers. Inspired by mDNS (broadcast ``does anyone know this
+address?'') and Wave (presence-as-stream, but without the OT complexity).
+The GEACL papers (arXiv 2508.01531, 2512.03285) from 2025 validate the
+academic framing but have no implementation. aq is the first concrete one.
+#+END_NOTES
+
+* The Experiment
+** Building aq Using aq (The Bootstrap Paradox is Intentional)
+
+|               | Detail                             |
+|---------------+------------------------------------|
+| Agents        | 4 (Alpha, Beta, Gamma, Delta)      |
+| Worktrees     | 4 =sb= worktrees, 1 machine        |
+| Binary        | Go, stdlib-only, zero dependencies |
+| Duration      | 58 minutes of parallel work        |
+| Task          | Build aq using aq                  |
+
+*Output:*
+- 1,601 LOC Go (=main.go=, single-file convention)
+- 59 tests (32 core + 26 invariant + 1 integration)
+- 8 documented protocol gaps
+- 3 new conjectures (C-6, C-7, C-8) from the wreckage
+
+#+BEGIN_NOTES
+The meta-circularity is the point. We tried to use aq to coordinate building
+aq. The Python prototype existed but had zero tests. The Go port was 65 lines
+of stub. Each agent was given a slice (types, CLI, ops, tests) but needed the
+whole file to compile---so we got 4 complete implementations (~3,154 lines)
+instead of 4 composable pieces. 3.5x duplication. The single-file convention
+forced total reimplementation.
+#+END_NOTES
+
+* The Eight Failures (1/3)
+** Failures 1--3: The Fundamentals
+
+*1. Bootstrap paradox*
+- Can't dogfood what doesn't exist yet
+- /Lesson:/ Gossip provides value on the second round, never the first
+
+*2. Single-file saturation*
+- 4 agents, 1 file, 6 HIGH conflict pairs, 100% false positive rate
+- /Lesson:/ File-level overlap assumes file-level isolation. Single-file repos are the worst case.
+
+*3. TTL cliff*
+- 5-minute memory in 30-minute sessions = amnesia
+- All 4 broadcasts expired at T+7min. Agents still working. =aq status=: empty.
+- /Lesson:/ Without heartbeat, the system forgets everyone exists after minute 5
+
+#+BEGIN_NOTES
+Failure 2 is the most instructive. The conflict detector returned HIGH for
+every pair of agents---that's 4-choose-2 = 6 HIGH signals. It couldn't
+distinguish two agents editing the same function (real conflict) from two
+agents adding independent functions to the same file (no conflict). The
+heuristic is correct for multi-file repos and useless for single-file repos.
+The TTL cliff was predicted pre-flight and confirmed at T+7min. The design
+assumed frequent re-announcement; in practice, agents announce once and code
+for 30 minutes.
+#+END_NOTES
+
+* The Eight Failures (2/3)
+** Failures 4--6: Identity, Ghosts, and History
+
+*4. Worktree address instability*
+- Agents created their own worktrees instead of using the ones set up for them
+- Gossip had perfect information about the /wrong/ worktrees
+- /Lesson:/ Agent identity must be stable across session boundaries
+
+*5. Ghost broadcasts*
+- Claims about files that don't exist (=auth.py=, =session.py= in a Go repo)
+- Nobody noticed because nobody checked
+- /Lesson:/ Gossip happily broadcasts lies. Invariants catch them---but only if someone runs =validate=.
+
+*6. WS-* deja vu*
+- Every failure has a 2005 spec. UDDI expiry = TTL cliff. WS-Notification = broadcast semantics.
+- /Lesson:/ Same failure modes, different era. Recovery cost is lower with JSON vs XML Schema.
+
+#+BEGIN_NOTES
+The WS-* parallel is sobering. A 2005 enterprise architect would recognize
+every problem. UDDI registries went stale in 5 minutes because nobody
+re-registered their services. WS-Notification defined broadcast semantics.
+WS-Coordination defined consensus. They wrote 34-page specs. We wrote TODO
+comments. The failure modes are structurally identical. What changed: JSON
+files in a directory vs XML Schema registries. The problems are real; the
+recovery cost is what makes the approach viable.
+#+END_NOTES
+
+* The Eight Failures (3/3)
+** Failures 7--8: The Human Factor
+
+*7. Forgot to announce*
+- While writing docs about announcing
+- 40 minutes of active work, zero broadcasts
+- Retroactive =status=done= announcements: a press release, not gossip
+- /Lesson:/ Manual gossip is an oxymoron. Auto-heartbeat is the only viable path.
+
+*8. Stale binary*
+- =aq validate=: ``unknown command.'' The code had the feature. The running binary didn't.
+- Tool was compiled pre-invariants. Nobody ran =go build=.
+- /Lesson:/ A gossip tool requiring manual rebuild has the same problem as manual announce---nobody remembers.
+
+#+BEGIN_NOTES
+Failure 7 is the most damning and the most informative. The agent writing
+DOGFOODING.md---a document about how agents should use aq to announce their
+work---forgot to run aq announce. This is not an edge case. It is the default
+behavior. Every agent in every session will forget to announce unless
+announcement is automatic. The CLAUDE.md file never tells agents to USE the
+tool, only to BUILD the tool. The prompt engineer review confirmed this gap.
+#+END_NOTES
+
+* What Survived
+** The Design Held. The Implementation Didn't.
+
+What *worked*:
+- *Filesystem-first transport*: =ls= and =cat= are your debugger. Zero setup. =t.TempDir()= for test isolation.
+- *NDJSON + TTL*: Human-readable, machine-parseable. Expired broadcasts archived, not deleted.
+- *CPRR phase as payload*: No prior art in production gossip (Cassandra, SWIM, Serf carry health/topology, not epistemic state)
+- *Zero-dependency Go binary*: stdlib only, cross-compiles, works in air-gapped environments
+
+What the axiom prevented:
+- Nobody proposed adding a coordinator
+- Nobody proposed adding a broker
+- Nobody proposed guaranteed delivery
+- ``Gossip, not coordination'' survived 8k token compression and 4 agents
+
+#+BEGIN_NOTES
+The L7 staff engineer review confirmed: ``The CPRR phase as a semantic payload
+in gossip is genuinely new. Production gossip protocols carry health/topology
+information; aq carries epistemic state. The conflict severity modulated by
+phase intersection has no direct analog in Cassandra, SWIM, or Serf.'' The
+filesystem-first bet is also validated: the transport abstraction IS the
+filesystem abstraction. Cross-machine presence works by setting AQ_HOME to a
+shared mount. No code changes needed.
+#+END_NOTES
+
+* Conjecture Status
+** Four Hypotheses Tested. Zero Fully Validated.
+
+| ID  | Status              | Evidence                                       |
+|-----+---------------------+------------------------------------------------|
+| C-1 | Partially refuted   | Works on localhost. Needs heartbeat for sessions >5min. |
+| C-2 | *Refuted*           | Agent identity unstable (worktree mixup, failure #4)  |
+| C-3 | Not yet refuted     | NDJSON+TTL expressed everything we needed       |
+| C-4 | Partially refuted   | Phase severity is sound; file granularity too coarse  |
+
+New conjectures from the wreckage:
+
+- *C-7*: Auto-renewal/heartbeat prevents TTL cliff
+- *C-8*: Function-level granularity resolves single-file false positives
+
+#+BEGIN_NOTES
+C-2 is the cleanest refutation. The conjecture was that conjecture identity
+(C-1, C-2, etc.) prevents semantic conflicts by distinguishing agent intent.
+In practice, agent addresses were unstable---agents announced from wrong
+worktrees, with wrong remote URLs. The identity layer beneath conjecture
+identity failed first. You can't distinguish intent when you can't
+distinguish agents. C-3 is interesting because it's the only conjecture
+that has not been challenged: NDJSON+TTL was expressive enough for everything
+we tried. No coordination pattern was blocked by the wire format.
+#+END_NOTES
+
+* Three Reviews, One Conclusion
+** Independent Assessment from Three Perspectives
+
+*L7 Staff Engineer* (distributed systems):
+#+begin_quote
+"Approve with conditions. CPRR-as-payload is novel. No analog in Cassandra, SWIM, or Serf."
+#+end_quote
+
+*Staff Prompt Engineer* (agent instruction design):
+#+begin_quote
+"CLAUDE.md never tells agents to USE the tool. Only to BUILD it."
+#+end_quote
+
+*CTO* (strategic assessment):
+#+begin_quote
+"A thesis disguised as a tool. 12--18 months early. The insight is the product."
+#+end_quote
+
+#+BEGIN_NOTES
+The prompt engineer review found the root cause of failure #7 (forgot to
+announce): the agent-facing instruction file (CLAUDE.md) contains build
+instructions and acceptance tests for aq, but zero instructions telling
+agents to actually run aq announce before starting work. The re-announce
+cadence instruction exists only in README.org, which is human-facing.
+The CTO assessment: ``No direct competitors, but the gap could be absorbed
+by MCP/A2A with a single spec extension.'' Kill signal: if Anthropic ships
+mcp.presence.announce(), aq's reason to exist evaporates.
+#+END_NOTES
+
+* What We're Building Next
+** M1 Only: Local Worktrees. One Machine. That's It.
+
+| Priority | Item                                     | Addresses     |
+|----------+------------------------------------------+---------------|
+| P0       | Heartbeat daemon (=aq watch=)             | TTL cliff (#3)|
+| P0       | Filter =status=done= from conflict checks | False positives|
+| P0       | Git hook integration (auto-announce)      | Forgot (#7)   |
+| P0       | LICENSE file                             | Legal blocker |
+| P1       | Split =main.go= into packages             | Single-file (#2)|
+| P1       | =aq history= (show archived broadcasts)   | Audit trail   |
+
+Scope: local worktrees on one machine.
+
+``We haven't solved it for worktrees yet'' is the honest answer to ``does it scale?''
+
+#+BEGIN_NOTES
+The CTO review recommends Option A (internal tool) combined with Option C
+(publish the research). Investment: 0.5 person-months. The go/no-go for M1:
+run aq internally for 30 days across 3+ agent sessions. Measure: (a) how many
+broadcasts expire before being read? (b) how many real conflicts detected?
+(c) does any agent voluntarily use aq without being prompted? If (c) is zero
+after 30 days, the tool does not solve a felt need. Stop. Do not invest in
+cross-machine transports (M2) until M1 is validated with a second dogfooding
+session.
+#+END_NOTES
+
+* The Takeaway
+** Gossip is Harder Than You Thought
+
+The simplest gossip layer:
+- No network
+- No broker
+- No daemon
+- JSON files in a directory
+- One machine
+
+*Failed 8 ways in under an hour.*
+
+\vspace{1em}
+
+Three conclusions:
+1. Local presence is a prerequisite for distributed presence
+2. The documentation of failure (=DOGFOODING.md=) is more valuable than the code
+3. Start local. Document everything. The failures are the finding.
+
+#+BEGIN_NOTES
+The project's greatest strength is its self-awareness. The dogfooding
+documents are brutally honest about what failed, the conjectures have explicit
+refutation criteria, and the invariant system treats gossip claims as
+verifiable assertions. The tool is not the product. The insight is the product.
+Four AI agents tried to build a coordination tool using that coordination tool.
+Here's what broke. Every problem has a 2005 spec. The recovery cost is what
+changed. Gossip is harder than you thought. Start local. Document everything.
+#+END_NOTES
