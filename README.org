@@ -40,13 +40,21 @@ required to listen.
 
 * Quick Start
 
+** Install
+
 #+begin_src bash
-# Build from source (Go)
-make build && make install
+# Install from GitHub (requires Go 1.23+)
+go install github.com/jwalsh/aq@latest
 
-# Or use the Python prototype
-PYTHONPATH=src python -m aq.cli announce -c C-1 -f "main.go"
+# Or build from source
+git clone https://github.com/jwalsh/aq.git
+cd aq
+make build && make install   # installs to ~/.local/bin
+#+end_src
 
+** Usage
+
+#+begin_src bash
 # Initialize the channel directory
 aq init
 
@@ -64,9 +72,12 @@ aq status
 
 # Health check
 aq doctor
+
+# Machine-readable output (any command)
+aq status --json
 #+end_src
 
-The Go port is the target implementation. The Python prototype in
+The Go binary is the primary implementation. The Python prototype in
 =src/aq/= is the canonical wire format reference. Both produce and
 consume the same NDJSON files in =~/.aq/channels/broadcast/=.
 
