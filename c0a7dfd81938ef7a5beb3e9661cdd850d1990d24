@@ -1,0 +1,13 @@
+X-Agent-Role: bootstrap
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Deviations: none
+X-Testing: spec.org renders correctly, CLAUDE.md axiom updated
+X-Notes: Added GEACL prior art (arXiv 2508.01531, 2512.03285) to spec.org.
+  Positioned aq as L1.5 gossip layer between bd (L1, authoritative) and
+  JITIR (L2, retrieval). mDNS/Bonjour analogy. Wave reframing.
+  Registered conjectures C-5 (GEACL suppression) and C-6 (Go port equivalence).
+  Created beads: aq-8q2 (GEACL research), aq-os0 (Go port), aq-78a (whisper),
+  aq-2qg (ELS submission).
+  Explored steveyegge/beads (distributed issue tracker, Dolt-backed) and
+  steveyegge/gastown (multi-agent orchestration, L7 in the stack).
