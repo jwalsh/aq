@@ -1294,7 +1294,60 @@ Creates the channel directories, agent registry, and logs.
 	}
 
 	fmt.Printf("aq initialized at %s\n", aqHome())
+
+	// Install git hooks if we're in a git repo.
+	if _, err := exec.Command("git", "rev-parse", "--git-dir").Output(); err == nil {
+		installGitHooks()
+	}
+
 	return 0
+}
+
+// installGitHooks writes pre-commit and post-commit hooks for auto-announce.
+// Advisory only: hooks exit 0 if aq is not installed.
+func installGitHooks() {
+	hooksDir := ".githooks"
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return
+	}
+
+	preCommit := "#!/bin/sh\n" +
+		"# aq pre-commit hook — auto-announce on commit\n" +
+		"AQ=$(command -v aq 2>/dev/null || { [ -x \"./aq\" ] && echo \"./aq\"; } || exit 0)\n" +
+		"FILES=$(git diff --cached --name-only --diff-filter=ACMR | paste -sd, -)\n" +
+		"[ -z \"$FILES\" ] && exit 0\n" +
+		"BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo \"unknown\")\n" +
+		"CONJECTURE=$(echo \"$BRANCH\" | grep -oE 'C-[0-9]+' || echo \"C-0\")\n" +
+		"$AQ announce -c \"$CONJECTURE\" --claim \"committing\" --phase proof -f \"$FILES\" --status prosecuting 2>/dev/null || true\n" +
+		"exit 0\n"
+
+	postCommit := "#!/bin/sh\n" +
+		"# aq post-commit hook — announce completion\n" +
+		"AQ=$(command -v aq 2>/dev/null || { [ -x \"./aq\" ] && echo \"./aq\"; } || exit 0)\n" +
+		"FILES=$(git diff-tree --no-commit-id --name-only -r HEAD | paste -sd, -)\n" +
+		"[ -z \"$FILES\" ] && exit 0\n" +
+		"BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo \"unknown\")\n" +
+		"CONJECTURE=$(echo \"$BRANCH\" | grep -oE 'C-[0-9]+' || echo \"C-0\")\n" +
+		"MSG=$(git log --format=%s -1 HEAD)\n" +
+		"$AQ announce -c \"$CONJECTURE\" --claim \"$MSG\" --phase proof -f \"$FILES\" --status done 2>/dev/null || true\n" +
+		"exit 0\n"
+
+	hooks := map[string]string{"pre-commit": preCommit, "post-commit": postCommit}
+	wrote := false
+	for name, content := range hooks {
+		path := filepath.Join(hooksDir, name)
+		if _, err := os.Stat(path); err == nil {
+			continue // don't overwrite existing hooks
+		}
+		if err := os.WriteFile(path, []byte(content), 0o755); err == nil {
+			wrote = true
+		}
+	}
+
+	if wrote {
+		exec.Command("git", "config", "core.hooksPath", hooksDir).Run()
+		fmt.Println("git hooks installed at .githooks/ (auto-announce on commit)")
+	}
 }
 
 // cmdDoctor runs health checks on the aq installation.
