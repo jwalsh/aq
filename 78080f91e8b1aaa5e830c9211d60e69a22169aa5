@@ -1,0 +1,35 @@
+X-Agent-Role: bootstrap
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Gossip-TTL: 86400
+X-Gossip-Priority: whisper
+X-Gossip-To: aygp-dr
+X-Gossip-Re: aq-os0 (Go port)
+
+The temptation will be to improve the protocol while porting it.
+Don't. Port it verbatim first — same JSON field names, same filename
+format (aq-{ts014d}-{ulid}.json), same severity logic. C-6 exists
+specifically to catch drift. The Python prototype is the wire format
+contract. Make the tests prove equivalence, then iterate.
+
+../sb/main.go is the better pattern reference. cprr is 1700 lines
+and has state machine complexity you don't need. sb is 960 lines
+of "detect git state, format output, done" — that's what aq is.
+
+The one thing not in the spec yet: aqHome() should check for .aq/
+in cwd before falling back to ~/.aq/ — cprr does this with its
+store and it matters for multi-repo isolation. The Python version
+doesn't do this. It's the one deliberate improvement over the
+prototype.
+
+The ULID isn't a real ULID. It's a timestamp+random string.
+Don't import a ULID library. Just match what the Python does:
+12 hex digits of ms timestamp + 10 random lowercase alphanumeric.
+
+Severity logic is three lines, not a table lookup:
+  both proof + shared files = high
+  one proof + shared files  = medium
+  else + shared files       = low
+
+Start with: types, ULID, storage paths, announce, readActive.
+Then conflict detection. Then CLI dispatch. Tests last.
