@@ -104,10 +104,16 @@ failure as a CPRR refutation candidate.
 
 ## Open Conjectures
 
+Conjecture status is tracked by CPRR, not here. CLAUDE.md lists the
+conjectures for agent context only. See `cprr` for authoritative status.
+
 - **C-1**: Filesystem-first transport is sufficient. Refutation: p99 > 500ms at 10 agents.
 - **C-2**: Conjecture identity prevents semantic conflicts. Refutation: false negatives on overlapping files with different conjecture IDs.
 - **C-3**: Wave presence semantics without Wave data model. Refutation: NDJSON+TTL cannot express a necessary coordination pattern.
 - **C-4**: CPRR phase modulates conflict severity. Refutation: phase-based severity produces more false positives than flat severity.
+- **C-6**: Local-first `.aq/` in cwd before `~/.aq/`. Refutation: local-first causes confusion when agents operate from different cwd.
+- **C-7**: Auto-renewal / heartbeat prevents TTL cliff. Refutation: heartbeat daemon adds coupling that violates gossip axiom.
+- **C-8**: Function-level granularity resolves single-file false positives. Refutation: AST parsing adds complexity that exceeds the value of finer-grained conflict detection.
 
 ## Instrumentation Requirement
 

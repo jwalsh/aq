@@ -604,6 +604,39 @@ variable is latency and consistency. Point =AQ_HOME= at the mount:
 Target conjecture for transport abstraction:
 =C-6: transport abstraction doesn't require API changes to announce() / read_active()=
 
+* Prior Art: The WS-* / SOA Déjà Vu
+
+Every problem =aq= encountered during dogfooding has prior art in
+SOA governance circa 2003--2008. The mapping is uncomfortably precise:
+
+| aq problem                | WS-* equivalent               | Year | Spec pages |
+|---------------------------+-------------------------------+------+------------|
+| TTL cliff (300s expiry)   | UDDI entry expiry             | 2003 |         34 |
+| Broadcast semantics       | WS-Notification               | 2004 |         42 |
+| No guaranteed delivery    | QoS 0 (WS-ReliableMessaging)  | 2005 |         56 |
+| No schema registry        | UDDI + WS-MetadataExchange    | 2003 |        120 |
+| Bootstrap problem         | SOA governance chicken-and-egg | 2004 |   endless  |
+| No transactions           | WS-AtomicTransaction (absent) | 2005 |         38 |
+| File-level conflicts      | pessimistic locking (absent)  | ---  |        --- |
+| No single point of failure | (they never solved this one)  | ---  |        --- |
+
+The UDDI registry expiry problem is /exactly/ the TTL cliff: nobody
+re-registered their services, the registry went stale in 5 minutes,
+and the enterprise wrote a 34-page spec about it. =aq= wrote a TODO.
+Different era, same problem.
+
+The one thing =aq= got right that WS-* never did: no single point of
+failure. UDDI was centralized. WS-Notification required a broker.
+SOA governance required a governance board. =aq= requires a directory
+and =cat=.
+
+See also: SOAP discovery (WSDL + UDDI), GraphQL introspection
+(schema-first discovery), gRPC reflection (proto-first discovery).
+All solved "who else is here?" with registries. =aq= solves it with
+gossip. The registry approach scales better but couples harder.
+The gossip approach couples never but may miss. For L1.5 presence
+(not L2 retrieval), missing is acceptable.
+
 * Research Context
 
 Two arXiv papers (2025) formally name what =aq= is building:
