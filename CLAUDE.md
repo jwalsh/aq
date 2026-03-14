@@ -16,6 +16,29 @@ the merge wall. No orchestrator, no broker, no authority. Just gossip.
 Do not make `aq` authoritative, do not make it a retrieval system, do not
 make it coordinate. It broadcasts. That's it.
 
+## Session Protocol — USE THE TOOL
+
+aq is installed. Use it. Every session, no exceptions:
+
+```bash
+# BEFORE touching any files — announce what you're about to do
+aq announce -c <conjecture> --claim "<what>" --phase <phase> -f "<files>"
+
+# WHILE working — check for conflicts
+aq check -c <conjecture> -f "<files>"
+
+# AFTER finishing — announce done
+aq announce -c <conjecture> --phase <phase> -f "<files>" --status done
+
+# BEFORE committing — validate invariants
+aq validate
+```
+
+If you skip the announce, you are the problem the tool was built to solve.
+The dogfooding proved this: agents forgot to announce every single time.
+That is a prompt failure, not a tool failure. This instruction exists
+because of documented evidence in docs/DOGFOODING.md §8.
+
 ## Confirmation Gate
 
 Before writing any code, output a summary of: (1) which build step you are
