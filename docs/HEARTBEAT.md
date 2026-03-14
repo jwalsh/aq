@@ -145,16 +145,108 @@ more often than current state, producing misleading gossip.
 | Gossip axiom | Clean | Tension | Tension |
 | Agent-agnostic | No (Claude only) | Yes | Yes |
 
+## Option D: Shell Hook (cd wrapper)
+
+### How it works
+A shell function wrapping `cd` that announces when you enter a git
+repo with `.aq/` initialized. Presence triggered by *navigation*,
+not editing.
+
+```bash
+# ~/.zshrc or ~/.bashrc
+aq_cd() {
+  builtin cd "$@" || return
+  [ -d .aq ] || return
+  command -v aq >/dev/null 2>&1 || return
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  CONJECTURE=$(echo "$BRANCH" | grep -oE 'C-[0-9]+' || echo "C-0")
+  aq announce -c "$CONJECTURE" --claim "entered worktree" \
+    --phase conjecture --status prosecuting 2>/dev/null &
+}
+alias cd=aq_cd
+```
+
+### Properties
+- **Trigger**: Directory change
+- **Daemon**: None
+- **Coverage**: One-shot per cd — no re-announcement during work
+- **Best for**: Human developers navigating between worktrees
+- **Gossip axiom**: Clean — presence on entry, nothing more
+
+## Option E: Git Hooks (already implemented)
+
+Pre-commit and post-commit hooks auto-announce on every commit.
+See `.githooks/pre-commit` and `.githooks/post-commit`. Installed
+by `aq init`.
+
+Coverage: commit-time only. The gap is the 20 minutes *between*
+commits. Combined with Option A (PostToolUse), covers the full
+edit-commit lifecycle.
+
+## Option F: Claude Code Read Hook
+
+### How it works
+A `PostToolUse` hook on `Read` calls — announces which files the
+agent is *reading*, not just editing. This is the lightest possible
+signal: "I'm looking at this file" is presence at the attention
+level, not the modification level.
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool_name": "Read"
+      },
+      "command": "aq whisper -c \"${AQ_CONJECTURE:-C-0}\" --claim \"reading\" -f \"$(echo $CLAUDE_TOOL_PARAMS | jq -r '.file_path' 2>/dev/null | xargs realpath --relative-to=. 2>/dev/null)\" 2>/dev/null || true"
+    }
+  ]
+}
+```
+
+Note: uses `aq whisper` (TTL 60s) not `aq announce` (TTL 300s).
+Reading is lower-signal than editing — it should expire faster.
+
+### Properties
+- **Trigger**: Every file read
+- **Daemon**: None
+- **Coverage**: Very high — agents read before they edit
+- **Staleness risk**: Low — reads are current attention
+- **Noise risk**: High — agents read many files they don't modify
+- **Gossip axiom**: Clean — whisper semantics match read intent
+
+### The layered approach
+Reads = whisper (TTL 60s, low priority).
+Edits = announce (TTL 300s, via PostToolUse hook).
+Commits = announce (TTL 300s, via git hooks).
+
+Three layers, increasing commitment. A whisper says "I'm looking."
+An edit-announce says "I'm changing." A commit-announce says "I changed."
+Each layer is independently useful. Combined, they cover the full
+attention-edit-commit lifecycle without a daemon.
+
+## Updated Comparison
+
+| Property | A: PostToolUse | B: watch | C: Heartbeat | D: cd | E: git hooks | F: Read hook |
+|----------|---------------|----------|-------------|-------|-------------|-------------|
+| Trigger | Edit/Write | File Δ | Timer | cd | Commit | Read |
+| TTL | 300s | 300s | 300s | 300s | 300s | 60s (whisper) |
+| Daemon | None | Yes | Minimal | None | None | None |
+| Coverage | Edit-time | Complete | Always | Entry | Commit-time | Read-time |
+| Signal | "I'm changing" | "files changed" | "I'm here" | "I arrived" | "I committed" | "I'm looking" |
+
 ## Recommendation
 
-Start with **A** (PostToolUse) for Claude Code agents — it's the lightest
-weight and fires on actual work. Fall back to **C** (heartbeat) for
-non-Claude agents or when A's coverage gaps matter. Build **B** (watch)
-only if A and C prove insufficient.
+Layer the hooks: **E** (git hooks, already done) + **A** (PostToolUse edits)
++ **F** (Read whispers). Three layers, zero daemons, full lifecycle:
 
-The git hooks (already implemented) handle commit-time presence. PostToolUse
-handles edit-time presence. Together they cover the full work lifecycle
-without a daemon.
+- Read a file → whisper (60s TTL)
+- Edit a file → announce (300s TTL)
+- Commit → announce done (300s TTL)
+
+Fall back to **C** (heartbeat) for non-Claude agents. Build **B** (watch)
+only if the hook-based approach proves insufficient.
 
 ## Test Plan
 
