@@ -1,0 +1,629 @@
+#+TITLE: aq Transport Options
+#+SUBTITLE: Appendix A — Alternatives Considered for the L1.5 Presence Layer
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-13
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:nil
+
+* Purpose
+
+This document is context for agents implementing or extending the =aq=
+transport layer. It catalogs every transport option evaluated, with
+verdicts calibrated against L1.5 requirements.
+
+=spec.org= is the source of truth. This document explains *why* the
+filesystem backend was chosen and what the upgrade path looks like.
+
+* L1.5 Requirements (what aq actually needs)
+
+=aq= sits at Layer 1.5 of the Seven Concerns stack — between =bd= (L1,
+authoritative work state) and =JITIR= (L2, indexed memory). Its job is
+*ambient presence gossip*: agents broadcast what they are working on
+so peers can detect semantic conflicts before hitting the merge wall.
+
+The requirements that determine transport fitness:
+
+| Requirement     | Rationale                                              |
+|-----------------+--------------------------------------------------------|
+| Lossy-ok        | Missed presence update ≠ catastrophe; TTL handles it   |
+| Multicast       | All agents must see all broadcasts, not just one       |
+| Zero orchestrator | No central coordinator; conflict signal emerges from stream |
+| TTL semantics   | Stale entries must expire without manual cleanup       |
+| Zero/low deps   | Must work in a fresh FreeBSD jail or macOS             |
+| Cross-platform  | nexus (FreeBSD/ZFS) + mini (macOS M4) + worktrees      |
+| Latency < 500ms | Pre-push conflict detection; not real-time but not mail |
+
+The "funny name" connection: this is the agentic gossip layer.
+arXiv 2508.01531 and 2512.03285 (Dec 2025) formally propose GEACL
+(Gossip-Enhanced Agentic Coordination Layer) as exactly this substrate.
+=aq= is a concrete implementation of that research agenda.
+=ag= was taken by a Ruby gem (Silver Surfer). =aq= it is.
+
+* Transport Scoring
+
+Scores are 0–100 against L1.5 requirements. Higher = better fit.
+
+| Transport              | L1.5 fit | Latency | Zero-deps | Multicast | Persist | Tier          |
+|------------------------+----------+---------+-----------+-----------+---------+---------------|
+| Filesystem (~/.aq/)    |       95 |      75 |       100 |        80 |      90 | canonical     |
+| NATS                   |       88 |      99 |        70 |        99 |      60 | light broker  |
+| NFS mount              |       72 |      65 |        90 |        80 |      90 | network-fs    |
+| etcd                   |       62 |      90 |        40 |        85 |      95 | k8s-native    |
+| Redis pub/sub          |       68 |      92 |        60 |        95 |      50 | in-memory bus |
+| MQTT (Mosquitto)       |       65 |      80 |        55 |        95 |      70 | IoT pub/sub   |
+| S3 / MinIO             |       58 |      55 |        50 |        75 |      99 | object store  |
+| IRC (miniircd)         |       55 |      70 |        50 |        95 |      30 | text protocol |
+| SMB / Samba            |       55 |      55 |        70 |        80 |      85 | network-fs    |
+| Wave (wave-server)     |       70 |      60 |        35 |        85 |      90 | federated     |
+| WebDAV                 |       50 |      50 |        80 |        70 |      80 | http-fs       |
+| Named FIFO             |       40 |      95 |       100 |        20 |      20 | unix prim.    |
+| /tmp/ shared file      |       35 |      85 |       100 |        70 |      40 | unix prim.    |
+| k8s ConfigMap          |       35 |      40 |        30 |        40 |      70 | anti-pattern  |
+| BBS (Synchronet)       |       45 |      20 |        30 |        75 |      95 | store-fwd     |
+| Email (SMTP/IMAP)      |       15 |       5 |        40 |        60 |      99 | async         |
+| AWS SNS/SQS            |       30 |      65 |        20 |        90 |      85 | cloud         |
+| ggwave (audio)         |       10 |      30 |        40 |        30 |       5 | out-of-band   |
+| Carrier pigeons        |        2 |       1 |        50 |        10 |      80 | avian IP      |
+
+* The TRAMP Principle
+
+From Emacs, any path TRAMP understands is a valid =AQ_HOME=:
+
+#+begin_src elisp :eval no
+;; These all work as aq channel roots
+(setenv "AQ_HOME" "/ssh:nexus:/home/jasonwalsh/.aq")
+(setenv "AQ_HOME" "/docker:aq-agent-1:/tmp/.aq")
+(setenv "AQ_HOME" "/kubernetes:pod/aq-worker:/tmp/.aq")
+(setenv "AQ_HOME" "/s3:aq-presence-bucket:/channels")
+#+end_src
+
+From shell/Python, the equivalent is FUSE — =sshfs=, =rclone mount=, =s3fs=.
+The principle: *any resource:location that can be expressed as a filesystem
+path is a valid aq transport with zero code changes.*
+
+TRAMP protocols relevant to the nexus+mini+k8s mesh:
+
+| TRAMP method | Underlying protocol | Use case                        |
+|--------------+---------------------+---------------------------------|
+| =/ssh:=      | SSH                 | nexus ↔ mini over Tailscale     |
+| =/sftp:=     | SFTP                | same, SFTP semantics            |
+| =/docker:=   | Docker exec         | agents in containers            |
+| =/podman:=   | Podman exec         | rootless containers             |
+| =/kubernetes:= | kubectl exec      | k8s pod agents                  |
+| =/s3:=       | S3 API (tramp-s3)   | cloud agents, MinIO             |
+| =/sudo:=     | local sudo          | privileged jail agents          |
+
+This means the Elisp =emacs-mcp-maximalist= integration gets cross-machine
+=aq= for free — =aq-announce= from Emacs on mini can write to nexus's
+channel directory via TRAMP without any network transport code.
+
+* Transport Details
+
+** Filesystem (~/.aq/) — CANONICAL
+:PROPERTIES:
+:FIT: 95
+:STATUS: current default
+:TAGS: zero-deps freebsd macos linux
+:END:
+
+Write JSON to a directory. Debuggable with =ls= and =cat=.
+
+- *Install*: none
+- *Protocol*: inode watch (fswatch/inotify/kqueue) or poll 100ms
+- *Fanout*: all readers of the dir
+- *Persistence*: until TTL prune
+- *Failure mode*: stale files if agent crashes (TTL handles it)
+- *FreeBSD*: yes — kqueue equivalent
+- *macOS*: yes — FSEvents / fswatch
+
+Verdict: The ADR-001 winner. Failure mode is =cat=. Survives restarts.
+Works in any Bastille jail with a mounted path. Cannot do cross-machine
+without NFS/SSHFS — fine for local presence. The only thing to add:
+=inotifywait= (Linux) or =fswatch= (macOS) wrapper to avoid polling.
+
+** NATS — LIGHT BROKER
+:PROPERTIES:
+:FIT: 88
+:STATUS: upgrade path when cross-machine matters
+:TAGS: broker pub/sub go-binary fast
+:END:
+
+Single 20MB binary. Telnet-able protocol. Sub-millisecond.
+
+- *Install*: =brew install nats-server= / =pkg install nats-server=
+- *Protocol*: NATS wire (text, port 4222)
+- *Fanout*: true pub/sub, wildcards: =agents.>=
+- *Topic shape*: =agents.{repo}.{branch}.presence=
+- *Persistence*: JetStream addon (not needed for presence)
+- *Failure*: daemon dies = no messages (aq degrades to filesystem)
+- *FreeBSD*: yes — single static binary
+- *macOS*: yes
+
+Verdict: Best "real" option for sub-10ms or nexus↔mini coordination.
+A daemon is the only cost. Right upgrade path from filesystem when
+multi-machine presence matters.
+
+** MQTT / Mosquitto — IOT PUB/SUB
+:PROPERTIES:
+:FIT: 65
+:STATUS: viable; already deployed for Meshtastic
+:TAGS: broker pub/sub qos iot retain
+:END:
+
+Designed for lossy networks. QoS 0 = fire and forget (perfect for presence).
+
+- *Install*: =pkg install mosquitto= / =brew install mosquitto=
+- *Protocol*: MQTT 3.1.1/5.0, port 1883 (TLS: 8883)
+- *Topic shape*: =agents/{repo}/{branch}/presence=
+- *Fanout*: true pub/sub with wildcards
+- *Retain flag*: last known state of each agent persists for new subscribers
+- *FreeBSD*: mosquitto in ports
+- *macOS*: brew
+
+Verdict: QoS 0 maps perfectly to presence semantics — lossy-ok.
+The =retain= flag is useful: new subscribers immediately see current
+state without waiting for next broadcast. Already running for Meshtastic
+(=mqtt.meshtastic.org=, seabord channel, =meshdev/large4cats=). Daemon
+required but smaller footprint than NATS.
+
+** IRC / miniircd — TEXT PROTOCOL
+:PROPERTIES:
+:FIT: 55
+:STATUS: viable for human+agent hybrid monitoring
+:TAGS: broker pub/sub text-protocol human-readable
+:END:
+
+Unironically battle-tested. Channels = topics. Telnet-able.
+
+- *Install*: =pip install miniircd= OR =pkg install ngircd=
+- *Protocol*: IRC (RFC 1459/2812), port 6667
+- *Channel shape*: =#aq-presence=
+- *Fanout*: true pub/sub via channels
+- *Persistence*: no — messages lost if disconnected (no queue)
+- *FreeBSD*: ngircd in ports; miniircd single Python file
+- *macOS*: miniircd trivial
+
+Verdict: Genuinely useful for human+agent hybrid monitoring — you can
+=/join #aq-presence= in your IRC client and watch agents announce
+themselves. Missing piece: structured payload (IRC is plaintext).
+Wrap JSON in =PRIVMSG=. Good for Gas Town "town announcements". Had
+this working with miniircd locally.
+
+** Wave / wave-server — FEDERATED COLLAB
+:PROPERTIES:
+:FIT: 70
+:STATUS: spiritual ancestor; inbox API shape worth stealing
+:TAGS: federated json-inbox presence operational-transform
+:END:
+
+Had this running on nexus at =localhost:9898=. Inbox API confirmed working:
+=curl http://localhost:9898/api/inbox= returns digest + creator + unread.
+
+- *Protocol*: Wave protocol — wavelets, blips, inbox API
+- *Inbox API shape*: =[{"id":"domain!wavelet","digest":"...","unread":0,"creator":"agent@host"}]=
+- *Fanout*: participants on a wave; inbox digest
+- *Persistence*: yes — waves persist in server store
+- *FreeBSD*: Python server — should work
+
+Verdict: The spiritual ancestor of =aq=. Wave's key insight was
+*presence as a first-class stream* — you could see where others' cursors
+were, watch them type, replay document history. =aq= applies this to
+multi-agent development without Wave's data model complexity.
+
+Concrete action: steal Wave's inbox API shape for =aq status= output.
+The digest/creator/unread fields map cleanly to conjecture/agent/ttl.
+
+** Named FIFO (mkfifo) — UNIX PRIMITIVE
+:PROPERTIES:
+:FIT: 40
+:STATUS: rejected — fails multicast requirement
+:TAGS: zero-deps unix no-persist single-consumer
+:END:
+
+- *Install*: none — POSIX
+- *Protocol*: kernel pipe via filesystem path
+- *Fatal flaw*: ONE consumer only. Fan-out requires =tee(1)= gymnastics.
+- *Persistence*: none — blocking write if no reader
+
+Verdict: Fails hard on multicast. L1.5 needs all agents to see the
+broadcast, not just one. You end up reinventing a multiplexer — at
+that point just use the filesystem queue. Useful for a single pipe
+(e.g. =aq= → =conflict-watcher= process) but not the bus itself.
+
+** /tmp/ shared file — UNIX PRIMITIVE
+:PROPERTIES:
+:FIT: 35
+:STATUS: rejected — worse than directory approach
+:TAGS: zero-deps racy no-locking
+:END:
+
+- *Fatal flaw*: two writers = torn write without =flock(1)=
+- *Worse than*: the =~/.aq/= directory approach
+
+Verdict: One file means locking AND loss of per-message TTL granularity.
+The directory IS the single-file store, done right. Use
+=/tmp/aq-{ulid}.json= = the filesystem backend. Not a separate transport.
+
+** BBS / Synchronet — RETRO STORE-AND-FORWARD
+:PROPERTIES:
+:FIT: 45
+:STATUS: wrong timescale for conflict detection; right for CPRR digest
+:TAGS: retro fido echomail sysop durable
+:END:
+
+Message bases, netmail, FidoNet echo areas. Genuinely works.
+
+- *Install*: Synchronet (=sbbs=) or WWIV
+- *Protocol*: FidoNet echomail / BinkP transport
+- *Fanout*: echomail = broadcast to all nodes (store-and-forward)
+- *Delivery*: hours, not milliseconds (echoes propagate on schedule)
+- *FreeBSD*: Synchronet compiles on FreeBSD
+
+Verdict: FidoNet was solving exactly this problem in 1984. Echomail =
+fan-out pub/sub with store-and-forward. Wrong for real-time conflict
+detection (delivery in hours). *Right* for daily CPRR conjecture digest
+— "what conjectures were opened/refuted/refined today across all agents."
+Lore extension: agents as sysops, repos as BBSes, worktrees as message
+areas.
+
+** Email (SMTP/IMAP) — ASYNC DELIVERY
+:PROPERTIES:
+:FIT: 15
+:STATUS: correct for CPRR notifications; wrong for presence
+:TAGS: async durable overkill audit-trail
+:END:
+
+Guaranteed delivery, global reach, 500ms–30min latency.
+
+- *Install*: postfix + dovecot OR SMTP relay
+- *Protocol*: SMTP (send) + IMAP (receive)
+
+Verdict: One correct use case: CPRR conjecture resolution notifications.
+"Agent B has refuted your conjecture C-1, see attached diff." Not for
+presence. Latency alone disqualifies it for conflict detection. Also:
+sendmail has been inter-process message passing since 1979.
+
+** AWS SNS/SQS — CLOUD INFRA
+:PROPERTIES:
+:FIT: 30
+:STATUS: viable if agents are in AWS; absurd otherwise
+:TAGS: cloud aws paid internet-required
+:END:
+
+Unlimited scale, millisecond delivery. $0.40 per million.
+
+- *Install*: aws-cli + boto3
+- *Protocol*: HTTPS REST API
+- *Topology*: SNS topic → multiple SQS queues (perfect fan-out shape)
+- *Persistence*: SQS up to 14 days
+
+Verdict: SNS fan-out to SQS queues is exactly the topology =aq= needs.
+Problem: 100–500ms to AWS, internet dependency, cost. Fine if your agents
+are already in AWS. Absurd if they're in a FreeBSD jail on nexus.
+
+** ggwave — OUT-OF-BAND AUDIO
+:PROPERTIES:
+:FIT: 10
+:STATUS: bootstrap handshake only; not a presence transport
+:TAGS: audio out-of-band rfc-vibes
+:END:
+
+Encode data as audio. Two AIs on a phone call detect each other and
+negotiate up to ggwave. We wrote an RFC for this.
+
+- *Install*: =pip install ggwave=
+- *Protocol*: FSK audio modem, ~10–100 bytes/sec
+- *Fanout*: broadcast via speaker (any mic can receive)
+
+Verdict: 10 bytes/sec cannot carry a JSON presence payload. The
+conceptual move is right: out-of-band detection as a channel upgrade
+signal. Correct slot: bootstrap transport for "I am an agent, let's
+negotiate to a real channel." Not a presence bus.
+
+** Carrier Pigeons (RFC 1149) — AVIAN IP
+:PROPERTIES:
+:FIT: 2
+:STATUS: historically grounded; operationally constrained by Logan airspace
+:TAGS: rfc-1149 avian async weather-dependent logan-adjacent
+:END:
+
+IPoAC. Formally specified April 1990. Successfully implemented in
+Bergen, Norway, 2001: 9 packets, 0% packet loss, ~3000s RTT.
+
+- *Protocol*: IP over Avian Carriers (RFC 1149, updated RFC 2549)
+- *Fanout*: one message per bird; flock for multicast
+- *Persistence*: high — birds remember home
+- *Known constraints*: Logan Airport airspace limits East Boston multicast
+- *FreeBSD*: bird training not in ports
+
+Verdict: Suitable for low-frequency CPRR conjecture delivery to
+distributed teams. Not suitable for sub-500ms conflict detection.
+The p99 RTT of ~3000 seconds exceeds the C-001 target by 6 orders of
+magnitude.
+
+* Network Filesystem and Distributed Storage
+
+These are not separate transports — they are the filesystem backend
+with different latency and consistency characteristics. The =aq=
+filesystem implementation works unchanged on any mounted path.
+This is the key architectural insight: =announce()= writes a file,
+=read_active()= lists a directory. Those operations work over NFS,
+SMB, WebDAV, and S3-compatible stores without code changes.
+
+The relevant conjectures:
+- *C-1* already asks whether filesystem round-trip < 100ms; on NFS
+  over Tailscale the answer is likely no at p99.
+- *C-6* (transport abstraction) should explicitly test these mounts.
+
+** NFS — NETWORK FILESYSTEM
+:PROPERTIES:
+:FIT: 72
+:STATUS: viable; natural extension of filesystem backend
+:TAGS: network-fs multi-machine nexus mini zfs
+:END:
+
+Mount =nexus:/aq= on =mini= and both machines share =~/.aq/=.
+
+- *Setup*: =nexus= exports =/aq= via NFS; =mini= mounts it via Tailscale
+- *Protocol*: NFSv4 (stateful, better locking than v3)
+- *Latency*: 1–20ms over Tailscale LAN; p99 degrades under load
+- *Locking*: NFSv4 supports byte-range locks; =aq= file-per-message
+  avoids lock contention (each agent writes a distinct ULID filename)
+- *FreeBSD*: first-class NFS server/client; ZFS + NFS is the canonical
+  nexus storage export pattern
+- *macOS*: native NFS client (=mount_nfs=)
+- *Consistency*: close-to-open; a file written on nexus is visible on
+  mini after the open() on the read side. Sufficient for TTL-bounded
+  presence (300s TTL >> NFS cache coherence window of ~3s).
+
+Verdict: The most natural multi-machine extension of the filesystem
+backend. No code changes to =aq= — just mount the directory. The
+Tailscale mesh already connects nexus and mini; NFS over Tailscale
+is a one-line =fstab= entry. Primary risk: Tailscale blip = mount
+stalls. Mitigation: =soft= mount option + timeout, fall back to local
+=~/.aq/= if mount is unavailable.
+
+#+begin_src bash :eval no
+# nexus: /etc/exports
+/aq -network 100.64.0.0 -mask 255.192.0.0 -maproot=root
+
+# mini: /etc/fstab
+nexus.tail:/aq /Users/jasonwalsh/.aq nfs rw,soft,timeo=5,retrans=2 0 0
+#+end_src
+
+** SMB / Samba — WINDOWS-COMPATIBLE SHARE
+:PROPERTIES:
+:FIT: 55
+:STATUS: works; higher overhead than NFS; useful if Windows agents enter the picture
+:TAGS: network-fs smb samba cross-platform
+:END:
+
+- *Protocol*: SMB2/3 via Samba on FreeBSD
+- *Latency*: 5–30ms; higher overhead than NFS due to session negotiation
+- *Locking*: SMB has mandatory file locking; file-per-message avoids it
+- *FreeBSD*: Samba in ports (=net/samba419=)
+- *macOS*: native SMB client
+- *Use case*: if a Windows-based agent ever joins the mesh
+
+Verdict: No reason to prefer over NFS in a FreeBSD/macOS environment.
+Only wins if Windows machines participate. The locking model is
+stricter than needed — =aq='s file-per-message design sidesteps it.
+
+** WebDAV — HTTP FILESYSTEM
+:PROPERTIES:
+:FIT: 50
+:STATUS: interesting; HTTP means any language, any network
+:TAGS: network-fs http webdav http-accessible
+:END:
+
+Mount the =~/.aq/= directory as a WebDAV share. Any HTTP client can
+read/write presence entries.
+
+- *Protocol*: WebDAV (RFC 4918) over HTTP/HTTPS
+- *Latency*: 10–50ms (HTTP overhead)
+- *FreeBSD*: =www/apache24= with =mod_dav=; or =www/caddy= with WebDAV plugin
+- *macOS*: native WebDAV mount (=mount_webdav=); also =Finder= → Connect to Server
+- *Interesting property*: =curl= is a full =aq= client with no SDK needed
+
+#+begin_src bash :eval no
+# Read all active broadcasts (WebDAV PROPFIND)
+curl -X PROPFIND http://nexus.tail:8080/aq/channels/broadcast/requests/ \
+     -H "Depth: 1"
+
+# Write a broadcast
+curl -T broadcast.json http://nexus.tail:8080/aq/channels/broadcast/requests/aq-$(date +%s)-test.json
+#+end_src
+
+Verdict: The HTTP property makes this uniquely accessible — a shell
+script on any machine with =curl= is a full =aq= client. Interesting
+for non-Python agents (Elisp, Ruby, Go hooks). Latency is higher
+than NFS but acceptable for 300s TTL presence. Worth a spike.
+
+** S3 / MinIO — OBJECT STORAGE
+:PROPERTIES:
+:FIT: 58
+:STATUS: viable; natural fit for distributed/cloud agents; mini runs MinIO
+:TAGS: object-storage s3 minio k8s cloud
+:END:
+
+Each presence entry = one object. Bucket = channel. ListObjects = read_active().
+
+- *Protocol*: S3 API (ListObjectsV2, PutObject, DeleteObject)
+- *Latency*: 5–50ms local MinIO; 20–200ms AWS S3
+- *Consistency*: S3 is eventual for ListObjects; MinIO with strong consistency
+  mode provides read-after-write
+- *Install*: MinIO single binary (=minio server /data=); or use existing
+  MinIO on mini
+- *FreeBSD*: MinIO binary available; or =s3fs-fuse= for transparent mount
+- *macOS*: =s3fs= or =rclone mount=
+
+#+begin_src python :eval no
+# aq S3 transport sketch
+import boto3
+
+s3 = boto3.client('s3', endpoint_url='http://mini.tail:9000',
+                  aws_access_key_id='aq', aws_secret_access_key='aqsecret')
+
+def announce_s3(broadcast, bucket='aq-broadcast'):
+    key = f"requests/aq-{broadcast.id}.json"
+    s3.put_object(Bucket=bucket, Key=key, Body=broadcast.to_json(),
+                  Metadata={'ttl': str(broadcast.ttl)})
+
+def read_active_s3(bucket='aq-broadcast'):
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix='requests/')
+    return [Broadcast.from_json(
+        s3.get_object(Bucket=bucket, Key=o['Key'])['Body'].read()
+    ) for o in resp.get('Contents', [])]
+#+end_src
+
+Verdict: MinIO on =mini= already exists (likely). The S3 API is the
+best-supported object storage interface — every language has a client.
+ListObjectsV2 is the =ls= of the cloud. Prune-on-read (delete expired
+objects in =read_active=) handles TTL. The eventual consistency on
+ListObjects is a genuine concern: a newly announced presence entry
+may not appear for 1–2s on S3; MinIO in strong mode avoids this.
+Natural fit for cloud-hosted agents. Worth adding as Tier 1.5 between
+filesystem and NATS.
+
+** etcd — KUBERNETES KEY-VALUE
+:PROPERTIES:
+:FIT: 62
+:STATUS: correct if running k8s; overkill otherwise
+:TAGS: k8s etcd distributed consistent
+:END:
+
+etcd is the key-value store backing Kubernetes. If agents run in pods,
+etcd is already there.
+
+- *Protocol*: gRPC (etcd v3 API)
+- *Latency*: 1–10ms
+- *Consistency*: linearizable — no eventual consistency issues
+- *Watch API*: native =Watch()= streams changes; no polling needed
+- *TTL*: etcd leases provide TTL natively (key deleted when lease expires)
+- *Install*: already in k8s; standalone =etcd= binary for non-k8s use
+
+#+begin_src python :eval no
+# aq etcd transport sketch — TTL via lease
+import etcd3
+
+client = etcd3.client(host='etcd.cluster.local')
+
+def announce_etcd(broadcast):
+    lease = client.lease(broadcast.ttl)
+    client.put(f'/aq/presence/{broadcast.id}',
+               broadcast.to_json(), lease=lease)
+
+def read_active_etcd():
+    return [Broadcast.from_json(v)
+            for v, _ in client.get_prefix('/aq/presence/')]
+#+end_src
+
+Verdict: etcd leases are the cleanest TTL implementation possible —
+the key literally disappears when the lease expires, no prune-on-read
+needed. The Watch API eliminates polling entirely. If you're running
+k8s for agentic workloads (fault-injection-lab, SEFACA probes), etcd
+is already there. Only awkward in non-k8s environments where running
+etcd standalone feels heavy. The =etcd3= Python client is ~3MB.
+
+** Kubernetes ConfigMap / Annotation
+:PROPERTIES:
+:FIT: 35
+:STATUS: anti-pattern; ConfigMaps are not a message bus
+:TAGS: k8s anti-pattern not-a-bus
+:END:
+
+Some teams use ConfigMap writes as a poor-man's coordination mechanism.
+
+- *Verdict*: Don't. ConfigMaps have a 1MB size limit, no TTL, no watch
+  semantics for new keys (only value changes), and mutating them from
+  pods requires RBAC plumbing. This is the k8s equivalent of the
+  =/tmp/= shared file anti-pattern. If you're in k8s, use etcd directly
+  or NATS with a k8s operator.
+
+** Redis PUBLISH/SUBSCRIBE
+:PROPERTIES:
+:FIT: 68
+:STATUS: underrated; already common infrastructure
+:TAGS: broker pub/sub in-memory fast
+:END:
+
+Redis is often already running. =PUBLISH= / =SUBSCRIBE= is a
+first-class primitive, not a queue hack.
+
+- *Install*: =pkg install redis= / =brew install redis= (single binary)
+- *Protocol*: Redis pub/sub (RESP protocol, port 6379)
+- *Fanout*: true pub/sub; all subscribers on a channel receive all messages
+- *Channel shape*: =aq:presence:{repo}:{branch}=
+- *Persistence*: none by default (=PUBLISH= is fire-and-forget); use
+  Redis Streams (XADD/XREAD) for persistence with TTL
+- *TTL*: Redis Streams with MAXLEN or EXPIRE on presence keys
+- *FreeBSD*: Redis in ports
+- *macOS*: brew
+
+#+begin_src bash :eval no
+# Subscribe (watcher)
+redis-cli SUBSCRIBE 'aq:presence:*'
+
+# Publish (announce)
+redis-cli PUBLISH aq:presence:github.com/jwalsh/aq:feature-auth \
+  '{"agent":"...","conjecture_id":"C-1","files":["auth.ts"]}'
+#+end_src
+
+Verdict: If Redis is already running (common in development stacks),
+this is the lowest-friction upgrade from filesystem. =PUBLISH= has
+no persistence — a missed message is gone — which is correct for
+presence semantics (TTL handles it). Redis Streams add replay if
+needed. Notably: =aq= could use Redis as transport and filesystem as
+fallback with a two-line config change. Underrated in the original
+evaluation.
+
+* Upgrade Path
+
+The transport layer should be a swappable backend behind a common
+=aq.transport= interface. The same =announce(broadcast)= / =read_active()=
+API regardless of whether the underlying store is =~/.aq/=, a NATS
+subject, or a Mosquitto topic.
+
+#+begin_src
+Tier 0 (default):    filesystem (~/.aq/)      — works everywhere, no deps
+Tier 0.5 (mounted):  NFS / SMB / WebDAV       — same code, shared path (AQ_HOME=/mnt/...)
+Tier 1 (local net):  NATS or Redis pub/sub    — when nexus↔mini latency matters
+Tier 1.5 (object):   S3 / MinIO              — cloud or k8s-hosted agents
+Tier 2 (k8s):        etcd                    — already present if running k8s
+Tier 3 (IoT/hybrid): MQTT (Mosquitto)        — already deployed for Meshtastic
+Tier 4 (monitor):    IRC (#aq-presence)       — human+agent hybrid view
+Tier ∞ (ceremony):   BBS echomail            — daily CPRR digest
+#+end_src
+
+Key insight: Tier 0 and Tier 0.5 share *identical* =aq= code. NFS/SMB/WebDAV
+mounts are transparent to =announce()= and =read_active()= — the only
+variable is latency and consistency. Point =AQ_HOME= at the mount:
+=AQ_HOME=/mnt/nexus-aq aq announce --conjecture C-1 ...=
+
+Target conjecture for transport abstraction:
+=C-6: transport abstraction doesn't require API changes to announce() / read_active()=
+
+* Research Context
+
+Two arXiv papers (2025) formally name what =aq= is building:
+
+- *2508.01531* (Aug 2025): "Revisiting Gossip Protocols: A Vision for
+  Emergent Coordination in Agentic Multi-Agent Systems" — identifies
+  gossip as the missing substrate for reflexivity and resilience in MAS.
+
+- *2512.03285* (Dec 2025): Introduces *GEACL* (Gossip-Enhanced Agentic
+  Coordination Layer) — "MCP/A2A handle intent, roles, and tools; gossip
+  maintains weakly consistent situational alignment."
+
+=aq= is a concrete implementation of GEACL running on a single machine
+with CPRR as the semantic payload. Neither paper has a working implementation.
+
+The name "agent gossip" was the natural fit; =ag= is taken by a Ruby gem.
+=aq= works — it can mean "agent queue" publicly and "agent gossip queue"
+internally.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:

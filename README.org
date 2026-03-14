@@ -1,0 +1,391 @@
+#+TITLE: aq --- Ambient Agent Queue
+#+SUBTITLE: Gossip layer (L1.5) for multi-agent development
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-13
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:nil
+
+* Overview
+
+=aq= is a gossip layer for multi-agent development. Agents broadcast
+presence --- which worktree, which conjecture, which files --- via
+filesystem-backed channels so peers detect semantic conflicts before
+they become merge conflicts. It is the mDNS of coding agents:
+"does anyone know this address?" Nobody is required to answer.
+
+=aq= occupies *L1.5* in a seven-concern stack, between =bd= (L1,
+authoritative work state) and =JITIR= (L2, knowledge retrieval).
+Three primitives interlock: =sb= (where am I?), =cprr= (why am I
+here?), =aq= (who else knows?). Broadcasts carry no obligation.
+All expire via TTL. Silence is normal.
+
+#+begin_quote
+aq is gossip, not coordination. Agents broadcast presence; nobody is
+required to listen.
+#+end_quote
+
+** What aq is NOT
+
+- *Not an orchestrator* (Temporal, Airflow, CrewAI) --- orchestrators
+  create coupling and single points of failure. =aq= is peer-to-peer
+  broadcast.
+- *Not a message broker* (Redis, RabbitMQ, NATS) --- brokers require a
+  running service. =aq= degrades to filesystem-only with zero
+  dependencies.
+- *Not Google Wave's OT* (operational transform) --- Wave's value was
+  the ambient presence stream, not the data model. =aq= takes the
+  presence semantics and drops the complexity.
+- *Not a task queue* (Celery, Bull) --- task queues assign work. =aq=
+  does not assign; it broadcasts what agents are already doing.
+
+* Quick Start
+
+#+begin_src bash
+# Build from source (Go)
+make build && make install
+
+# Or use the Python prototype
+PYTHONPATH=src python -m aq.cli announce -c C-1 -f "main.go"
+
+# Initialize the channel directory
+aq init
+
+# Announce what you're working on
+aq announce -c C-1 -f "auth.py,session.py" --phase proof
+
+# Whisper (low-priority, 60s TTL)
+aq whisper -c C-1 -f "readme.md"
+
+# Check for conflicts against active broadcasts
+aq check -c C-2 -f "auth.py"
+
+# See who's broadcasting
+aq status
+
+# Health check
+aq doctor
+#+end_src
+
+The Go port is the target implementation. The Python prototype in
+=src/aq/= is the canonical wire format reference. Both produce and
+consume the same NDJSON files in =~/.aq/channels/broadcast/=.
+
+* Wire Format
+
+** Broadcast payload
+
+Each broadcast is a single JSON object, one per file, newline-terminated:
+
+#+begin_src json
+{
+  "agent": "github.com/jwalsh/aq/feature-auth",
+  "worktree": "feature-auth",
+  "conjecture_id": "C-1",
+  "conjecture_claim": "Filesystem-first transport is sufficient",
+  "phase": "proof",
+  "status": "prosecuting",
+  "files": ["auth.py", "session.py"],
+  "ts": 1741824000.0,
+  "ttl": 300,
+  "id": "01jd5abc12defg3456hi"
+}
+#+end_src
+
+** Schema
+
+| Field              | Type       | Description                            |
+|--------------------+------------+----------------------------------------|
+| =agent=            | string     | ~{remote}/{branch}~ or worktree addr   |
+| =worktree=         | string     | branch name                            |
+| =conjecture_id=    | string     | e.g. ~C-1~                             |
+| =conjecture_claim= | string     | human-readable claim                   |
+| =phase=            | enum       | conjecture / proof / refutation / refinement |
+| =status=           | enum       | prosecuting / done / blocked           |
+| =files=            | list[str]  | files being touched                    |
+| =ts=               | float      | unix timestamp                         |
+| =ttl=              | int        | seconds until expiry (default 300)     |
+| =id=               | string     | ULID                                   |
+
+** Filename format
+
+#+begin_example
+aq-{ts14d}-{ulid}.json
+#+end_example
+
+Files live in =~/.aq/channels/broadcast/requests/=. Expired broadcasts
+are moved to =~/.aq/channels/broadcast/archive/= on read. No daemon
+needed for cleanup --- prune-on-read handles it.
+
+** Lifecycle
+
+1. =announce()= before touching files
+2. Re-announce every ~TTL/2~ while working
+3. =announce(status="done")= when finished
+
+* Three-Primitive Interlock
+
+=aq= does not exist alone. It is the temporal layer in a three-primitive
+system:
+
+| Primitive | Dimension | Question        | Implementation |
+|-----------+-----------+-----------------+----------------|
+| =sb=      | spatial   | where am I?     | git worktree   |
+| =cprr=    | epistemic | why am I here?  | conjecture     |
+| =aq=      | temporal  | who else knows? | broadcast      |
+
+A broadcast payload requires all three: worktree identity (=sb=),
+conjecture context (=cprr=), and the broadcast itself (=aq=). They are
+coupled by design. An agent without spatial context is lost; a broadcast
+without epistemic context is noise; presence without a channel is
+silence.
+
+* Conflict Severity
+
+Three lines of logic, derived from CPRR phase:
+
+#+begin_src
+both proof + shared files = HIGH
+one proof  + shared files = MEDIUM
+neither proof + shared files = LOW
+#+end_src
+
+Two agents in =proof= phase over the same files are actively building
+competing implementations. That is high risk. An agent in =conjecture=
+phase is still planning --- overlap is informational, not urgent.
+
+The exit condition: when one agent announces =status=done=, its
+broadcast stops matching in the next =read_active()= sweep (or expires
+via TTL). Conflict clears itself.
+
+* Transport Tiers
+
+The filesystem is the only required transport. Every feature must work
+with filesystem I/O alone. Higher tiers are upgrade paths, not
+requirements.
+
+| Tier  | Transport              | L1.5 Fit | Notes                                   |
+|-------+------------------------+----------+-----------------------------------------|
+| 0     | Filesystem (~/.aq/)    |       95 | Canonical. Debuggable with =ls= and =cat=. |
+| 0.5   | NFS / SMB / WebDAV     |       50--72 | Same code, just mount and set =AQ_HOME= |
+| 1     | NATS / Redis pub/sub   |    68--88 | When cross-machine latency matters      |
+| 1.5   | S3 / MinIO             |       58 | Cloud or k8s-hosted agents              |
+| 2     | etcd                   |       62 | Already present if running k8s          |
+| 3     | MQTT (Mosquitto)       |       65 | IoT pub/sub; QoS 0 = fire-and-forget   |
+| 4     | IRC (#aq-presence)     |       55 | Human+agent hybrid monitoring           |
+| \infin | BBS echomail           |       45 | Daily CPRR conjecture digest            |
+| ---   | Carrier pigeons        |        2 | p99 RTT of ~3000s exceeds target by 6 orders of magnitude |
+
+Key architectural insight: Tier 0 and Tier 0.5 share /identical/ code.
+NFS, SMB, and WebDAV mounts are transparent to =announce()= and
+=read_active()= --- the only variables are latency and consistency.
+Point =AQ_HOME= at the mount and it works:
+
+#+begin_src bash
+AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
+#+end_src
+
+Full evaluation of all transports, including scoring methodology and
+sketches for NATS, etcd, S3, MQTT, IRC, and BBS implementations:
+[[file:TRANSPORTS.org][TRANSPORTS.org]].
+
+* Position in Seven Concerns
+
+| L   | Concern         | Question                                       | Tool          |
+|-----+-----------------+------------------------------------------------+---------------|
+|   7 | Coordination    | Who does what, in what order?                  | Gastown       |
+|   6 | Instrumentation | Which workflow governs this session?            | Organon       |
+|   5 | Control         | Who is allowed to act, can we prove it?         | SEFACA        |
+|   4 | Validation      | Built right, built correctly?                   | Elenctic-Spec |
+|   3 | Reasoning       | What do we believe, how would we know wrong?    | CPRR          |
+|   2 | Memory          | What do we already know before we re-learn it?  | JITIR         |
+| 1.5 | *Presence*      | *Does anyone know what's happening right now?*  | *aq*          |
+|   1 | Work            | What needs doing, what is its state?            | bd / beads    |
+
+L1 (=bd=) is authoritative --- a bead's state is a fact. L2 (=JITIR=)
+is retrieval --- "I indexed this." L1.5 (=aq=) is neither. A broadcast
+carries no obligation and may expire unread. It answers probabilistically
+about in-flight uncertainty.
+
+The mDNS analogy: L2 is DNS (authoritative, query/response). L1.5 is
+mDNS / Zeroconf / Bonjour (broadcast, "does anyone know this address?").
+The cost is near zero and the benefit when someone /does/ know is
+conflict avoidance before the merge wall.
+
+* Research Context
+
+** GEACL --- Gossip-Enhanced Agentic Coordination Layer
+
+Two arXiv papers landed in 2025 formalizing the gossip substrate for
+multi-agent coordination:
+
+- *arXiv 2508.01531* (Aug 2025) --- "Revisiting Gossip Protocols: A
+  Vision for Emergent Coordination in Agentic Multi-Agent Systems."
+  Identifies gossip as the missing substrate for reflexivity and
+  resilience in MAS. Raises unresolved challenges: semantic filtering,
+  staleness, trustworthiness.
+
+- *arXiv 2512.03285* (Dec 2025) --- Introduces *GEACL*. "MCP/A2A handle
+  intent, roles, and tools; gossip maintains weakly consistent
+  situational alignment." Key insight: context-aware suppression ---
+  safety-critical updates propagate aggressively (=aq announce=);
+  routine updates can be throttled (=aq whisper=).
+
+Neither paper has a working implementation. Both explicitly state "rather
+than proposing a complete framework." =aq= is a concrete instantiation
+of the GEACL research agenda, running on a single machine with CPRR as
+the semantic payload and filesystem as the canonical transport.
+
+The lineage:
+
+#+begin_example
+Gossip protocols (Cassandra/DynamoDB, ~2007)
+    |
+GEACL vision papers (arXiv 2508.01531, 2512.03285 --- 2025)
+    |
+aq --- concrete instantiation:
+    sb    = spatial scope of the gossip
+    cprr  = semantic payload (not just heartbeat, but conjecture)
+    TTL   = knowledge decay / suppression semantics
+    files = conflict surface encoded in the rumor itself
+#+end_example
+
+** Other lineage
+
+- [[https://www.waveprotocol.org/][Google Wave Federation Protocol]] --- presence-as-stream. Wave was
+  trying to build L1.5 for documents. They never framed it that way,
+  which is probably why they couldn't explain what it was for. =aq=
+  takes the presence semantics and drops everything else.
+
+- Lakatos, /Proofs and Refutations/ --- the CPRR methodology
+  (conjecture, proof, refutation, refinement) that structures the
+  semantic payload of every broadcast.
+
+** The gap aq fills
+
+From arXiv 2512.03285:
+
+#+begin_quote
+MCP lacks constructs for collaborative state convergence. There is no
+framework for bottom-up task claiming, bidding, or peer negotiation.
+Swarm-style organization --- patterns such as decentralized delegation,
+emergent clustering, or reflexive adaptation --- are outside its
+specification.
+#+end_quote
+
+=aq= is not trying to replace MCP/A2A. It is the layer beneath them
+that neither defines.
+
+* Open Conjectures
+
+Each conjecture has an explicit refutation criterion. Conjectures
+without measurement are decorative.
+
+- *C-1*: Filesystem-first transport is sufficient.
+  /Refutation/: p99 > 500ms at 10 agents, 100 msg/min.
+  /Measurement/: benchmark latency at load.
+
+- *C-2*: Conjecture identity prevents semantic conflicts.
+  /Refutation/: false negatives on overlapping files with different
+  conjecture IDs.
+  /Measurement/: track false negative rate.
+
+- *C-3*: Wave presence semantics without Wave data model.
+  /Refutation/: NDJSON+TTL cannot express a necessary coordination
+  pattern.
+  /Measurement/: log coordination patterns that the format cannot
+  represent.
+
+- *C-4*: CPRR phase modulates conflict severity.
+  /Refutation/: phase-based severity produces more false positives
+  than flat severity.
+  /Measurement/: compare alert rates between phase-based and flat
+  severity.
+
+* Ecosystem
+
+=aq= is one tool in the DefRecord ecosystem:
+
+| Tool   | Layer | Role                           |
+|--------+-------+--------------------------------|
+| =sb=   | L1.5  | Worktree auditor (spatial)     |
+| =cprr= | L3    | Conjecture tracker (epistemic) |
+| =bd=   | L1    | Bead-based issue tracking      |
+| =JITIR= | L2   | Knowledge retrieval            |
+| =aq=   | L1.5  | Ambient presence gossip        |
+
+Pattern reference for the Go port: =sb= and =cprr= are single-file Go
+CLIs using stdlib only with manual dispatch. =aq= follows the same
+pattern.
+
+* Development
+
+** Build and test
+
+#+begin_src bash
+# Go (target implementation)
+make build            # Build aq binary
+make test             # Run tests
+make test-race        # Run tests with race detector
+make lint             # go vet + fmt check + golangci-lint
+make install          # Install to ~/.local/bin
+
+# Python (prototype, wire format reference)
+PYTHONPATH=src python -c "from aq.protocol import Broadcast"
+PYTHONPATH=src python -m pytest tests/
+#+end_src
+
+** Build order
+
+The build is sequenced with acceptance gates. If a gate fails, stop.
+
+1. Tangle source from =spec.org= --- acceptance: ~from aq.protocol import Broadcast~
+2. Unit tests for protocol --- acceptance: =pytest= passes with 5+ tests
+3. Unit tests for conflict detection --- acceptance: all severity levels covered
+4. CLI smoke test --- acceptance: =aq announce= writes, =aq status= reads
+5. Daemon with filesystem watch --- acceptance: trigger within 1s
+6. Integration: =sb detect= \to =aq announce= --- acceptance: auto-detect worktree
+7. Benchmark at scale --- acceptance: 10 agents, 100 msg/min, p99 < 500ms
+
+** Contributing
+
+- Conventional commits: =feat:=, =fix:=, =docs:=, =refactor:=, =test:=
+- Git notes on every commit with agent metadata (=X-Agent-Role=,
+  =X-Conjectures=, =X-Testing=, etc.) --- see [[file:CLAUDE.md][CLAUDE.md]] for the full
+  template
+- Push notes: ~git push origin refs/notes/commits~
+
+This project is being built by multiple Claude agents in parallel
+worktrees, documenting the experience as it happens. The messy parts are
+intentional. The git history, the notes, the worktree sprawl --- that is
+the data.
+
+** The dogfooding journey
+
+Four agents. Four worktrees. One gossip tool that didn't work yet. They
+tried to build =aq= using =aq=. Highlights:
+
+- All four agents touching =main.go= --- every conflict check returned
+  HIGH. Signal-to-noise ratio: zero. File-overlap detection assumes
+  file-level isolation; single-file repos are the worst case.
+- TTL of 300s meant every broadcast expired while agents were still
+  working. Gossip with amnesia.
+- Agents created their /own/ worktrees instead of using the ones set up
+  for them. The gossip layer had perfect information about the wrong
+  worktrees. Score: Gossip 0, Chaos 1.
+
+Full account: [[file:docs/JOURNEY.md][docs/JOURNEY.md]].
+
+** End-to-end acceptance test
+
+Two agents in separate worktrees. Agent A announces =C-1, phase=proof,
+files=[auth.py]=. Agent B announces =C-7, phase=proof, files=[auth.py]=.
+A watcher reads active broadcasts, detects HIGH conflict (both proof,
+shared file). Both agents receive the conflict signal. Agent A finishes
+and announces =status=done=. Watcher confirms conflict cleared.
+
+This is the system's definition of done.
+
+* License
+
+TODO --- no LICENSE file yet. This is a public repository at
+[[https://github.com/jwalsh/aq][github.com/jwalsh/aq]].
