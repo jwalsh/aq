@@ -1,0 +1,5 @@
+X-Agent-Role: invariants
+X-Conjectures: C-1, C-4 (invariants validate phase and filesystem claims)
+X-Testing: 26 new tests, 59 total, all pass with -race
+X-Invariants: tests cover all 3 layers
+X-Timeline: 2026-03-13T00:00:00Z
