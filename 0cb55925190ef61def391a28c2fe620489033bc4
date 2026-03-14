@@ -1,0 +1,13 @@
+X-Agent-Role: bootstrap
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Deviations: none
+X-Testing: go build OK, go vet OK, health check 7/7 hard pass
+X-Notes: Handoff to aygp-dr (Aidan Pace, apace@defrecord.com) on mini
+  (Darwin 25.3.0, arm64). Go stub compiles and prints usage. Makefile
+  has all standard targets. .gitignore covers secrets (.env, *.pem,
+  *.key, credentials.json, .secrets/). AGENTS.md has onboarding,
+  security practices, commit conventions with X- trailer git notes.
+  Primary deliverable: bead aq-os0 (Go port). bd ready shows step 1
+  as unblocked. Explored steveyegge/beads and steveyegge/gastown for
+  ecosystem context.
