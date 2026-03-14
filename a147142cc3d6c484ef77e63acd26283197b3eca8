@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: aq-os0
+X-Conjectures: none
+X-Testing: n/a (config only)
+X-Invariants: worktrees/ excluded from version control
+X-Deviations: none
+X-Timeline: step 1 of 5 (stacked commits for Go port)
