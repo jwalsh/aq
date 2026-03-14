@@ -950,54 +950,109 @@ func checkConflicts(me Broadcast, channel string) ([]ConflictSignal, error) {
 
 // ---------- CLI commands ----------
 
-// cmdAnnounce broadcasts presence with the given parameters.
-func cmdAnnounce(args []string) int {
-	var (
-		conjecture string
-		files      string
-		claim      string
-		phase      = "proof"
-		status     = "prosecuting"
-		ttl        = DefaultTTL
-		validate   bool
-	)
+// announceParams holds the parsed arguments for the announce command.
+type announceParams struct {
+	conjecture string
+	files      string
+	claim      string
+	phase      string
+	status     string
+	ttl        int
+	validate   bool
+	showHelp   bool
+}
 
+// consumeArg returns the next argument value and advances the index, or returns
+// the fallback if no next argument exists.
+func consumeArg(args []string, i *int, fallback string) string {
+	if *i+1 < len(args) {
+		*i++
+		return args[*i]
+	}
+	return fallback
+}
+
+// parseAnnounceArgs parses the argument list for the announce subcommand.
+func parseAnnounceArgs(args []string) announceParams {
+	p := announceParams{
+		phase:  "proof",
+		status: "prosecuting",
+		ttl:    DefaultTTL,
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-c", "--conjecture":
-			if i+1 < len(args) {
-				conjecture = args[i+1]
-				i++
-			}
+			p.conjecture = consumeArg(args, &i, p.conjecture)
 		case "-f", "--files":
-			if i+1 < len(args) {
-				files = args[i+1]
-				i++
-			}
+			p.files = consumeArg(args, &i, p.files)
 		case "--claim":
-			if i+1 < len(args) {
-				claim = args[i+1]
-				i++
-			}
+			p.claim = consumeArg(args, &i, p.claim)
 		case "--phase":
-			if i+1 < len(args) {
-				phase = args[i+1]
-				i++
-			}
+			p.phase = consumeArg(args, &i, p.phase)
 		case "--status":
-			if i+1 < len(args) {
-				status = args[i+1]
-				i++
-			}
+			p.status = consumeArg(args, &i, p.status)
 		case "--ttl":
-			if i+1 < len(args) {
-				fmt.Sscanf(args[i+1], "%d", &ttl)
-				i++
-			}
+			fmt.Sscanf(consumeArg(args, &i, ""), "%d", &p.ttl)
 		case "--validate":
-			validate = true
+			p.validate = true
 		case "-h", "--help":
-			fmt.Print(`aq announce — broadcast presence
+			p.showHelp = true
+		}
+	}
+	return p
+}
+
+// parseFileList splits a comma-separated file string into a slice, trimming whitespace.
+func parseFileList(files string) []string {
+	if files == "" {
+		return nil
+	}
+	var result []string
+	for _, f := range strings.Split(files, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// buildAnnounceBroadcast constructs a Broadcast from parsed announce parameters.
+func buildAnnounceBroadcast(p announceParams) Broadcast {
+	sb := detectSandbox()
+	claim := p.claim
+	if claim == "" {
+		claim = "working on " + p.conjecture
+	}
+	b := NewBroadcast()
+	b.Agent = sb.AgentAddress
+	b.Worktree = sb.Branch
+	b.ConjectureID = p.conjecture
+	b.ConjectureClaim = claim
+	b.Phase = p.phase
+	b.Status = p.status
+	b.Files = parseFileList(p.files)
+	b.TTL = p.ttl
+	return b
+}
+
+// runPreFlightValidation runs advisory invariant checks and prints results.
+func runPreFlightValidation(b Broadcast) {
+	results := runSelfChecks(b)
+	errs, warns := countFailures(results)
+	if !jsonOutput {
+		fmt.Println("pre-flight checks:")
+		printInvariantResults(results, false)
+		if errs > 0 || warns > 0 {
+			fmt.Printf("  %d error(s), %d warning(s) — announcing anyway (gossip is advisory)\n", errs, warns)
+		}
+		fmt.Println()
+	}
+}
+
+// printAnnounceHelp prints the usage text for the announce subcommand.
+func printAnnounceHelp() {
+	fmt.Print(`aq announce — broadcast presence
 
 Usage: aq announce -c <conjecture> [options]
 
@@ -1011,54 +1066,26 @@ Options:
   --validate               Run pre-flight invariant checks (advisory, never blocks)
   -h, --help               Show this help
 `)
-			return 0
-		}
+}
+
+// cmdAnnounce broadcasts presence with the given parameters.
+func cmdAnnounce(args []string) int {
+	p := parseAnnounceArgs(args)
+
+	if p.showHelp {
+		printAnnounceHelp()
+		return 0
 	}
 
-	if conjecture == "" {
+	if p.conjecture == "" {
 		fmt.Fprintln(os.Stderr, "error: --conjecture (-c) is required")
 		return 1
 	}
 
-	if claim == "" {
-		claim = "working on " + conjecture
-	}
+	b := buildAnnounceBroadcast(p)
 
-	var fileList []string
-	if files != "" {
-		for _, f := range strings.Split(files, ",") {
-			f = strings.TrimSpace(f)
-			if f != "" {
-				fileList = append(fileList, f)
-			}
-		}
-	}
-
-	sb := detectSandbox()
-
-	b := NewBroadcast()
-	b.Agent = sb.AgentAddress
-	b.Worktree = sb.Branch
-	b.ConjectureID = conjecture
-	b.ConjectureClaim = claim
-	b.Phase = phase
-	b.Status = status
-	b.Files = fileList
-	b.TTL = ttl
-
-	// Run pre-flight invariant checks if --validate is set.
-	// Invariants are advisory: they print warnings but never block the announce.
-	if validate {
-		results := runSelfChecks(b)
-		errs, warns := countFailures(results)
-		if !jsonOutput {
-			fmt.Println("pre-flight checks:")
-			printInvariantResults(results, false)
-			if errs > 0 || warns > 0 {
-				fmt.Printf("  %d error(s), %d warning(s) — announcing anyway (gossip is advisory)\n", errs, warns)
-			}
-			fmt.Println()
-		}
+	if p.validate {
+		runPreFlightValidation(b)
 	}
 
 	path, err := writeBroadcast(b, channelName)
@@ -1092,76 +1119,53 @@ func cmdWhisper(args []string) int {
 	return cmdAnnounce(args)
 }
 
-// cmdCheck checks for conflicts against active broadcasts.
-func cmdCheck(args []string) int {
-	var (
-		conjecture string
-		files      string
-		phase      = "proof"
-	)
+// checkParams holds the parsed arguments for the check command.
+type checkParams struct {
+	conjecture string
+	files      string
+	phase      string
+	showHelp   bool
+}
 
+// parseCheckArgs parses the argument list for the check subcommand.
+func parseCheckArgs(args []string) checkParams {
+	p := checkParams{
+		phase: "proof",
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-c", "--conjecture":
-			if i+1 < len(args) {
-				conjecture = args[i+1]
-				i++
-			}
+			p.conjecture = consumeArg(args, &i, p.conjecture)
 		case "-f", "--files":
-			if i+1 < len(args) {
-				files = args[i+1]
-				i++
-			}
+			p.files = consumeArg(args, &i, p.files)
 		case "--phase":
-			if i+1 < len(args) {
-				phase = args[i+1]
-				i++
-			}
+			p.phase = consumeArg(args, &i, p.phase)
 		case "-h", "--help":
-			fmt.Print(`aq check — check for conflicts with active broadcasts
-
-Usage: aq check [options]
-
-Options:
-  -c, --conjecture <id>    Conjecture ID (default: C-?)
-  -f, --files <list>       Comma-separated file list
-  --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
-  -h, --help               Show this help
-`)
-			return 0
+			p.showHelp = true
 		}
 	}
+	return p
+}
 
+// buildCheckBroadcast constructs a Broadcast representing the current agent for conflict checking.
+func buildCheckBroadcast(p checkParams) Broadcast {
+	conjecture := p.conjecture
 	if conjecture == "" {
 		conjecture = "C-?"
 	}
-
-	var fileList []string
-	if files != "" {
-		for _, f := range strings.Split(files, ",") {
-			f = strings.TrimSpace(f)
-			if f != "" {
-				fileList = append(fileList, f)
-			}
-		}
-	}
-
 	sb := detectSandbox()
-
 	me := NewBroadcast()
 	me.Agent = sb.AgentAddress
 	me.Worktree = sb.Branch
 	me.ConjectureID = conjecture
-	me.Phase = phase
+	me.Phase = p.phase
 	me.Status = "prosecuting"
-	me.Files = fileList
+	me.Files = parseFileList(p.files)
+	return me
+}
 
-	signals, err := checkConflicts(me, channelName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-
+// outputConflictSignals prints conflict signals and returns the appropriate exit code.
+func outputConflictSignals(signals []ConflictSignal) int {
 	if len(signals) == 0 {
 		if jsonOutput {
 			fmt.Println("[]")
@@ -1186,6 +1190,35 @@ Options:
 		}
 	}
 	return 0
+}
+
+// cmdCheck checks for conflicts against active broadcasts.
+func cmdCheck(args []string) int {
+	p := parseCheckArgs(args)
+
+	if p.showHelp {
+		fmt.Print(`aq check — check for conflicts with active broadcasts
+
+Usage: aq check [options]
+
+Options:
+  -c, --conjecture <id>    Conjecture ID (default: C-?)
+  -f, --files <list>       Comma-separated file list
+  --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
+  -h, --help               Show this help
+`)
+		return 0
+	}
+
+	me := buildCheckBroadcast(p)
+
+	signals, err := checkConflicts(me, channelName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	return outputConflictSignals(signals)
 }
 
 // cmdStatus lists active broadcasts.
