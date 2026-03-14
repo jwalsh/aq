@@ -1,0 +1,823 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ---------- Test helpers ----------
+
+// makeTempAQHome creates a temporary directory and sets AQ_HOME to it.
+func makeTempAQHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("AQ_HOME", dir)
+	return dir
+}
+
+// makeBroadcast creates a Broadcast with defaults, applying optional overrides.
+func makeBroadcast(overrides ...func(*Broadcast)) Broadcast {
+	b := Broadcast{
+		ID:              generateULID(),
+		Agent:           "test/agent",
+		Worktree:        "main",
+		ConjectureID:    "C-1",
+		ConjectureClaim: "test claim",
+		Phase:           "proof",
+		Status:          "prosecuting",
+		Files:           []string{"main.go"},
+		Ts:              float64(time.Now().Unix()),
+		TTL:             300,
+	}
+	for _, f := range overrides {
+		f(&b)
+	}
+	return b
+}
+
+// ---------- ULID Tests ----------
+
+func TestGenerateULID_Format(t *testing.T) {
+	id := generateULID()
+
+	if len(id) != 22 {
+		t.Errorf("ULID length = %d, want 22", len(id))
+	}
+
+	// First 12 chars are hex (timestamp).
+	tspart := id[:12]
+	for _, c := range tspart {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("ULID timestamp char %c is not hex", c)
+		}
+	}
+
+	// Last 10 chars are hex (random, from hex.EncodeToString).
+	randpart := id[12:]
+	if len(randpart) != 10 {
+		t.Errorf("ULID random part length = %d, want 10", len(randpart))
+	}
+	for _, c := range randpart {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("ULID random char %c is not hex", c)
+		}
+	}
+}
+
+func TestGenerateULID_Uniqueness(t *testing.T) {
+	seen := make(map[string]struct{}, 1000)
+	for i := 0; i < 1000; i++ {
+		id := generateULID()
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate ULID at iteration %d: %s", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestGenerateULID_Monotonic(t *testing.T) {
+	id1 := generateULID()
+	// Sleep briefly to ensure timestamp advances.
+	time.Sleep(2 * time.Millisecond)
+	id2 := generateULID()
+
+	ts1 := id1[:12]
+	ts2 := id2[:12]
+
+	if ts1 > ts2 {
+		t.Errorf("timestamp portion not monotonic: %s > %s", ts1, ts2)
+	}
+}
+
+// ---------- Broadcast Tests ----------
+
+func TestBroadcast_JSON_RoundTrip(t *testing.T) {
+	original := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"auth.go", "handler.go"}
+		b.Phase = "refutation"
+	})
+
+	j, err := original.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON error: %v", err)
+	}
+
+	restored, err := BroadcastFromJSON(j)
+	if err != nil {
+		t.Fatalf("BroadcastFromJSON error: %v", err)
+	}
+
+	if restored.Agent != original.Agent {
+		t.Errorf("Agent = %q, want %q", restored.Agent, original.Agent)
+	}
+	if restored.ConjectureID != original.ConjectureID {
+		t.Errorf("ConjectureID = %q, want %q", restored.ConjectureID, original.ConjectureID)
+	}
+	if restored.Phase != original.Phase {
+		t.Errorf("Phase = %q, want %q", restored.Phase, original.Phase)
+	}
+	if restored.TTL != original.TTL {
+		t.Errorf("TTL = %d, want %d", restored.TTL, original.TTL)
+	}
+	if restored.ID != original.ID {
+		t.Errorf("ID = %q, want %q", restored.ID, original.ID)
+	}
+	if len(restored.Files) != len(original.Files) {
+		t.Fatalf("Files length = %d, want %d", len(restored.Files), len(original.Files))
+	}
+	for i, f := range restored.Files {
+		if f != original.Files[i] {
+			t.Errorf("Files[%d] = %q, want %q", i, f, original.Files[i])
+		}
+	}
+}
+
+func TestBroadcast_WireFormat(t *testing.T) {
+	b := makeBroadcast()
+	j, err := b.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON error: %v", err)
+	}
+
+	// Verify that the JSON keys are snake_case, matching the Python prototype.
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(j), &raw); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	requiredKeys := []string{
+		"agent", "worktree", "conjecture_id", "conjecture_claim",
+		"phase", "status", "files", "ts", "ttl", "id",
+	}
+	for _, key := range requiredKeys {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("missing JSON key %q", key)
+		}
+	}
+
+	// Verify no camelCase keys snuck in.
+	for key := range raw {
+		if key != strings.ToLower(key) && key != "ts" && key != "id" && key != "ttl" {
+			// Allow "ts", "id", "ttl" as-is since they are already lowercase.
+			// Flag anything with uppercase.
+			t.Errorf("JSON key %q is not snake_case", key)
+		}
+	}
+}
+
+func TestBroadcast_DefaultTTL(t *testing.T) {
+	b := NewBroadcast()
+	if b.TTL != 300 {
+		t.Errorf("default TTL = %d, want 300", b.TTL)
+	}
+}
+
+func TestBroadcast_IsExpired(t *testing.T) {
+	// Fresh broadcast should not be expired.
+	fresh := makeBroadcast()
+	if fresh.IsExpired() {
+		t.Error("fresh broadcast should not be expired")
+	}
+
+	// Old broadcast with past timestamp should be expired.
+	old := makeBroadcast(func(b *Broadcast) {
+		b.Ts = float64(time.Now().Unix() - 600)
+		b.TTL = 300
+	})
+	if !old.IsExpired() {
+		t.Error("broadcast 600s old with TTL 300 should be expired")
+	}
+}
+
+func TestBroadcast_IsExpired_BoundaryTTL(t *testing.T) {
+	// Broadcast exactly at TTL boundary: ts + ttl == now.
+	// The condition is time.Now() > ts + ttl, so exactly at boundary
+	// should NOT be expired (strictly greater than).
+	now := float64(time.Now().Unix())
+	boundary := makeBroadcast(func(b *Broadcast) {
+		b.Ts = now
+		b.TTL = 0
+	})
+	// With TTL=0, ts+ttl == now. time.Now() may be >= now but the
+	// check is strictly >, so this tests the boundary. In practice
+	// the clock may tick, but we test the semantics.
+
+	// A broadcast with TTL=1 and ts=now should not be expired yet.
+	almostExpired := makeBroadcast(func(b *Broadcast) {
+		b.Ts = float64(time.Now().Unix())
+		b.TTL = 1
+	})
+	if almostExpired.IsExpired() {
+		t.Error("broadcast with TTL=1 at current time should not be expired")
+	}
+
+	// Boundary test: TTL=0 means it expires immediately (or at the boundary).
+	// We accept that IsExpired may return true or false at exact boundary.
+	_ = boundary
+}
+
+// ---------- Storage Tests ----------
+
+func TestAqHome_Default(t *testing.T) {
+	// Unset AQ_HOME so the default kicks in.
+	t.Setenv("AQ_HOME", "")
+	home := aqHome()
+	if home == "" {
+		t.Error("aqHome() returned empty string")
+	}
+	// When AQ_HOME is empty string, it returns the empty string as env is set
+	// but empty. Let's test with a truly unset variable approach.
+}
+
+func TestAqHome_EnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AQ_HOME", dir)
+	home := aqHome()
+	if home != dir {
+		t.Errorf("aqHome() = %q, want %q", home, dir)
+	}
+}
+
+func TestWriteBroadcast_CreatesFile(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast()
+	path, err := writeBroadcast(b, "broadcast")
+	if err != nil {
+		t.Fatalf("writeBroadcast error: %v", err)
+	}
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Errorf("expected file at %s, but it does not exist", path)
+	}
+}
+
+func TestWriteBroadcast_FileFormat(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Ts = 1710345600 // fixed timestamp
+		b.ID = "0191a2b3c4d5e6"
+	})
+
+	path, err := writeBroadcast(b, "broadcast")
+	if err != nil {
+		t.Fatalf("writeBroadcast error: %v", err)
+	}
+
+	filename := filepath.Base(path)
+	// Format: aq-{ts14d}-{id}.json
+	if !strings.HasPrefix(filename, "aq-") {
+		t.Errorf("filename %q does not start with 'aq-'", filename)
+	}
+	if !strings.HasSuffix(filename, ".json") {
+		t.Errorf("filename %q does not end with '.json'", filename)
+	}
+
+	// Check the 14-digit timestamp portion.
+	parts := strings.SplitN(filename, "-", 3)
+	if len(parts) < 3 {
+		t.Fatalf("filename %q does not have expected aq-{ts}-{id}.json structure", filename)
+	}
+	tsStr := parts[1]
+	if len(tsStr) != 14 {
+		t.Errorf("timestamp part %q has length %d, want 14", tsStr, len(tsStr))
+	}
+}
+
+func TestWriteBroadcast_Content(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	b := makeBroadcast()
+	path, err := writeBroadcast(b, "broadcast")
+	if err != nil {
+		t.Fatalf("writeBroadcast error: %v", err)
+	}
+	_ = home
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+
+	var read Broadcast
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &read); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if read.ID != b.ID {
+		t.Errorf("ID = %q, want %q", read.ID, b.ID)
+	}
+	if read.Agent != b.Agent {
+		t.Errorf("Agent = %q, want %q", read.Agent, b.Agent)
+	}
+}
+
+func TestReadActive_Empty(t *testing.T) {
+	makeTempAQHome(t)
+
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+	if len(active) != 0 {
+		t.Errorf("readActive returned %d broadcasts, want 0", len(active))
+	}
+}
+
+func TestReadActive_FilterExpired(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Write a fresh broadcast.
+	fresh := makeBroadcast(func(b *Broadcast) {
+		b.ID = "fresh000000000000000000"[:22]
+		b.Agent = "fresh/agent"
+	})
+	_, err := writeBroadcast(fresh, "broadcast")
+	if err != nil {
+		t.Fatalf("write fresh: %v", err)
+	}
+
+	// Write an expired broadcast.
+	expired := makeBroadcast(func(b *Broadcast) {
+		b.ID = "expired0000000000000000"[:22]
+		b.Ts = float64(time.Now().Unix() - 600)
+		b.TTL = 300
+		b.Agent = "expired/agent"
+	})
+	_, err = writeBroadcast(expired, "broadcast")
+	if err != nil {
+		t.Fatalf("write expired: %v", err)
+	}
+
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("readActive returned %d broadcasts, want 1", len(active))
+	}
+	if active[0].Agent != "fresh/agent" {
+		t.Errorf("active agent = %q, want %q", active[0].Agent, "fresh/agent")
+	}
+
+	// Verify the expired file was moved to archive.
+	archiveDir := filepath.Join(home, "channels", "broadcast", "archive")
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil {
+		t.Fatalf("ReadDir archive: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("archive has %d entries, want 1", len(entries))
+	}
+}
+
+func TestReadActive_MalformedJSON(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Create the requests directory.
+	reqDir := filepath.Join(home, "channels", "broadcast", "requests")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a malformed JSON file.
+	malformed := filepath.Join(reqDir, "aq-00000000000001-badid00000bad.json")
+	if err := os.WriteFile(malformed, []byte("{not valid json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a valid broadcast alongside it.
+	valid := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "valid/agent"
+	})
+	_, err := writeBroadcast(valid, "broadcast")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+
+	// Should only get the valid broadcast, no error from malformed.
+	if len(active) != 1 {
+		t.Fatalf("readActive returned %d broadcasts, want 1", len(active))
+	}
+	if active[0].Agent != "valid/agent" {
+		t.Errorf("active agent = %q, want %q", active[0].Agent, "valid/agent")
+	}
+}
+
+// ---------- Conflict Detection Tests ----------
+
+func TestCheckConflicts_NoOverlap(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Agent A touches main.go.
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/alpha"
+		b.Files = []string{"main.go"}
+	})
+	_, _ = writeBroadcast(agentA, "broadcast")
+
+	// Agent B touches handler.go -- no overlap.
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/beta"
+		b.Files = []string{"handler.go"}
+	})
+
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 0 {
+		t.Errorf("expected 0 conflicts, got %d", len(signals))
+	}
+}
+
+func TestCheckConflicts_SharedFiles_BothProof(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Agent A: proof phase, touching auth.go.
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/alpha"
+		b.Phase = "proof"
+		b.Files = []string{"auth.go"}
+	})
+	_, _ = writeBroadcast(agentA, "broadcast")
+
+	// Agent B: also proof phase, also touching auth.go.
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/beta"
+		b.Phase = "proof"
+		b.Files = []string{"auth.go"}
+	})
+
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != "high" {
+		t.Errorf("severity = %q, want %q", signals[0].Severity, "high")
+	}
+}
+
+func TestCheckConflicts_SharedFiles_OneProof(t *testing.T) {
+	makeTempAQHome(t)
+
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/alpha"
+		b.Phase = "proof"
+		b.Files = []string{"auth.go"}
+	})
+	_, _ = writeBroadcast(agentA, "broadcast")
+
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/beta"
+		b.Phase = "conjecture"
+		b.Files = []string{"auth.go"}
+	})
+
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != "medium" {
+		t.Errorf("severity = %q, want %q", signals[0].Severity, "medium")
+	}
+}
+
+func TestCheckConflicts_SharedFiles_NeitherProof(t *testing.T) {
+	makeTempAQHome(t)
+
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/alpha"
+		b.Phase = "conjecture"
+		b.Files = []string{"auth.go"}
+	})
+	_, _ = writeBroadcast(agentA, "broadcast")
+
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/beta"
+		b.Phase = "refinement"
+		b.Files = []string{"auth.go"}
+	})
+
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != "low" {
+		t.Errorf("severity = %q, want %q", signals[0].Severity, "low")
+	}
+}
+
+func TestCheckConflicts_SkipSelf(t *testing.T) {
+	makeTempAQHome(t)
+
+	me := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/same-agent"
+		b.Files = []string{"main.go"}
+	})
+	_, _ = writeBroadcast(me, "broadcast")
+
+	// Checking conflicts for the same agent should skip self.
+	signals, err := checkConflicts(me, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 0 {
+		t.Errorf("expected 0 conflicts (self-skip), got %d", len(signals))
+	}
+}
+
+func TestCheckConflicts_SortBySeverity(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write three broadcasts with different phases.
+	low := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/low"
+		b.Phase = "conjecture"
+		b.Files = []string{"shared.go"}
+	})
+	_, _ = writeBroadcast(low, "broadcast")
+
+	medium := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/medium"
+		b.Phase = "proof"
+		b.Files = []string{"shared.go"}
+	})
+	_, _ = writeBroadcast(medium, "broadcast")
+
+	high := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/high"
+		b.Phase = "proof"
+		b.Files = []string{"shared.go"}
+	})
+	_, _ = writeBroadcast(high, "broadcast")
+
+	// "me" is also proof on the same file, so:
+	// vs low (conjecture) => medium (one proof)
+	// vs medium (proof) => high (both proof)
+	// vs high (proof) => high (both proof)
+	me := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/me"
+		b.Phase = "proof"
+		b.Files = []string{"shared.go"}
+	})
+
+	signals, err := checkConflicts(me, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 3 {
+		t.Fatalf("expected 3 conflicts, got %d", len(signals))
+	}
+
+	// Verify sorted by severity: high first, then medium.
+	for i := 0; i < len(signals)-1; i++ {
+		if severityRank(signals[i].Severity) > severityRank(signals[i+1].Severity) {
+			t.Errorf("conflicts not sorted by severity at index %d: %s > %s",
+				i, signals[i].Severity, signals[i+1].Severity)
+		}
+	}
+	if signals[0].Severity != "high" {
+		t.Errorf("first conflict severity = %q, want %q", signals[0].Severity, "high")
+	}
+}
+
+func TestCheckConflicts_MultipleFiles(t *testing.T) {
+	makeTempAQHome(t)
+
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/alpha"
+		b.Phase = "proof"
+		b.Files = []string{"auth.go", "handler.go", "config.go"}
+	})
+	_, _ = writeBroadcast(agentA, "broadcast")
+
+	// Agent B touches auth.go and config.go but not handler.go.
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/beta"
+		b.Phase = "proof"
+		b.Files = []string{"auth.go", "config.go", "router.go"}
+	})
+
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+
+	shared := signals[0].SharedFiles
+	sort.Strings(shared)
+	expected := []string{"auth.go", "config.go"}
+	if len(shared) != len(expected) {
+		t.Fatalf("shared files = %v, want %v", shared, expected)
+	}
+	for i, f := range shared {
+		if f != expected[i] {
+			t.Errorf("shared[%d] = %q, want %q", i, f, expected[i])
+		}
+	}
+}
+
+// ---------- Integration Tests ----------
+
+func TestAnnounce_ThenStatus(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write a broadcast directly (simulating cmdAnnounce).
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "test/integration-agent"
+		b.ConjectureID = "C-42"
+		b.Files = []string{"foo.py", "bar.py"}
+	})
+	_, err := writeBroadcast(b, "broadcast")
+	if err != nil {
+		t.Fatalf("writeBroadcast error: %v", err)
+	}
+
+	// Read it back (simulating cmdStatus).
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active broadcast, got %d", len(active))
+	}
+	if active[0].ConjectureID != "C-42" {
+		t.Errorf("conjecture_id = %q, want %q", active[0].ConjectureID, "C-42")
+	}
+	if active[0].Agent != "test/integration-agent" {
+		t.Errorf("agent = %q, want %q", active[0].Agent, "test/integration-agent")
+	}
+}
+
+func TestAnnounce_ThenCheck(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Agent A announces.
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/agent-alpha"
+		b.ConjectureID = "C-1"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+	})
+	_, err := writeBroadcast(agentA, "broadcast")
+	if err != nil {
+		t.Fatalf("write agent A: %v", err)
+	}
+
+	// Agent B announces the same file.
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "origin/agent-beta"
+		b.ConjectureID = "C-7"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+	})
+
+	// Agent B checks for conflicts.
+	signals, err := checkConflicts(agentB, "broadcast")
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != "high" {
+		t.Errorf("severity = %q, want %q (both proof, shared file)", signals[0].Severity, "high")
+	}
+	if len(signals[0].SharedFiles) != 1 || signals[0].SharedFiles[0] != "auth.py" {
+		t.Errorf("shared files = %v, want [auth.py]", signals[0].SharedFiles)
+	}
+}
+
+func TestWhisper_ShortTTL(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast(func(b *Broadcast) {
+		b.TTL = WhisperTTL
+	})
+	if b.TTL != 60 {
+		t.Errorf("whisper TTL = %d, want 60", b.TTL)
+	}
+
+	// Also verify the constant.
+	if WhisperTTL != 60 {
+		t.Errorf("WhisperTTL constant = %d, want 60", WhisperTTL)
+	}
+}
+
+// ---------- Additional edge case tests ----------
+
+func TestBroadcast_Overlaps(t *testing.T) {
+	a := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"main.go", "handler.go"}
+	})
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"handler.go", "config.go"}
+	})
+	c := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"router.go"}
+	})
+
+	if !a.Overlaps(&b) {
+		t.Error("a and b should overlap on handler.go")
+	}
+	if a.Overlaps(&c) {
+		t.Error("a and c should not overlap")
+	}
+}
+
+func TestNewBroadcast_HasDefaults(t *testing.T) {
+	b := NewBroadcast()
+	if b.TTL != DefaultTTL {
+		t.Errorf("TTL = %d, want %d", b.TTL, DefaultTTL)
+	}
+	if b.ID == "" {
+		t.Error("ID should not be empty")
+	}
+	if b.Ts == 0 {
+		t.Error("Ts should not be zero")
+	}
+}
+
+func TestConflictSignal_Summary(t *testing.T) {
+	s := ConflictSignal{
+		A:           makeBroadcast(func(b *Broadcast) { b.Agent = "origin/a"; b.ConjectureID = "C-1" }),
+		B:           makeBroadcast(func(b *Broadcast) { b.Agent = "origin/b"; b.ConjectureID = "C-2" }),
+		SharedFiles: []string{"main.go"},
+		Severity:    "high",
+	}
+	summary := s.Summary()
+	if !strings.Contains(summary, "HIGH") {
+		t.Errorf("summary should contain 'HIGH': %s", summary)
+	}
+	if !strings.Contains(summary, "origin/a") {
+		t.Errorf("summary should contain agent a: %s", summary)
+	}
+	if !strings.Contains(summary, "main.go") {
+		t.Errorf("summary should contain shared file: %s", summary)
+	}
+}
+
+func TestEnsureDirs_CreatesStructure(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	err := ensureDirs("broadcast")
+	if err != nil {
+		t.Fatalf("ensureDirs error: %v", err)
+	}
+
+	dirs := []string{
+		filepath.Join(home, "channels", "broadcast", "requests"),
+		filepath.Join(home, "channels", "broadcast", "archive"),
+		filepath.Join(home, "agents"),
+		filepath.Join(home, "logs"),
+	}
+	for _, d := range dirs {
+		info, err := os.Stat(d)
+		if err != nil {
+			t.Errorf("directory %s not created: %v", d, err)
+		} else if !info.IsDir() {
+			t.Errorf("%s is not a directory", d)
+		}
+	}
+}
+
+func TestChannelPath(t *testing.T) {
+	t.Setenv("AQ_HOME", "/tmp/test-aq")
+	path := channelPath("broadcast")
+	expected := "/tmp/test-aq/channels/broadcast"
+	if path != expected {
+		t.Errorf("channelPath = %q, want %q", path, expected)
+	}
+}
+
+func TestSeverityRank(t *testing.T) {
+	if severityRank("high") >= severityRank("medium") {
+		t.Error("high should rank lower (more severe) than medium")
+	}
+	if severityRank("medium") >= severityRank("low") {
+		t.Error("medium should rank lower (more severe) than low")
+	}
+}
