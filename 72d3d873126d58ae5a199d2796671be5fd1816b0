@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: aq-os0
+X-Conjectures: none
+X-Testing: n/a (docs only), go.mod module path verified for go install
+X-Invariants: module path github.com/jwalsh/aq matches go install target
+X-Deviations: none
+X-Timeline: post-merge polish
