@@ -313,7 +313,38 @@ C-6 is already implemented. C-7 is build step 5. C-8 is the hardest and
 most interesting -- it's where aq either becomes useful for the single-file
 ecosystem convention or admits that file-level is the wrong abstraction.
 
-## 9. External Review: ARIA Bootstrap Protocol
+## 9. First Successful Dogfood: Agent Used aq
+
+An agent was tasked with reducing cyclomatic complexity in `cmdAnnounce`
+(27 → 7) and `cmdCheck` (20 → 5). The CLAUDE.md session protocol now
+says "USE THE TOOL" — and this agent did:
+
+```
+$ ./aq announce -c C-1 --claim "Reducing cyclomatic complexity" --phase refinement -f "main.go"
+announced: C-1 -> aq-...json
+
+$ ./aq check -c C-1 -f "main.go"
+no conflicts detected
+
+$ ./aq validate
+5 passed, 2 warning(s), 0 error(s)
+
+$ ./aq announce -c C-1 --phase refinement -f "main.go" --status done
+announced: C-1 -> aq-...json
+```
+
+The agent announced before working, checked for conflicts, validated
+invariants, and announced done. All 59 tests passed. The prompt
+engineer was right: once CLAUDE.md says "use the tool," agents use it.
+
+**Observation**: The first agent to successfully use aq during its own
+work session was the one given explicit step-by-step instructions in
+CLAUDE.md. The earlier agents had "build aq announce" as a build step
+but not "run aq announce as part of your workflow." Prompt design, not
+tool design, was the bottleneck. Protocol gap #7 is fixed by
+documentation, not code.
+
+## 10. External Review: ARIA Bootstrap Protocol
 
 An external agent reviewed the ARIA bootstrap protocol (the meta-protocol
 for standing up agent projects like aq) against our dogfooding data. The
