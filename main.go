@@ -139,6 +139,559 @@ func (c *ConflictSignal) Summary() string {
 		files)
 }
 
+// ---------- Invariants ----------
+//
+// Invariants are advisory assertions about broadcasts, the world, or the
+// protocol. They warn but never block. Gossip without invariants is rumor;
+// gossip with invariants is intelligence.
+
+// InvariantResult captures the outcome of a single invariant check.
+type InvariantResult struct {
+	Name     string `json:"name"`
+	Passed   bool   `json:"passed"`
+	Message  string `json:"message"`
+	Category string `json:"category"` // "self", "world", "protocol"
+	Severity string `json:"severity"` // "error", "warning", "info"
+}
+
+// Invariant represents a verifiable assertion. The Check function is not
+// serialized -- it is the executable check itself.
+type Invariant struct {
+	Name        string                 `json:"name"`
+	Category    string                 `json:"category"`
+	Description string                 `json:"description"`
+	Severity    string                 `json:"severity"`
+	Check       func() InvariantResult `json:"-"`
+}
+
+// --- Self-check invariants (Layer A) ---
+// These verify a broadcast's claims against reality before writing.
+
+// checkFilesExist verifies that all files in the broadcast actually exist
+// on the filesystem relative to the current working directory.
+func checkFilesExist(files []string) InvariantResult {
+	var missing []string
+	for _, f := range files {
+		if _, err := os.Stat(f); os.IsNotExist(err) {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		return InvariantResult{
+			Name:     "files_exist",
+			Passed:   false,
+			Message:  fmt.Sprintf("files not found: %s", strings.Join(missing, ", ")),
+			Category: "self",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "files_exist",
+		Passed:   true,
+		Message:  fmt.Sprintf("all %d files exist", len(files)),
+		Category: "self",
+		Severity: "info",
+	}
+}
+
+// checkGitBranchMatches verifies that the current git branch matches the
+// worktree field that will be broadcast.
+func checkGitBranchMatches(worktree string) InvariantResult {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return InvariantResult{
+			Name:     "git_branch_matches",
+			Passed:   false,
+			Message:  "cannot determine git branch",
+			Category: "self",
+			Severity: "warning",
+		}
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch != worktree {
+		return InvariantResult{
+			Name:     "git_branch_matches",
+			Passed:   false,
+			Message:  fmt.Sprintf("git branch is %q but announcing worktree %q", branch, worktree),
+			Category: "self",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "git_branch_matches",
+		Passed:   true,
+		Message:  fmt.Sprintf("branch matches: %s", branch),
+		Category: "self",
+		Severity: "info",
+	}
+}
+
+// checkPhaseValid verifies that the phase is one of the four valid CPRR phases.
+func checkPhaseValid(phase string) InvariantResult {
+	valid := map[string]bool{
+		"conjecture": true,
+		"proof":      true,
+		"refutation": true,
+		"refinement": true,
+	}
+	if !valid[phase] {
+		return InvariantResult{
+			Name:     "phase_valid",
+			Passed:   false,
+			Message:  fmt.Sprintf("invalid phase %q; must be conjecture|proof|refutation|refinement", phase),
+			Category: "self",
+			Severity: "error",
+		}
+	}
+	return InvariantResult{
+		Name:     "phase_valid",
+		Passed:   true,
+		Message:  fmt.Sprintf("phase %q is valid", phase),
+		Category: "self",
+		Severity: "info",
+	}
+}
+
+// checkTTLReasonable verifies that the TTL is within a sane range.
+// TTL below 10s is probably a mistake; above 86400s (24h) is stale gossip.
+func checkTTLReasonable(ttl int) InvariantResult {
+	if ttl < 10 {
+		return InvariantResult{
+			Name:     "ttl_reasonable",
+			Passed:   false,
+			Message:  fmt.Sprintf("TTL %d is too short (minimum 10s)", ttl),
+			Category: "self",
+			Severity: "warning",
+		}
+	}
+	if ttl > 86400 {
+		return InvariantResult{
+			Name:     "ttl_reasonable",
+			Passed:   false,
+			Message:  fmt.Sprintf("TTL %d exceeds 24h — gossip should not persist this long", ttl),
+			Category: "self",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "ttl_reasonable",
+		Passed:   true,
+		Message:  fmt.Sprintf("TTL %ds is reasonable", ttl),
+		Category: "self",
+		Severity: "info",
+	}
+}
+
+// checkPathsRelative verifies that no file paths are absolute.
+// Absolute paths leak filesystem structure and break portability.
+func checkPathsRelative(files []string) InvariantResult {
+	var absolute []string
+	for _, f := range files {
+		if filepath.IsAbs(f) {
+			absolute = append(absolute, f)
+		}
+	}
+	if len(absolute) > 0 {
+		return InvariantResult{
+			Name:     "paths_relative",
+			Passed:   false,
+			Message:  fmt.Sprintf("absolute paths found: %s", strings.Join(absolute, ", ")),
+			Category: "self",
+			Severity: "error",
+		}
+	}
+	return InvariantResult{
+		Name:     "paths_relative",
+		Passed:   true,
+		Message:  "all paths are relative",
+		Category: "self",
+		Severity: "info",
+	}
+}
+
+// --- World-check invariants (Layer B) ---
+// These verify that the world hasn't changed since the agent last looked.
+
+// checkBranchNotDiverged checks if origin/main has moved significantly
+// since the current branch was created. "Significantly" = more than 50 commits.
+func checkBranchNotDiverged() InvariantResult {
+	cmd := exec.Command("git", "rev-list", "--count", "HEAD..origin/main")
+	out, err := cmd.Output()
+	if err != nil {
+		// origin/main may not exist or git not available -- not an error.
+		return InvariantResult{
+			Name:     "branch_not_diverged",
+			Passed:   true,
+			Message:  "cannot check divergence (no origin/main or no git)",
+			Category: "world",
+			Severity: "info",
+		}
+	}
+	countStr := strings.TrimSpace(string(out))
+	var count int
+	fmt.Sscanf(countStr, "%d", &count)
+	if count > 50 {
+		return InvariantResult{
+			Name:     "branch_not_diverged",
+			Passed:   false,
+			Message:  fmt.Sprintf("origin/main is %d commits ahead — consider rebasing", count),
+			Category: "world",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "branch_not_diverged",
+		Passed:   true,
+		Message:  fmt.Sprintf("origin/main is %d commits ahead", count),
+		Category: "world",
+		Severity: "info",
+	}
+}
+
+// checkNoGhostBroadcasts checks if the current agent has any active
+// broadcasts that it may have forgotten about (TTL still valid but old).
+func checkNoGhostBroadcasts(agentAddress string, channel string) InvariantResult {
+	active, err := readActive(channel)
+	if err != nil {
+		return InvariantResult{
+			Name:     "no_ghost_broadcasts",
+			Passed:   true,
+			Message:  "cannot read active broadcasts",
+			Category: "world",
+			Severity: "info",
+		}
+	}
+	var ghosts []string
+	now := float64(time.Now().Unix())
+	for _, b := range active {
+		if b.Agent == agentAddress {
+			age := now - b.Ts
+			remaining := float64(b.TTL) - age
+			// Ghost: more than 80% of TTL has elapsed.
+			if remaining < float64(b.TTL)*0.2 {
+				ghosts = append(ghosts, fmt.Sprintf("%s (%.0fs remaining)", b.ConjectureID, remaining))
+			}
+		}
+	}
+	if len(ghosts) > 0 {
+		return InvariantResult{
+			Name:     "no_ghost_broadcasts",
+			Passed:   false,
+			Message:  fmt.Sprintf("near-expiry broadcasts: %s — consider re-announcing", strings.Join(ghosts, "; ")),
+			Category: "world",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "no_ghost_broadcasts",
+		Passed:   true,
+		Message:  "no ghost broadcasts",
+		Category: "world",
+		Severity: "info",
+	}
+}
+
+// checkDiskSpaceOK checks that AQ_HOME is not consuming excessive disk space.
+// Threshold: 100MB.
+func checkDiskSpaceOK() InvariantResult {
+	home := aqHome()
+	var totalSize int64
+	_ = filepath.Walk(home, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+	sizeMB := float64(totalSize) / (1024 * 1024)
+	if sizeMB > 100 {
+		return InvariantResult{
+			Name:     "disk_space_ok",
+			Passed:   false,
+			Message:  fmt.Sprintf("AQ_HOME is %.1fMB (threshold: 100MB) — consider running gc", sizeMB),
+			Category: "world",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "disk_space_ok",
+		Passed:   true,
+		Message:  fmt.Sprintf("AQ_HOME is %.1fMB", sizeMB),
+		Category: "world",
+		Severity: "info",
+	}
+}
+
+// --- Protocol-check invariants (Layer C) ---
+// These verify that the gossip protocol's structural properties hold.
+
+// checkULIDUnique scans all broadcasts (active + archive) and checks for
+// duplicate ULIDs.
+func checkULIDUnique(channel string) InvariantResult {
+	seen := make(map[string]string) // ULID -> filename
+	var duplicates []string
+
+	scanDir := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var b Broadcast
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &b); err != nil {
+				continue
+			}
+			if prev, ok := seen[b.ID]; ok {
+				duplicates = append(duplicates, fmt.Sprintf("%s (in %s and %s)", b.ID, prev, entry.Name()))
+			} else {
+				seen[b.ID] = entry.Name()
+			}
+		}
+	}
+
+	scanDir(requestsPath(channel))
+	scanDir(archivePath(channel))
+
+	if len(duplicates) > 0 {
+		return InvariantResult{
+			Name:     "ulid_unique",
+			Passed:   false,
+			Message:  fmt.Sprintf("duplicate ULIDs: %s", strings.Join(duplicates, "; ")),
+			Category: "protocol",
+			Severity: "error",
+		}
+	}
+	return InvariantResult{
+		Name:     "ulid_unique",
+		Passed:   true,
+		Message:  fmt.Sprintf("all %d ULIDs are unique", len(seen)),
+		Category: "protocol",
+		Severity: "info",
+	}
+}
+
+// checkNoDuplicateActive verifies that no agent has two active broadcasts
+// for the same conjecture ID (unless one is "done").
+func checkNoDuplicateActive(channel string) InvariantResult {
+	active, err := readActive(channel)
+	if err != nil {
+		return InvariantResult{
+			Name:     "no_duplicate_active",
+			Passed:   true,
+			Message:  "cannot read active broadcasts",
+			Category: "protocol",
+			Severity: "info",
+		}
+	}
+
+	type key struct {
+		agent, conjecture string
+	}
+	seen := make(map[key]int)
+	var duplicates []string
+
+	for _, b := range active {
+		if b.Status == "done" {
+			continue
+		}
+		k := key{b.Agent, b.ConjectureID}
+		seen[k]++
+		if seen[k] == 2 {
+			duplicates = append(duplicates, fmt.Sprintf("%s+%s", b.Agent, b.ConjectureID))
+		}
+	}
+
+	if len(duplicates) > 0 {
+		return InvariantResult{
+			Name:     "no_duplicate_active",
+			Passed:   false,
+			Message:  fmt.Sprintf("duplicate active broadcasts: %s", strings.Join(duplicates, "; ")),
+			Category: "protocol",
+			Severity: "warning",
+		}
+	}
+	return InvariantResult{
+		Name:     "no_duplicate_active",
+		Passed:   true,
+		Message:  "no duplicate active broadcasts",
+		Category: "protocol",
+		Severity: "info",
+	}
+}
+
+// checkTimestampsSane verifies that no active broadcasts have future timestamps.
+func checkTimestampsSane(channel string) InvariantResult {
+	active, err := readActive(channel)
+	if err != nil {
+		return InvariantResult{
+			Name:     "timestamps_sane",
+			Passed:   true,
+			Message:  "cannot read active broadcasts",
+			Category: "protocol",
+			Severity: "info",
+		}
+	}
+
+	now := float64(time.Now().Unix())
+	var future []string
+	for _, b := range active {
+		if b.Ts > now+60 { // allow 60s clock skew
+			future = append(future, fmt.Sprintf("%s (%.0fs in future)", b.ID, b.Ts-now))
+		}
+	}
+
+	if len(future) > 0 {
+		return InvariantResult{
+			Name:     "timestamps_sane",
+			Passed:   false,
+			Message:  fmt.Sprintf("future timestamps: %s", strings.Join(future, "; ")),
+			Category: "protocol",
+			Severity: "error",
+		}
+	}
+	return InvariantResult{
+		Name:     "timestamps_sane",
+		Passed:   true,
+		Message:  "all timestamps are sane",
+		Category: "protocol",
+		Severity: "info",
+	}
+}
+
+// checkAllPathsRelativeInActive scans all active broadcasts for absolute paths.
+func checkAllPathsRelativeInActive(channel string) InvariantResult {
+	active, err := readActive(channel)
+	if err != nil {
+		return InvariantResult{
+			Name:     "all_paths_relative",
+			Passed:   true,
+			Message:  "cannot read active broadcasts",
+			Category: "protocol",
+			Severity: "info",
+		}
+	}
+
+	var violations []string
+	for _, b := range active {
+		for _, f := range b.Files {
+			if filepath.IsAbs(f) {
+				violations = append(violations, fmt.Sprintf("%s in broadcast %s", f, b.ID))
+			}
+		}
+	}
+
+	if len(violations) > 0 {
+		return InvariantResult{
+			Name:     "all_paths_relative",
+			Passed:   false,
+			Message:  fmt.Sprintf("absolute paths in broadcasts: %s", strings.Join(violations, "; ")),
+			Category: "protocol",
+			Severity: "error",
+		}
+	}
+	return InvariantResult{
+		Name:     "all_paths_relative",
+		Passed:   true,
+		Message:  "all broadcast paths are relative",
+		Category: "protocol",
+		Severity: "info",
+	}
+}
+
+// --- Running invariants ---
+
+// runSelfChecks runs Layer A invariants for a broadcast about to be written.
+func runSelfChecks(b Broadcast) []InvariantResult {
+	var results []InvariantResult
+	if len(b.Files) > 0 {
+		results = append(results, checkFilesExist(b.Files))
+		results = append(results, checkPathsRelative(b.Files))
+	}
+	results = append(results, checkGitBranchMatches(b.Worktree))
+	results = append(results, checkPhaseValid(b.Phase))
+	results = append(results, checkTTLReasonable(b.TTL))
+	return results
+}
+
+// runWorldChecks runs Layer B invariants about the environment.
+func runWorldChecks(agentAddress string, channel string) []InvariantResult {
+	var results []InvariantResult
+	results = append(results, checkBranchNotDiverged())
+	results = append(results, checkNoGhostBroadcasts(agentAddress, channel))
+	results = append(results, checkDiskSpaceOK())
+	return results
+}
+
+// runProtocolChecks runs Layer C invariants about the protocol.
+func runProtocolChecks(channel string) []InvariantResult {
+	var results []InvariantResult
+	results = append(results, checkULIDUnique(channel))
+	results = append(results, checkNoDuplicateActive(channel))
+	results = append(results, checkTimestampsSane(channel))
+	results = append(results, checkAllPathsRelativeInActive(channel))
+	return results
+}
+
+// runAllChecks runs all invariant layers.
+func runAllChecks(agentAddress string, channel string) []InvariantResult {
+	// For "all", we create a minimal broadcast to run self-checks against
+	// the current state. Self-checks also run contextually via --validate.
+	var results []InvariantResult
+	results = append(results, runWorldChecks(agentAddress, channel)...)
+	results = append(results, runProtocolChecks(channel)...)
+	return results
+}
+
+// printInvariantResults prints results in human-readable or JSON format.
+func printInvariantResults(results []InvariantResult, asJSON bool) {
+	if asJSON {
+		data, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
+	for _, r := range results {
+		icon := "+"
+		if !r.Passed {
+			switch r.Severity {
+			case "error":
+				icon = "x"
+			case "warning":
+				icon = "!"
+			default:
+				icon = "?"
+			}
+		}
+		fmt.Printf("  %s [%s/%s] %s: %s\n", icon, r.Category, r.Severity, r.Name, r.Message)
+	}
+}
+
+// countFailures returns the number of failed invariants by severity.
+func countFailures(results []InvariantResult) (errors, warnings int) {
+	for _, r := range results {
+		if !r.Passed {
+			switch r.Severity {
+			case "error":
+				errors++
+			default:
+				warnings++
+			}
+		}
+	}
+	return
+}
+
 // ---------- Sandbox detection ----------
 
 // Sandbox holds worktree context detected from the current git state.
@@ -406,6 +959,7 @@ func cmdAnnounce(args []string) int {
 		phase      = "proof"
 		status     = "prosecuting"
 		ttl        = DefaultTTL
+		validate   bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -440,6 +994,8 @@ func cmdAnnounce(args []string) int {
 				fmt.Sscanf(args[i+1], "%d", &ttl)
 				i++
 			}
+		case "--validate":
+			validate = true
 		case "-h", "--help":
 			fmt.Print(`aq announce — broadcast presence
 
@@ -452,6 +1008,7 @@ Options:
   --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
   --status <status>        prosecuting|done|blocked (default: prosecuting)
   --ttl <seconds>          Time to live (default: 300)
+  --validate               Run pre-flight invariant checks (advisory, never blocks)
   -h, --help               Show this help
 `)
 			return 0
@@ -488,6 +1045,21 @@ Options:
 	b.Status = status
 	b.Files = fileList
 	b.TTL = ttl
+
+	// Run pre-flight invariant checks if --validate is set.
+	// Invariants are advisory: they print warnings but never block the announce.
+	if validate {
+		results := runSelfChecks(b)
+		errs, warns := countFailures(results)
+		if !jsonOutput {
+			fmt.Println("pre-flight checks:")
+			printInvariantResults(results, false)
+			if errs > 0 || warns > 0 {
+				fmt.Printf("  %d error(s), %d warning(s) — announcing anyway (gossip is advisory)\n", errs, warns)
+			}
+			fmt.Println()
+		}
+	}
 
 	path, err := writeBroadcast(b, channelName)
 	if err != nil {
@@ -843,6 +1415,93 @@ Conflicts detected: %d HIGH, %d MEDIUM
 	return 0
 }
 
+// cmdValidate runs invariant checks across all three layers.
+func cmdValidate(args []string) int {
+	var category string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--category":
+			if i+1 < len(args) {
+				category = args[i+1]
+				i++
+			}
+		case "-h", "--help":
+			fmt.Print(`aq validate — run invariant checks
+
+Usage: aq validate [options]
+
+Runs advisory invariant checks across three layers:
+  self      — verify broadcast claims against reality
+  world     — check if the environment has changed
+  protocol  — verify protocol structural properties
+
+Invariants are advisory. They warn but never block operations.
+Gossip without invariants is rumor; gossip with invariants is intelligence.
+
+Options:
+  --category <cat>   Run only checks for: self, world, protocol (default: all)
+  --json             JSON output
+  -h, --help         Show this help
+`)
+			return 0
+		}
+	}
+
+	sb := detectSandbox()
+
+	var results []InvariantResult
+
+	switch category {
+	case "self":
+		if !jsonOutput {
+			fmt.Println("aq validate — self-checks (what would a broadcast claim?)")
+			fmt.Println()
+		}
+		b := NewBroadcast()
+		b.Agent = sb.AgentAddress
+		b.Worktree = sb.Branch
+		b.Phase = "proof"
+		results = runSelfChecks(b)
+	case "world":
+		if !jsonOutput {
+			fmt.Println("aq validate — world-checks (has reality changed?)")
+			fmt.Println()
+		}
+		results = runWorldChecks(sb.AgentAddress, channelName)
+	case "protocol":
+		if !jsonOutput {
+			fmt.Println("aq validate — protocol-checks (is the system healthy?)")
+			fmt.Println()
+		}
+		results = runProtocolChecks(channelName)
+	case "":
+		if !jsonOutput {
+			fmt.Println("aq validate — all invariant checks")
+			fmt.Println()
+		}
+		results = runAllChecks(sb.AgentAddress, channelName)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown category %q (use: self, world, protocol)\n", category)
+		return 1
+	}
+
+	printInvariantResults(results, jsonOutput)
+
+	errs, warns := countFailures(results)
+	if !jsonOutput {
+		fmt.Println()
+		fmt.Printf("  %d passed, %d warning(s), %d error(s)\n",
+			len(results)-errs-warns, warns, errs)
+	}
+
+	// Exit 1 only on errors, not warnings. Warnings are expected in gossip.
+	if errs > 0 {
+		return 1
+	}
+	return 0
+}
+
 // ---------- Global flag parsing ----------
 
 func parseGlobalFlags(args []string) []string {
@@ -891,6 +1550,8 @@ func main() {
 		code = cmdDoctor(args[1:])
 	case "quickstart", "prime":
 		code = cmdQuickstart(args[1:])
+	case "validate":
+		code = cmdValidate(args[1:])
 	case "version", "--version", "-v":
 		fmt.Printf("aq %s (commit: %s, built: %s)\n", Version, GitCommit, BuildDate)
 	case "help", "--help", "-h":
@@ -920,6 +1581,7 @@ Query:
 Operational:
   init               Create ~/.aq directory structure
   doctor             Health check
+  validate           Run invariant checks (advisory, never blocks)
   quickstart, prime  Agent-consumable context dump
   version            Show version info
   help               Show this help
