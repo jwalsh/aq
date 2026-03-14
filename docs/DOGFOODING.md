@@ -265,6 +265,30 @@ WS-Notification is *exactly* broadcast semantics. The difference: WS-* solved
 these problems with 34-page specs and XML Schema. aq solves them with JSON
 files in a directory. The failure modes are identical. The recovery cost is not.
 
+### We forgot to announce (again)
+
+After merging the invariants agent, committing the Wave protocol doc,
+updating TRANSPORTS.org with the WS-* lineage, and pushing 8 commits
+to main -- we realized we never ran `aq announce` for any of it. The
+gossip layer was silent during 40 minutes of active work. We had the
+tool. It was compiled. It was in the working directory. We just didn't
+use it.
+
+Retroactive announcements were added with `status=done`, which is
+technically correct but defeats the entire purpose of ambient presence.
+A broadcast that arrives after the work is finished is a press release,
+not gossip.
+
+**Observation**: The announce-before-working discipline requires
+discipline that agents don't have. This is not an edge case -- it is
+the default behavior. Every agent in every session will forget to
+announce unless announcement is automatic. C-7 (auto-renewal /
+heartbeat) is not a nice-to-have. It is the only viable path. Manual
+gossip is an oxymoron.
+
+Protocol gap #7: agent forgot to use the gossip tool while writing
+documentation about gossip.
+
 ### The Wave protocol is dead but its ghost lingers
 
 waveprotocol.org returns ERR_CONNECTION_CLOSED. The site is down. The primary
