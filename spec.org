@@ -1,0 +1,554 @@
+#+TITLE: aq — Ambient Agent Queue
+#+SUBTITLE: Specification v0.1.0
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-13
+#+PROPERTY: header-args :mkdirp t :eval no
+#+PROPERTY: header-args:python :tangle yes
+#+PROPERTY: header-args:bash :shebang "#!/usr/bin/env bash"
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* Abstract
+
+=aq= is a minimal ambient presence bus for multi-agent development.
+Agents broadcast what they are working on — which worktree (=sb=),
+which conjecture (=cprr=), which files — so peers can detect semantic
+conflicts before they become merge conflicts. No orchestrator required.
+Degrades gracefully to filesystem-only operation.
+
+The protocol is inspired by Google Wave's presence-as-stream intuition,
+applied to distributed Lakatosian conjecture prosecution.
+
+* Conjectures
+:PROPERTIES:
+:CPRR_VERSION: 1
+:END:
+
+** C-1: Filesystem-first transport is sufficient
+:PROPERTIES:
+:CONJECTURE_ID: C-1
+:STATUS: prosecuting
+:PHASE: proof
+:FILES: src/aq/daemon.py, src/aq/protocol.py
+:AGENT: unassigned
+:END:
+
+*Conjecture*: For local multi-agent coordination, a filesystem-based
+message store with inotify/FSEvents is sufficient. No broker required.
+
+*Proof strategy*: Implement, benchmark at 10 agents/100 msg/min.
+
+*Potential refutation*: p99 latency > 500ms at 10 agents.
+
+** C-2: Conjecture identity prevents semantic conflicts
+:PROPERTIES:
+:CONJECTURE_ID: C-2
+:STATUS: open
+:PHASE: conjecture
+:FILES: src/aq/conflict.py
+:AGENT: unassigned
+:END:
+
+*Conjecture*: Broadcasting conjecture ID enables semantic-level conflict
+detection. Compatible conjectures over the same file need no coordination;
+contradictory ones do.
+
+** C-3: Wave presence semantics without Wave data model
+:PROPERTIES:
+:CONJECTURE_ID: C-3
+:STATUS: open
+:PHASE: conjecture
+:FILES: src/aq/protocol.py, WAVE.org
+:AGENT: unassigned
+:END:
+
+*Conjecture*: The valuable part of Google Wave was the ambient presence
+stream, not operational transform. Newline-delimited JSON broadcasts with
+TTL expiry replicate the key property without Wave's complexity.
+
+** C-4: CPRR phase modulates conflict severity
+:PROPERTIES:
+:CONJECTURE_ID: C-4
+:STATUS: open
+:PHASE: conjecture
+:FILES: src/aq/protocol.py, src/aq/conflict.py
+:AGENT: unassigned
+:END:
+
+*Conjecture*: Two agents in =proof= phase over the same files is high risk;
+=conjecture= phase is low risk. Phase should modulate conflict signal severity.
+
+* Primitives
+
+** sb — Sandbox / Worktree
+
+#+begin_src python :tangle src/aq/sb.py
+"""sb — worktree context detection."""
+from __future__ import annotations
+import subprocess
+from pathlib import Path
+from dataclasses import dataclass
+
+
+@dataclass
+class Sandbox:
+    branch: str
+    remote: str
+    worktree_path: Path
+    is_linked_worktree: bool
+    agent_address: str
+
+    @classmethod
+    def detect(cls, cwd: Path | None = None) -> "Sandbox":
+        root = str(cwd or Path.cwd())
+
+        def git(*args: str) -> str:
+            r = subprocess.run(
+                ["git", "-C", root, *args],
+                capture_output=True, text=True
+            )
+            return r.stdout.strip()
+
+        branch = git("rev-parse", "--abbrev-ref", "HEAD") or "unknown"
+        remote_url = git("remote", "get-url", "origin")
+        common_dir = git("rev-parse", "--git-common-dir")
+        git_dir = git("rev-parse", "--git-dir")
+
+        is_linked = (
+            bool(common_dir) and bool(git_dir) and
+            common_dir != git_dir
+        )
+
+        remote = (
+            remote_url
+            .replace("git@github.com:", "github.com/")
+            .replace("https://github.com/", "github.com/")
+            .removesuffix(".git")
+        ) if remote_url else "local"
+
+        agent_address = (
+            f"{remote}/worktrees/{branch}" if is_linked
+            else f"{remote}/{branch}"
+        )
+
+        return cls(
+            branch=branch,
+            remote=remote,
+            worktree_path=Path(root),
+            is_linked_worktree=is_linked,
+            agent_address=agent_address,
+        )
+#+end_src
+
+** cprr — Conjecture under prosecution
+
+#+begin_src python :tangle src/aq/cprr.py
+"""cprr — conjecture/proof/refutation/refinement tracking."""
+from __future__ import annotations
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+
+class Phase(str, Enum):
+    CONJECTURE = "conjecture"
+    PROOF = "proof"
+    REFUTATION = "refutation"
+    REFINEMENT = "refinement"
+
+
+class Status(str, Enum):
+    OPEN = "open"
+    PROSECUTING = "prosecuting"
+    REFUTED = "refuted"
+    REFINED = "refined"
+
+
+@dataclass
+class Conjecture:
+    id: str
+    claim: str
+    phase: Phase = Phase.CONJECTURE
+    status: Status = Status.OPEN
+    files: list[str] = field(default_factory=list)
+    agent: Optional[str] = None
+
+    def is_compatible_with(self, other: "Conjecture") -> bool:
+        return not bool(set(self.files) & set(other.files))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "claim": self.claim,
+            "phase": self.phase.value,
+            "status": self.status.value,
+            "files": self.files,
+            "agent": self.agent,
+        }
+#+end_src
+
+** aq — Ambient broadcast bus
+
+See =* Protocol= for the wire format.
+
+* Protocol
+
+** Broadcast payload
+
+#+begin_src python :tangle src/aq/protocol.py
+"""aq protocol — broadcast payload and channel I/O."""
+from __future__ import annotations
+import json, time, os, random, string
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+
+AQ_HOME = Path(os.environ.get("AQ_HOME", Path.home() / ".aq"))
+DEFAULT_TTL = 300
+
+
+def ulid() -> str:
+    ts = format(int(time.time() * 1000), "012x")
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    return f"{ts}{rand}"
+
+
+@dataclass
+class Broadcast:
+    """
+    Ambient presence payload.
+
+    Lifecycle:
+      1. announce() before touching files
+      2. re-announce every TTL/2 while working
+      3. announce(status="done") when finished
+    """
+    agent: str
+    worktree: str
+    conjecture_id: str
+    conjecture_claim: str
+    phase: str
+    status: str
+    files: list[str]
+    ts: float = field(default_factory=time.time)
+    ttl: int = DEFAULT_TTL
+    id: str = field(default_factory=ulid)
+
+    def is_expired(self) -> bool:
+        return time.time() > self.ts + self.ttl
+
+    def overlaps(self, other: "Broadcast") -> bool:
+        return bool(set(self.files) & set(other.files))
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_json(cls, s: str) -> "Broadcast":
+        return cls(**json.loads(s))
+
+
+def channel_path(channel: str = "broadcast") -> Path:
+    return AQ_HOME / "channels" / channel
+
+
+def announce(broadcast: Broadcast, channel: str = "broadcast") -> Path:
+    requests = channel_path(channel) / "requests"
+    requests.mkdir(parents=True, exist_ok=True)
+    ts = format(int(broadcast.ts), "014d")
+    path = requests / f"aq-{ts}-{broadcast.id}.json"
+    path.write_text(broadcast.to_json() + "\n")
+    return path
+
+
+def read_active(channel: str = "broadcast") -> list[Broadcast]:
+    requests = channel_path(channel) / "requests"
+    if not requests.exists():
+        return []
+    out: list[Broadcast] = []
+    for f in sorted(requests.glob("aq-*.json")):
+        try:
+            b = Broadcast.from_json(f.read_text().strip())
+            if b.is_expired():
+                archive = channel_path(channel) / "archive"
+                archive.mkdir(exist_ok=True)
+                f.rename(archive / f.name)
+            else:
+                out.append(b)
+        except Exception:
+            pass
+    return out
+#+end_src
+
+** Conflict detection
+
+#+begin_src python :tangle src/aq/conflict.py
+"""aq conflict detection."""
+from __future__ import annotations
+from dataclasses import dataclass
+from .protocol import Broadcast, read_active
+
+
+@dataclass
+class ConflictSignal:
+    a: Broadcast
+    b: Broadcast
+    shared_files: list[str]
+    severity: str  # low | medium | high
+
+    def summary(self) -> str:
+        files = ", ".join(self.shared_files)
+        return (
+            f"[{self.severity.upper()}] {self.a.agent} ({self.a.conjecture_id})"
+            f" \u2194 {self.b.agent} ({self.b.conjecture_id})"
+            f" \u2014 shared: {files}"
+        )
+
+
+def check_conflicts(
+    me: Broadcast,
+    channel: str = "broadcast",
+) -> list[ConflictSignal]:
+    signals = []
+    for other in read_active(channel):
+        if other.agent == me.agent:
+            continue
+        shared = list(set(me.files) & set(other.files))
+        if not shared:
+            continue
+        both_proof = me.phase == "proof" and other.phase == "proof"
+        one_proof = me.phase == "proof" or other.phase == "proof"
+        sev = "high" if both_proof else ("medium" if one_proof else "low")
+        signals.append(ConflictSignal(a=me, b=other, shared_files=shared, severity=sev))
+    return sorted(signals, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.severity])
+#+end_src
+
+* Implementation
+
+** CLI
+
+#+begin_src python :tangle src/aq/cli.py
+"""aq CLI — announce, check, status."""
+from __future__ import annotations
+import argparse, json, sys
+from .sb import Sandbox
+from .protocol import Broadcast, announce, read_active
+from .conflict import check_conflicts
+
+
+def cmd_announce(args: argparse.Namespace) -> int:
+    sb = Sandbox.detect()
+    b = Broadcast(
+        agent=sb.agent_address,
+        worktree=sb.branch,
+        conjecture_id=args.conjecture,
+        conjecture_claim=args.claim or f"working on {args.conjecture}",
+        phase=args.phase,
+        status=args.status,
+        files=[f.strip() for f in args.files.split(",") if f.strip()],
+        ttl=args.ttl,
+    )
+    path = announce(b, args.channel)
+    if args.json:
+        print(b.to_json())
+    else:
+        print(f"announced: {b.conjecture_id} \u2192 {path.name}")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    sb = Sandbox.detect()
+    files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+    me = Broadcast(
+        agent=sb.agent_address, worktree=sb.branch,
+        conjecture_id=args.conjecture or "C-?",
+        conjecture_claim="", phase=args.phase,
+        status="prosecuting", files=files,
+    )
+    signals = check_conflicts(me, args.channel)
+    if not signals:
+        print("no conflicts detected")
+        return 0
+    for s in signals:
+        print(s.summary())
+    return 1 if any(s.severity == "high" for s in signals) else 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    active = read_active(args.channel)
+    if args.json:
+        print(json.dumps([json.loads(b.to_json()) for b in active], indent=2))
+        return 0
+    if not active:
+        print("no active broadcasts")
+        return 0
+    for b in active:
+        print(f"  {b.agent:50s}  {b.conjecture_id}  [{b.phase}]  {', '.join(b.files)}")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="aq", description="ambient agent queue")
+    p.add_argument("--channel", default="broadcast")
+    p.add_argument("--json", action="store_true")
+    sub = p.add_subparsers(dest="cmd")
+
+    ann = sub.add_parser("announce", aliases=["ann", "a"])
+    ann.add_argument("--conjecture", "-c", required=True)
+    ann.add_argument("--files", "-f", default="")
+    ann.add_argument("--claim", default="")
+    ann.add_argument("--phase", default="proof",
+                     choices=["conjecture", "proof", "refutation", "refinement"])
+    ann.add_argument("--status", default="prosecuting",
+                     choices=["prosecuting", "done", "blocked"])
+    ann.add_argument("--ttl", type=int, default=300)
+
+    chk = sub.add_parser("check")
+    chk.add_argument("--conjecture", "-c", default=None)
+    chk.add_argument("--files", "-f", default="")
+    chk.add_argument("--phase", default="proof")
+
+    sub.add_parser("status", aliases=["ls"])
+
+    args = p.parse_args()
+    if args.cmd in ("announce", "ann", "a"):
+        return cmd_announce(args)
+    elif args.cmd == "check":
+        return cmd_check(args)
+    elif args.cmd in ("status", "ls"):
+        return cmd_status(args)
+    else:
+        p.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+#+end_src
+
+** Package
+
+#+begin_src python :tangle src/aq/__init__.py
+"""aq — ambient agent queue."""
+__version__ = "0.1.0"
+#+end_src
+
+#+begin_src toml :tangle pyproject.toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aq"
+version = "0.1.0"
+description = "Ambient agent queue — broadcast and conflict detection for multi-agent development"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+aq = "aq.cli:main"
+
+[tool.mypy]
+strict = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aq"]
+#+end_src
+
+** Init and shell wrapper
+
+#+begin_src bash :tangle scripts/aq-init.sh
+set -euo pipefail
+AQ_HOME="${AQ_HOME:-$HOME/.aq}"
+for dir in \
+  "$AQ_HOME/channels/broadcast/requests" \
+  "$AQ_HOME/channels/broadcast/archive" \
+  "$AQ_HOME/agents" \
+  "$AQ_HOME/logs"; do
+  mkdir -p "$dir"
+done
+cat > "$AQ_HOME/config.json" <<EOF
+{"version":"0.1.0","default_channel":"broadcast","default_ttl":300}
+EOF
+echo "aq initialized at $AQ_HOME"
+#+end_src
+
+#+begin_src bash :tangle bin/aq
+set -euo pipefail
+exec python -m aq.cli "$@"
+#+end_src
+
+* Architecture
+
+** Message flow
+
+#+begin_src mermaid :file docs/message-flow.png :exports results
+sequenceDiagram
+    participant A as Agent A (sb: feature-auth)
+    participant Bus as aq bus (~/.aq/channels/broadcast/)
+    participant B as Agent B (sb: feature-rbac)
+    participant W as Watcher (optional)
+
+    A->>Bus: announce(C-1, files=[auth.ts], phase=proof)
+    B->>Bus: announce(C-7, files=[auth.ts], phase=proof)
+    W->>Bus: read_active()
+    Bus-->>W: [C-1/A, C-7/B]
+    W->>A: conflict HIGH — shared: auth.ts
+    W->>B: conflict HIGH — shared: auth.ts
+    Note over A,B: coordinate or accept merge risk
+    A->>Bus: announce(C-1, status=done)
+#+end_src
+
+** Three-primitive interlock
+
+#+begin_src mermaid :file docs/primitives.png :exports results
+graph TD
+    subgraph space ["sb — spatial (where)"]
+        WT[worktree / branch]
+    end
+    subgraph epistemics ["cprr — epistemic (why)"]
+        CJ[conjecture claim]
+        PH[phase: proof / refutation / ...]
+    end
+    subgraph time ["aq — temporal (who else knows)"]
+        BC[broadcast payload]
+        CH["~/.aq/channels/broadcast/"]
+    end
+    WT --> BC
+    CJ --> BC
+    PH --> BC
+    BC --> CH
+    CH -->|read_active| CD[conflict detector]
+    CD -->|signal| PA[peer agents]
+#+end_src
+
+** Ecosystem position
+
+#+begin_src mermaid :file docs/ecosystem.png :exports results
+graph LR
+    JITIR["JITIR\n(find past work)"] -->|before start| AQ
+    SEFACA["SEFACA\n(probe gate)"] -->|before execute| AQ
+    CPRR_T["CPRR\n(epistemic frame)"] -->|structures| AQ
+    SB["sb / gt\n(worktree)"] -->|scopes| AQ
+    AQ["aq\n(broadcast while working)"]
+    AQ -->|resolves to| BD["bd\n(record outcome)"]
+    AQ -->|informs| WITNESS["Witness / Gas Town"]
+#+end_src
+
+* Secondary Documents
+
+Documents to be added. Each must declare which conjectures it elaborates
+and must not redefine the three primitives.
+
+| Document   | Scope                                | Status  |
+|------------+--------------------------------------+---------|
+| WAVE.org   | Wave protocol lineage, presence      | planned |
+| SB.org     | Worktree lifecycle, isolation        | planned |
+| CPRR.org   | Lakatos grounding, formal definition | planned |
+| SEFACA.org | Probe-before-execute integration     | planned |
+| GASTOWN.org| Mayor/Polecat/Witness role mapping   | planned |
+| ELS.org    | ELS 2026 submission                  | planned |
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
