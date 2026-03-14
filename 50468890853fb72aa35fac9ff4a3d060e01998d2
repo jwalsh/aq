@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-rnv
+X-Conjectures: C-1, C-2, C-4, C-7
+X-Testing: TLA+ spec written, properties annotated, cfg files for TLC provided; not executed (no TLC binary available)
+X-Invariants: TTLExpiry, NoGhostAfterArchive, NoBroadcastLoss, ConflictDetectionCompleteness, ConflictSeverityCorrectness, UniqueIds, TypeOK
+X-Deviations: none
+X-Timeline: single step — write TLA+ formal spec
