@@ -320,6 +320,12 @@ for standing up agent projects like aq) against our dogfooding data. The
 review validates nearly every failure we documented and identifies where
 the bootstrap protocol itself is broken. Key findings:
 
+Source: external agent reviewing the ARIA bootstrap protocol gist
+against aq dogfooding data. Full analysis confirmed: Phases 1-9 are
+well structured, confirmation gate is present, failure handler is
+explicit, anti-patterns table is solid. The problems are in what's
+missing.
+
 ### What the dogfooding broke in the bootstrap protocol
 
 1. **Phase 9 (parallel agents) is dangerously naive.** "Launch parallel
@@ -359,6 +365,30 @@ the bootstrap protocol itself is broken. Key findings:
 |-------------|-------------|
 | Reinventing WS-* | If your protocol is structurally equivalent to UDDI (discovery), WS-Notification (broadcast), WS-Coordination (consensus), or WS-AtomicTransaction (distributed commit) — and it probably is — name the prior art and explain why the 2005 version failed. The failure reasons usually still apply. |
 | Self-bootstrapping | This protocol cannot bootstrap itself. Gossip was silent during its own construction. The first run is always manual. Phases 1-3 are necessarily human-driven. The automation starts at Phase 4. The ouroboros is the design, not a bug. |
+
+### The protocol has no transport layer
+
+The bootstrap protocol defines what agents should do but not how they
+communicate while doing it. No transport or communication layer is
+specified. This is the gap aq is supposed to fill — but aq itself isn't
+in the bootstrap sequence. The protocol assumes agents coordinate by...
+not coordinating. Which is fine until Phase 9 launches parallel agents
+and they all touch `main.go`.
+
+### CPRR is too shallow in the protocol
+
+Conjectures should be the epistemic frame for *all* work, not just
+backlog items appended to `bd create`. Every build step should have an
+associated conjecture. Every merge should update conjecture status.
+The protocol currently treats CPRR as a checkbox ("run `cprr add`")
+rather than the operating system for epistemic state.
+
+The drift signal: when you start solving infrastructure problems (how
+do I transport messages? how do I handle TTL?) instead of coordination
+problems (do agents know about each other?), you are reinventing WS-*.
+The WS-* specs solved infrastructure beautifully. They solved
+coordination not at all. aq should stay on the coordination side of
+that line.
 
 ### What the review got right about axioms
 
