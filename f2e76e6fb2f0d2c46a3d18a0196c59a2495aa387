@@ -1,0 +1,6 @@
+X-Agent-Role: invariants
+X-Conjectures: C-1 (supports — invariants verify filesystem assumptions)
+X-Testing: 59 tests, all pass with -race
+X-Invariants: 12 invariants, 3 layers (self/world/protocol)
+X-Deviations: none — advisory only, never blocks
+X-Timeline: 2026-03-13T00:00:00Z
