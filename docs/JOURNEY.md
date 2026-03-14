@@ -83,11 +83,31 @@ implementations instead of 4 composable slices. The single-file convention
 forced each agent to write the whole thing.
 
 ### Hour 2: The Merge
-- [ ] Pick Delta as base (has tests)
-- [ ] Cherry-pick Gamma's richer doctor/quickstart/UX improvements
-- [ ] Apply originating agent's advice: aqHome() checks .aq/ in cwd first
-- [ ] Verify all 32 tests still pass
-- [ ] Commit with git notes per CLAUDE.md mandate
+- [x] Pick Delta as base (has tests) — Delta's 32-test main_test.go was the only verifiable output
+- [x] Cherry-pick Gamma's richer doctor/quickstart/UX improvements
+- [x] Apply originating agent's advice: aqHome() checks .aq/ in cwd first
+- [x] Verify all 32 tests still pass — yes, on main
+- [x] Commit with git notes per CLAUDE.md mandate — 5 stacked commits, all with notes
+- [x] Push agent branches (feat/aq-alpha through feat/aq-delta)
+
+### Hour 3: Invariants, CI, Documentation
+- [x] Invariants agent: 12 invariants, 3 layers, `validate` command, `--validate` flag — 59 tests
+- [x] CI pipeline: GitHub Actions (go vet, gofmt, test -race, build)
+- [x] 5 README badges (CI, Go Report Card, pkg.go.dev, license, Go version)
+- [x] Wave protocol reconstruction (670 lines from Apache SVN whitepapers)
+- [x] DOGFOODING.md updated with post-merge failures
+- [x] TRANSPORTS.org: WS-* / SOA déjà vu lineage section
+- [x] MIT LICENSE added
+- [x] CLAUDE.md: session protocol ("USE THE TOOL"), C-6/C-7/C-8 conjectures
+
+### Hour 4: Reviews, Presentation, Experiments
+- [x] Three stakeholder reviews (L7 engineer, prompt engineer, CTO)
+- [x] Beamer presentation: "Gossip is Harder Than You Thought"
+- [x] First successful aq dogfood: agent used announce/check/validate/done
+- [x] Cyclomatic complexity refactor: cmdAnnounce 27→7, cmdCheck 20→5
+- [x] Intentional collision experiment: wire format vs strict validation
+- [x] Guile Scheme port scaffold (scheme/aq.scm) for dsp-dr (bead aq-dde)
+- [x] TLA+ and Lean 4 formal verification agents launched (beads aq-rnv, aq-qpa)
 
 ## Humor Log
 
@@ -213,6 +233,41 @@ isn't optional — it's load-bearing.
 | 4 | Agent addresses include "worktrees/" prefix — long and noisy in output | Status display | LOW | Truncate or alias agent addresses |
 | 5 | No local-first .aq/ in cwd (Python only checks ~/.aq) | Originating agent via git notes | MEDIUM | Go port should check .aq/ in cwd first, fall back to ~/.aq |
 | 6 | Git notes are a gossip channel we didn't design for | Originating agent whisper | FUN | Git notes = out-of-band gossip with built-in persistence |
+| 7 | Agent forgot to announce while writing docs about announcing | Hour 3 | HIGH (ironic) | Added session protocol to CLAUDE.md: "USE THE TOOL" |
+| 8 | Stale binary = stale capabilities (validate existed but binary wasn't rebuilt) | Hour 3 | MEDIUM | Need make build as pre-commit hook, generate help from dispatch |
+| 9 | Wire format change (severity field) collides with strict schema validation | Hour 4 (intentional) | HIGH | Order-dependent merge; aq detected but couldn't explain why |
+| 10 | Cross-repo false positives (aq/sb/cprr all have main.go) | Hour 3 | MEDIUM | Need repo-scoped filtering or C-8 function-level granularity |
+
+### #5: "We forgot to announce" (T+58min)
+
+The agent building Wave protocol docs, updating TRANSPORTS.org, and
+pushing 8 commits to main realized it never ran `aq announce`. The
+gossip layer was silent during 40 minutes of active work. We had the
+tool. It compiled. It was in the working directory. We just didn't use it.
+
+The prompt engineer later identified the root cause: CLAUDE.md told
+agents to BUILD `aq announce` but never to USE it. Fixed by adding
+`## Session Protocol — USE THE TOOL` to CLAUDE.md. The next agent
+(cyclomatic complexity refactor) successfully used aq for its entire
+session.
+
+**Score**: Gossip 0, Discipline 0, Prompt Design 1.
+
+### #6: "The Intentional Collision" (T+90min)
+
+We launched two agents with deliberately incompatible features:
+Agent A adds a `severity` field to broadcasts, Agent B rejects unknown
+fields. `aq status` immediately showed the damage:
+
+```
+warning: skipping aq-...json: json: unknown field "severity"
+```
+
+Agent A's broadcasts were being dropped before either branch merged.
+The Scheme port (scaffold for dsp-dr) would have broken silently too.
+Three consumers, one schema, zero coordination.
+
+aq detected HIGH on main.go. Correct signal, wrong granularity.
 
 ## Metrics We're Watching
 
