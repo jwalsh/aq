@@ -1,0 +1,6 @@
+X-Agent-Role: invariants
+X-Conjectures: C-1, C-2, C-4 (invariants provide runtime verification for all three)
+X-Testing: 59 tests pass with -race after this commit
+X-Invariants: 12 invariants: files_exist, git_branch_matches, phase_valid, ttl_reasonable, paths_relative, branch_not_diverged, no_ghost_broadcasts, disk_space_ok, ulid_unique, no_duplicate_active, timestamps_sane, all_paths_relative_in_active
+X-Deviations: invariants warn but never block — respects gossip axiom
+X-Timeline: 2026-03-13T00:00:00Z
