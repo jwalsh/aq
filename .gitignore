@@ -45,3 +45,4 @@ Thumbs.db
 
 # aq runtime (local state, not source)
 .aq/
+worktrees/
