@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -819,5 +820,490 @@ func TestSeverityRank(t *testing.T) {
 	}
 	if severityRank("medium") >= severityRank("low") {
 		t.Error("medium should rank lower (more severe) than low")
+	}
+}
+
+// ---------- Invariant Tests ----------
+// Layer A: Self-checks
+
+func TestFilesExist_AllPresent(t *testing.T) {
+	// Create temporary files that exist.
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.go")
+	f2 := filepath.Join(dir, "b.go")
+	os.WriteFile(f1, []byte("package a"), 0o644)
+	os.WriteFile(f2, []byte("package b"), 0o644)
+
+	result := checkFilesExist([]string{f1, f2})
+	if !result.Passed {
+		t.Errorf("expected pass, got fail: %s", result.Message)
+	}
+	if result.Name != "files_exist" {
+		t.Errorf("name = %q, want %q", result.Name, "files_exist")
+	}
+	if result.Category != "self" {
+		t.Errorf("category = %q, want %q", result.Category, "self")
+	}
+}
+
+func TestFilesExist_SomeMissing(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "exists.go")
+	os.WriteFile(existing, []byte("package x"), 0o644)
+	missing := filepath.Join(dir, "ghost.go")
+
+	result := checkFilesExist([]string{existing, missing})
+	if result.Passed {
+		t.Error("expected fail when some files are missing")
+	}
+	if !strings.Contains(result.Message, "ghost.go") {
+		t.Errorf("message should mention missing file: %s", result.Message)
+	}
+	if result.Severity != "warning" {
+		t.Errorf("severity = %q, want %q", result.Severity, "warning")
+	}
+}
+
+func TestFilesExist_Empty(t *testing.T) {
+	// Empty file list: all zero files "exist".
+	result := checkFilesExist([]string{})
+	if !result.Passed {
+		t.Errorf("empty file list should pass: %s", result.Message)
+	}
+}
+
+func TestPhaseValid_AllPhases(t *testing.T) {
+	valid := []string{"conjecture", "proof", "refutation", "refinement"}
+	for _, phase := range valid {
+		result := checkPhaseValid(phase)
+		if !result.Passed {
+			t.Errorf("phase %q should be valid", phase)
+		}
+	}
+}
+
+func TestPhaseValid_Invalid(t *testing.T) {
+	invalid := []string{"", "draft", "done", "PROOF", "Proof"}
+	for _, phase := range invalid {
+		result := checkPhaseValid(phase)
+		if result.Passed {
+			t.Errorf("phase %q should be invalid", phase)
+		}
+		if result.Severity != "error" {
+			t.Errorf("invalid phase severity = %q, want %q", result.Severity, "error")
+		}
+	}
+}
+
+func TestTTLReasonable_Valid(t *testing.T) {
+	cases := []int{10, 60, 300, 1800, 3600, 86400}
+	for _, ttl := range cases {
+		result := checkTTLReasonable(ttl)
+		if !result.Passed {
+			t.Errorf("TTL %d should be reasonable: %s", ttl, result.Message)
+		}
+	}
+}
+
+func TestTTLReasonable_TooShort(t *testing.T) {
+	cases := []int{0, 1, 5, 9}
+	for _, ttl := range cases {
+		result := checkTTLReasonable(ttl)
+		if result.Passed {
+			t.Errorf("TTL %d should be too short", ttl)
+		}
+		if result.Severity != "warning" {
+			t.Errorf("severity = %q, want %q", result.Severity, "warning")
+		}
+	}
+}
+
+func TestTTLReasonable_TooLong(t *testing.T) {
+	result := checkTTLReasonable(86401)
+	if result.Passed {
+		t.Error("TTL 86401 should be too long")
+	}
+	result2 := checkTTLReasonable(999999)
+	if result2.Passed {
+		t.Error("TTL 999999 should be too long")
+	}
+}
+
+func TestPathsRelative_AllRelative(t *testing.T) {
+	result := checkPathsRelative([]string{"main.go", "src/auth.py", "docs/README.md"})
+	if !result.Passed {
+		t.Errorf("all relative paths should pass: %s", result.Message)
+	}
+}
+
+func TestPathsRelative_SomeAbsolute(t *testing.T) {
+	result := checkPathsRelative([]string{"main.go", "/usr/local/bin/aq", "/etc/config"})
+	if result.Passed {
+		t.Error("absolute paths should fail")
+	}
+	if result.Severity != "error" {
+		t.Errorf("severity = %q, want %q", result.Severity, "error")
+	}
+	if !strings.Contains(result.Message, "/usr/local/bin/aq") {
+		t.Errorf("message should mention the absolute path: %s", result.Message)
+	}
+}
+
+func TestPathsRelative_Empty(t *testing.T) {
+	result := checkPathsRelative([]string{})
+	if !result.Passed {
+		t.Error("empty file list should pass")
+	}
+}
+
+// Layer B: World-checks
+
+func TestNoGhostBroadcasts_NoGhosts(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write a fresh broadcast.
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "test/agent"
+		b.Ts = float64(time.Now().Unix())
+		b.TTL = 300
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	result := checkNoGhostBroadcasts("test/agent", "broadcast")
+	if !result.Passed {
+		t.Errorf("fresh broadcast should not be a ghost: %s", result.Message)
+	}
+}
+
+func TestNoGhostBroadcasts_NearExpiry(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write a broadcast that is 95% through its TTL (near expiry).
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "test/agent"
+		b.Ts = float64(time.Now().Unix()) - 285 // 285s of 300s TTL elapsed
+		b.TTL = 300
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	result := checkNoGhostBroadcasts("test/agent", "broadcast")
+	if result.Passed {
+		t.Error("near-expiry broadcast should be flagged as ghost")
+	}
+	if result.Severity != "warning" {
+		t.Errorf("severity = %q, want %q", result.Severity, "warning")
+	}
+}
+
+func TestNoGhostBroadcasts_DifferentAgent(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write a near-expiry broadcast for a different agent.
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "other/agent"
+		b.Ts = float64(time.Now().Unix()) - 285
+		b.TTL = 300
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	// Check for "test/agent" -- should not see other agent's ghosts.
+	result := checkNoGhostBroadcasts("test/agent", "broadcast")
+	if !result.Passed {
+		t.Error("should not flag other agent's broadcasts as ghosts")
+	}
+}
+
+func TestDiskSpaceOK_Small(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Write a small file to AQ_HOME.
+	os.MkdirAll(filepath.Join(home, "channels", "broadcast", "requests"), 0o755)
+	os.WriteFile(filepath.Join(home, "channels", "broadcast", "requests", "small.json"), []byte("{}"), 0o644)
+
+	result := checkDiskSpaceOK()
+	if !result.Passed {
+		t.Errorf("small AQ_HOME should pass: %s", result.Message)
+	}
+}
+
+// Layer C: Protocol-checks
+
+func TestULIDUnique_AllUnique(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write three broadcasts with unique IDs.
+	for i := 0; i < 3; i++ {
+		b := makeBroadcast(func(b *Broadcast) {
+			b.Agent = fmt.Sprintf("agent/%d", i)
+		})
+		_, _ = writeBroadcast(b, "broadcast")
+	}
+
+	result := checkULIDUnique("broadcast")
+	if !result.Passed {
+		t.Errorf("unique ULIDs should pass: %s", result.Message)
+	}
+}
+
+func TestULIDUnique_Duplicate(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Write two broadcasts with the same ULID.
+	fixedID := "aabbccddee0011223344"
+	// Pad to 22 chars.
+	for len(fixedID) < 22 {
+		fixedID += "0"
+	}
+
+	b1 := makeBroadcast(func(b *Broadcast) {
+		b.ID = fixedID
+		b.Agent = "agent/one"
+	})
+	b2 := makeBroadcast(func(b *Broadcast) {
+		b.ID = fixedID
+		b.Agent = "agent/two"
+		b.Ts = b1.Ts + 1 // Different timestamp so different filename.
+	})
+
+	reqDir := filepath.Join(home, "channels", "broadcast", "requests")
+	os.MkdirAll(reqDir, 0o755)
+
+	// Write them manually with different filenames.
+	d1, _ := b1.ToJSON()
+	d2, _ := b2.ToJSON()
+	os.WriteFile(filepath.Join(reqDir, "aq-00000000000001-"+fixedID+".json"), []byte(d1+"\n"), 0o644)
+	os.WriteFile(filepath.Join(reqDir, "aq-00000000000002-"+fixedID+".json"), []byte(d2+"\n"), 0o644)
+
+	result := checkULIDUnique("broadcast")
+	if result.Passed {
+		t.Error("duplicate ULIDs should fail")
+	}
+	if result.Severity != "error" {
+		t.Errorf("severity = %q, want %q", result.Severity, "error")
+	}
+}
+
+func TestNoDuplicateActive_Clean(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Two broadcasts from different agents.
+	b1 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/alpha"
+		b.ConjectureID = "C-1"
+	})
+	b2 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/beta"
+		b.ConjectureID = "C-1"
+	})
+	_, _ = writeBroadcast(b1, "broadcast")
+	_, _ = writeBroadcast(b2, "broadcast")
+
+	result := checkNoDuplicateActive("broadcast")
+	if !result.Passed {
+		t.Errorf("different agents same conjecture should pass: %s", result.Message)
+	}
+}
+
+func TestNoDuplicateActive_Duplicate(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Two active broadcasts from same agent + same conjecture.
+	b1 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/alpha"
+		b.ConjectureID = "C-1"
+		b.Status = "prosecuting"
+	})
+	b2 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/alpha"
+		b.ConjectureID = "C-1"
+		b.Status = "prosecuting"
+	})
+	_, _ = writeBroadcast(b1, "broadcast")
+	_, _ = writeBroadcast(b2, "broadcast")
+
+	result := checkNoDuplicateActive("broadcast")
+	if result.Passed {
+		t.Error("duplicate active broadcasts from same agent should fail")
+	}
+	if result.Severity != "warning" {
+		t.Errorf("severity = %q, want %q", result.Severity, "warning")
+	}
+}
+
+func TestNoDuplicateActive_DoneExempt(t *testing.T) {
+	makeTempAQHome(t)
+
+	// One active, one done -- should not count as duplicate.
+	b1 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/alpha"
+		b.ConjectureID = "C-1"
+		b.Status = "prosecuting"
+	})
+	b2 := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent/alpha"
+		b.ConjectureID = "C-1"
+		b.Status = "done"
+	})
+	_, _ = writeBroadcast(b1, "broadcast")
+	_, _ = writeBroadcast(b2, "broadcast")
+
+	result := checkNoDuplicateActive("broadcast")
+	if !result.Passed {
+		t.Errorf("done + active should not count as duplicate: %s", result.Message)
+	}
+}
+
+func TestTimestampsSane_AllPast(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Ts = float64(time.Now().Unix()) - 10
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	result := checkTimestampsSane("broadcast")
+	if !result.Passed {
+		t.Errorf("past timestamps should pass: %s", result.Message)
+	}
+}
+
+func TestTimestampsSane_Future(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Write a broadcast with a future timestamp.
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Ts = float64(time.Now().Unix()) + 3600 // 1 hour in the future
+		b.TTL = 7200                             // Keep it "active"
+	})
+	reqDir := filepath.Join(home, "channels", "broadcast", "requests")
+	os.MkdirAll(reqDir, 0o755)
+	d, _ := b.ToJSON()
+	ts := fmt.Sprintf("%014d", int64(b.Ts))
+	os.WriteFile(filepath.Join(reqDir, fmt.Sprintf("aq-%s-%s.json", ts, b.ID)), []byte(d+"\n"), 0o644)
+
+	result := checkTimestampsSane("broadcast")
+	if result.Passed {
+		t.Error("future timestamp should fail")
+	}
+	if result.Severity != "error" {
+		t.Errorf("severity = %q, want %q", result.Severity, "error")
+	}
+}
+
+func TestAllPathsRelativeInActive_Clean(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"main.go", "src/lib.go"}
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	result := checkAllPathsRelativeInActive("broadcast")
+	if !result.Passed {
+		t.Errorf("relative paths should pass: %s", result.Message)
+	}
+}
+
+func TestAllPathsRelativeInActive_Absolute(t *testing.T) {
+	makeTempAQHome(t)
+
+	b := makeBroadcast(func(b *Broadcast) {
+		b.Files = []string{"/etc/passwd", "main.go"}
+	})
+	_, _ = writeBroadcast(b, "broadcast")
+
+	result := checkAllPathsRelativeInActive("broadcast")
+	if result.Passed {
+		t.Error("absolute path in broadcast should fail")
+	}
+	if result.Severity != "error" {
+		t.Errorf("severity = %q, want %q", result.Severity, "error")
+	}
+}
+
+// Test runSelfChecks integration.
+func TestRunSelfChecks_Integration(t *testing.T) {
+	dir := t.TempDir()
+	existingFile := filepath.Join(dir, "exists.go")
+	os.WriteFile(existingFile, []byte("package x"), 0o644)
+
+	b := Broadcast{
+		Agent:    "test/agent",
+		Worktree: "main",
+		Phase:    "proof",
+		Status:   "prosecuting",
+		Files:    []string{existingFile},
+		TTL:      300,
+	}
+
+	results := runSelfChecks(b)
+	// Should have: files_exist, paths_relative (absolute path!), git_branch_matches, phase_valid, ttl_reasonable
+	if len(results) < 5 {
+		t.Errorf("expected at least 5 results, got %d", len(results))
+	}
+
+	// Check that paths_relative catches the absolute temp path.
+	var pathResult *InvariantResult
+	for i := range results {
+		if results[i].Name == "paths_relative" {
+			pathResult = &results[i]
+			break
+		}
+	}
+	if pathResult == nil {
+		t.Fatal("paths_relative result not found")
+	}
+	if pathResult.Passed {
+		t.Error("absolute temp dir path should fail paths_relative")
+	}
+}
+
+// Test countFailures.
+func TestCountFailures(t *testing.T) {
+	results := []InvariantResult{
+		{Passed: true, Severity: "info"},
+		{Passed: false, Severity: "error"},
+		{Passed: false, Severity: "warning"},
+		{Passed: false, Severity: "warning"},
+		{Passed: true, Severity: "info"},
+		{Passed: false, Severity: "error"},
+	}
+
+	errs, warns := countFailures(results)
+	if errs != 2 {
+		t.Errorf("errors = %d, want 2", errs)
+	}
+	if warns != 2 {
+		t.Errorf("warnings = %d, want 2", warns)
+	}
+}
+
+// Test InvariantResult JSON serialization.
+func TestInvariantResult_JSON(t *testing.T) {
+	r := InvariantResult{
+		Name:     "files_exist",
+		Passed:   true,
+		Message:  "all 3 files exist",
+		Category: "self",
+		Severity: "info",
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var restored InvariantResult
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if restored.Name != r.Name {
+		t.Errorf("Name = %q, want %q", restored.Name, r.Name)
+	}
+	if restored.Passed != r.Passed {
+		t.Errorf("Passed = %v, want %v", restored.Passed, r.Passed)
+	}
+	if restored.Category != r.Category {
+		t.Errorf("Category = %q, want %q", restored.Category, r.Category)
 	}
 }
