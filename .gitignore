@@ -46,3 +46,7 @@ Thumbs.db
 # aq runtime (local state, not source)
 .aq/
 worktrees/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
