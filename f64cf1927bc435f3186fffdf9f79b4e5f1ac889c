@@ -1,0 +1,5 @@
+X-Agent-Role: ci-infrastructure
+X-Conjectures: C-1 (CI validates filesystem transport compiles and passes on linux)
+X-Testing: CI runs test -race on every push/PR
+X-Beads: aq-zgy
+X-Timeline: 2026-03-13T00:00:00Z
