@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -10,3 +11,37 @@ build/
 .pytest_cache/
 .venv/
 venv/
+
+# Go
+aq
+aq-linux-*
+aq-darwin-*
+aq-freebsd-*
+aq-windows-*
+
+# Secrets — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+token.json
+.secrets/
+.tokens/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# aq runtime (local state, not source)
+.aq/
