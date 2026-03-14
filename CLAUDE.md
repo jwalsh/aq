@@ -5,15 +5,16 @@ bugs. Do not plan without building. Do not summarize without shipping.
 
 ## Foundational Axiom
 
-Presence broadcast prevents semantic conflicts before they become merge conflicts. No orchestrator required.
+aq is gossip, not coordination. Agents broadcast presence; nobody is required to listen.
 
-Existing multi-agent tools optimize for *centralized coordination* — orchestrators,
-message brokers, task queues. This fails because it introduces a single point of
-failure and couples agents that should be autonomous. `aq` inverts this: agents
-broadcast what they're doing; peers detect conflicts themselves. The filesystem
-is the bus.
+`aq` occupies L1.5 in the seven-concern stack — between authoritative work
+state (L1, `bd`) and established knowledge retrieval (L2, `JITIR`). It is the
+mDNS of multi-agent development: broadcast "does anyone know this address?",
+cost near zero, benefit when someone does know is conflict avoidance before
+the merge wall. No orchestrator, no broker, no authority. Just gossip.
 
-Do not optimize for centralized coordination at any layer of the stack.
+Do not make `aq` authoritative, do not make it a retrieval system, do not
+make it coordinate. It broadcasts. That's it.
 
 ## Confirmation Gate
 
@@ -23,9 +24,10 @@ addressing, (2) which files you will touch, (3) which conjectures are relevant,
 
 ## What You Are Building
 
-- `aq`: a minimal ambient presence bus for multi-agent development
+- `aq`: a gossip layer (L1.5) for multi-agent development — ambient presence, not coordination
 - Agents broadcast worktree, conjecture, phase, and files they're touching
 - Peers detect semantic conflicts via file overlap + CPRR phase severity
+- No broadcast carries obligation; all expire via TTL; silence is normal
 
 ## Explicit Anti-Goals
 

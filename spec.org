@@ -534,6 +534,102 @@ graph LR
     AQ -->|informs| WITNESS["Witness / Gas Town"]
 #+end_src
 
+* Position in Seven Concerns
+
+=aq= occupies *L1.5* in the seven-concern stack for agentic work.
+It is a gossip layer: not authoritative, not retrieval, just presence.
+
+| L   | Concern         | Question                                        | Tool            |
+|-----+-----------------+-------------------------------------------------+-----------------|
+|   7 | Coordination    | Who does what, in what order?                   | Gastown         |
+|   6 | Instrumentation | Which workflow governs this session?             | Organon         |
+|   5 | Control         | Who is allowed to act, can we prove it?          | SEFACA          |
+|   4 | Validation      | Built right, built correctly?                    | Elenctic-Spec   |
+|   3 | Reasoning       | What do we believe, how would we know wrong?     | CPRR            |
+|   2 | Memory          | What do we already know before we re-learn it?   | JITIR           |
+| 1.5 | *Presence*      | *Does anyone know what's happening right now?*   | *aq*            |
+|   1 | Work            | What needs doing, what is its state?             | bd / beads      |
+
+** Why L1.5, not L1 or L2
+
+- *L1* (=bd=) is *authoritative* — a bead's state is a fact, written and owned.
+  =aq= is not authoritative. A broadcast carries no obligation and may expire
+  unread. A bead doesn't know who else is touching the same code; =aq= is the
+  layer that does.
+
+- *L2* (=JITIR=) is *retrieval* — "I know this because I indexed it."
+  =aq= is not retrieval. JITIR answers definitively about established knowledge;
+  =aq= answers probabilistically about in-flight uncertainty.
+
+** The mDNS analogy
+
+L2 is DNS: authoritative, query/response. L1.5 is mDNS / Zeroconf / Bonjour:
+broadcast, "does anyone know this address?" Nobody is required to answer.
+The knowledge may not exist. But the broadcast is still worth making because
+the cost is near zero and the benefit when someone /does/ know is conflict
+avoidance before the merge wall.
+
+** Wave, reframed
+
+Google Wave was trying to build L1.5 for documents. They never framed it
+that way, which is probably why they couldn't explain what it was for.
+=aq= takes the presence semantics and drops everything else.
+
+* Intellectual Lineage
+
+** Gossip protocols in distributed systems
+
+Anti-entropy gossip (Cassandra, DynamoDB, ~2007) proved that eventual
+consistency via rumor-mongering scales to thousands of nodes with minimal
+overhead. =aq= applies this to agent coordination: eventual situational
+awareness via filesystem-backed broadcast.
+
+** GEACL: Gossip-Enhanced Agentic Coordination Layer
+
+Two arXiv papers landed in 2025 formalizing exactly what =aq= implements:
+
+- *arXiv 2508.01531* (Aug 2025): Argues gossip protocols offer a missing
+  layer for context-rich, adaptive communication in agentic AI. Raises
+  unresolved challenges: semantic filtering, staleness, trustworthiness,
+  consistency in high-stakes environments.
+
+- *arXiv 2512.03285* (Dec 2025): Introduces *GEACL* — treats gossip as a
+  tunable substrate beneath structured protocols. MCP/A2A handle intent,
+  roles, and tools; gossip maintains weakly consistent situational alignment.
+
+Key GEACL insight relevant to =aq=: context-aware suppression. Safety-critical
+updates must propagate aggressively (=aq announce=); routine updates can be
+throttled (=aq whisper=). This maps directly to TTL design.
+
+The papers explicitly state "rather than proposing a complete framework" —
+they write the research agenda; =aq= builds the tool.
+
+#+begin_example
+Gossip protocols (Cassandra/DynamoDB, ~2007)
+    ↓
+GEACL vision papers (arXiv 2508.01531, 2512.03285 — 2025)
+    ↓
+aq — concrete instantiation:
+    sb    = spatial scope of the gossip
+    cprr  = semantic payload (not just heartbeat, but conjecture)
+    TTL   = knowledge decay / suppression semantics
+    files = conflict surface encoded in the rumor itself
+#+end_example
+
+** Gap aq fills that MCP/A2A do not
+
+From arXiv 2512.03285:
+
+#+begin_quote
+MCP lacks constructs for collaborative state convergence. There is no
+framework for bottom-up task claiming, bidding, or peer negotiation.
+Swarm-style organization — patterns such as decentralized delegation,
+emergent clustering, or reflexive adaptation — are outside its specification.
+#+end_quote
+
+=aq= is not trying to replace MCP/A2A. It is the layer beneath them
+that neither defines.
+
 * Secondary Documents
 
 Documents to be added. Each must declare which conjectures it elaborates
