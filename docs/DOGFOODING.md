@@ -409,6 +409,43 @@ a one-liner: `## Position in Seven Concerns` with
 `L[N]: [Concern] — answers: [question]`. We have this in README.org's
 full table but not in the agent-facing CLAUDE.md template.
 
+### Cross-repo and cross-machine: it just works (and it just false-positives)
+
+Tested `aq` across sibling repos (`../sb`, `../cprr`, `../aq`) using the
+global `~/.aq/` channel. Three agents in three different repos all announced.
+`aq status` showed the full ecosystem at a glance:
+
+```
+github.com/jwalsh/aq/main      C-1  [proof]       main.go
+github.com/jwalsh/sb/main      C-6  [conjecture]  main.go
+github.com/jwalsh/cprr/main    C-4  [proof]       main.go
+```
+
+Then `aq check` flagged HIGH between aq and cprr (both proof, shared
+`main.go`) — but they're different repos. The file overlap heuristic
+can't distinguish `aq/main.go` from `cprr/main.go`. Same C-8 problem,
+now cross-repo.
+
+The multi-machine case is trivially supported: `AQ_HOME=/mnt/shared/.aq`
+and every machine that can see the mount shares the channel. No code
+changes. This is the Tier 0.5 row in TRANSPORTS.org — NFS, SMB, WebDAV,
+S3-via-FUSE all work because `announce()` writes a file and `read_active()`
+lists a directory.
+
+What you'd hit on a shared mount:
+
+- **TTL cliff is worse**: network latency eats into the 300s window
+- **No auth**: filesystem permissions are the only ACL
+- **No encryption**: broadcasts are plaintext JSON on the mount
+- **Consistency**: NFS close-to-open is fine for 300s TTL; S3 eventual
+  consistency could miss a broadcast for 1-2s
+
+**Observation**: The design assumed this from day one — `AQ_HOME` is an
+env var, not hardcoded. The filesystem abstraction *is* the transport
+abstraction. Cross-machine presence works out of the box. Cross-repo
+false positives do too. C-1 gets its real test on a shared mount, not
+localhost.
+
 ### Stale binary, stale gossip (T+58min)
 
 We tried to run `aq validate` to verify the SOA déjà vu additions.
