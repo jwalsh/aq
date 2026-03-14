@@ -379,6 +379,25 @@ a one-liner: `## Position in Seven Concerns` with
 `L[N]: [Concern] — answers: [question]`. We have this in README.org's
 full table but not in the agent-facing CLAUDE.md template.
 
+### Stale binary, stale gossip (T+58min)
+
+We tried to run `aq validate` to verify the SOA déjà vu additions.
+Got `unknown command 'validate'`. The invariants agent added the
+command to `main.go` and it was committed, but we never rebuilt the
+binary. The binary on disk was from the pre-invariants build. `go build`
+fixed it. `aq validate` then passed 7/7 invariants.
+
+**Observation**: A gossip tool that requires manual compilation after
+every code change has the same problem as manual `aq announce` — nobody
+remembers to do it. The `printUsage()` help text also didn't list
+`validate` even though the command existed. Two invisibility failures:
+the binary was stale, and the help text omitted the command. For the
+rebuild: `make build` should be a pre-commit hook, and help text should
+be generated from the command dispatch table, not hand-maintained.
+
+Protocol gap #8: stale binary = stale capabilities. The tool had
+invariants. The running copy didn't know.
+
 ### What this means for the rebuild
 
 This session's data — the failures, the humor log, the protocol gaps,
