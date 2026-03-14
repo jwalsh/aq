@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-qpa
+X-Conjectures: C-4, C-2, C-1
+X-Testing: lean type-check pass (0 errors, 0 warnings, 0 sorry), aq validate 7/7 pass
+X-Invariants: all 10 theorems proved without sorry; severity function matches conflict.py and main.go
+X-Deviations: used Phase.isProof helper instead of BEq for cleaner proofs; severity uses pattern match instead of boolean conditionals
+X-Timeline: single session, spec/Aq.lean created and verified
