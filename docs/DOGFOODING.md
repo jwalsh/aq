@@ -220,6 +220,75 @@ exercise tested aq in its worst-case scenario and found it wanting --
 but that is the expected result. The tool was designed for a different
 operating point.
 
+## 8. Hour 2 Failures: The Merge and Beyond
+
+### The invariants agent discovered ghost broadcasts
+
+After the 4-agent parallel build, an invariants agent was launched to add
+advisory assertions. It discovered `no_ghost_broadcasts` -- checking whether
+broadcasts reference files that don't exist. In the single-file convention
+where all agents touched `main.go`, every broadcast referenced a real file.
+But what about the broadcasts from the Python prototype? Those referenced
+`auth.py` and `session.py` -- files that existed in the spec but never in
+the Go repo. Ghost gossip about phantom files.
+
+**Observation**: Invariants retroactively reveal that earlier broadcasts were
+lying. The gossip layer happily broadcast claims about non-existent files.
+Nobody noticed because nobody checked. The invariant system catches this --
+but only if someone runs `aq validate`. Advisory warnings with no audience
+are just logs.
+
+### The WS-* déjà vu
+
+A 2005 enterprise architect, reviewing DOGFOODING.md:
+
+> "So let me understand. You built a message bus. It has:
+>  - No guaranteed delivery          ✓ (we called this 'QoS 0')
+>  - No schema registry              ✓ (we called this 'UDDI')
+>  - TTL-based expiry                ✓ (we called this 'WS-Expiry')
+>  - Broadcast semantics             ✓ (we called this 'WS-Notification')
+>  - No transactions                 ✓ (we called this 'WS-AtomicTransaction, absent')
+>  - File-level conflict detection   ✓ (we called this 'pessimistic locking, absent')
+>  - Bootstrap problem               ✓ (we called this 'chicken-and-egg SOA governance')
+>  - Single point of... wait, you have no single point of failure?
+>
+> Hmm. You may have actually gotten that one right.
+>
+> But your TTL cliff? We had that. We called it 'UDDI entry expiry'.
+> Nobody re-registered their services either. The registry went stale
+> in about 5 minutes. We wrote a 34-page WS-* specification about it.
+> You wrote a TODO comment. Different era, same problem."
+
+**Observation**: Every problem aq encountered has prior art in SOA governance
+circa 2003-2008. The UDDI registry expiry problem is *exactly* the TTL cliff.
+WS-Notification is *exactly* broadcast semantics. The difference: WS-* solved
+these problems with 34-page specs and XML Schema. aq solves them with JSON
+files in a directory. The failure modes are identical. The recovery cost is not.
+
+### The Wave protocol is dead but its ghost lingers
+
+waveprotocol.org returns ERR_CONNECTION_CLOSED. The site is down. The primary
+source for aq's spiritual ancestor is gone. We reconstructed the protocol
+from Apache SVN whitepapers and secondary sources (see docs/WAVE-PROTOCOL.md).
+
+**Observation**: Wave's presence-as-stream model is exactly what aq
+implements, but Wave coupled it to OT, XMPP, Protocol Buffers, and a
+five-layer data model. You couldn't get Wave's excellent presence semantics
+without buying the entire editing stack. aq decouples presence from everything
+else. That's the whole design thesis.
+
+### New conjectures from the wreckage
+
+| ID  | Conjecture | Refutation criterion |
+|-----|------------|---------------------|
+| C-6 | Local-first `.aq/` in cwd before `~/.aq/` | Local-first causes confusion when agents operate from different cwd |
+| C-7 | Auto-renewal / heartbeat prevents TTL cliff | Heartbeat daemon adds coupling that violates gossip axiom |
+| C-8 | Function-level granularity resolves single-file false positives | AST parsing adds complexity exceeding the value |
+
+C-6 is already implemented. C-7 is build step 5. C-8 is the hardest and
+most interesting -- it's where aq either becomes useful for the single-file
+ecosystem convention or admits that file-level is the wrong abstraction.
+
 ## Summary
 
 aq's design is sound for its intended use case (ambient presence in
@@ -230,3 +299,8 @@ problem (addressable with function-level tracking), and the TTL cliff
 filesystem-first transport, NDJSON format, and phase-based severity
 heuristic all proved their worth. The tool needs to exist before it can
 be evaluated fairly -- and now it does.
+
+Post-merge, two more issues surfaced: ghost broadcasts (claims about
+non-existent files) and the SOA déjà vu (every aq problem has WS-*
+prior art). The invariant system catches the first. History catches
+the second.
