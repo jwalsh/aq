@@ -1,0 +1,30 @@
+#!/bin/sh
+# aq pre-commit hook — auto-announce what you're about to commit
+#
+# This is C-7: if agents won't announce manually, make git do it.
+# "Manual gossip is an oxymoron" — DOGFOODING.md
+#
+# The hook is advisory: if aq isn't installed or fails, the commit
+# proceeds. Gossip is not coordination. A failed announce is not
+# a failed commit.
+
+command -v aq >/dev/null 2>&1 || exit 0
+
+# Get changed files from the staging area
+FILES=$(git diff --cached --name-only --diff-filter=ACMR | paste -sd, -)
+[ -z "$FILES" ] && exit 0
+
+# Try to detect conjecture from branch name (e.g., feat/C-7-heartbeat)
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+CONJECTURE=$(echo "$BRANCH" | grep -oE 'C-[0-9]+' || echo "C-0")
+
+# Announce — fire and forget
+aq announce \
+  -c "$CONJECTURE" \
+  --claim "committing: $(git log --format=%B -1 HEAD 2>/dev/null | head -1 || echo 'work in progress')" \
+  --phase proof \
+  -f "$FILES" \
+  --status prosecuting \
+  2>/dev/null || true
+
+exit 0
