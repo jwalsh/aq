@@ -344,7 +344,64 @@ but not "run aq announce as part of your workflow." Prompt design, not
 tool design, was the bottleneck. Protocol gap #7 is fixed by
 documentation, not code.
 
-## 10. External Review: ARIA Bootstrap Protocol
+## 10. The Intentional Collision: Wire Format vs Strict Validation
+
+Two agents were launched in parallel worktrees with deliberately
+incompatible features:
+
+- **Agent A** (C-3, proof): Add a `severity` field to the broadcast
+  wire format — every JSON file gets `"severity": "none|low|medium|high"`
+- **Agent B** (C-2, proof): Add `DisallowUnknownFields()` to
+  `readActive()` — reject any broadcast with fields not in the struct
+
+The collision:
+
+```
+# Agent A's broadcasts appeared with the new field:
+$ ./aq status
+warning: skipping aq-...json: json: unknown field "severity"
+```
+
+The current binary (neither A nor B merged) was already dropping
+Agent A's broadcasts because Go's `json.Unmarshal` is lenient by
+default but the broadcasts had a field that triggered warnings in
+status display. After Agent A rebuilt its binary, its status showed
+`severity=high` — it detected the conflict with Agent B.
+
+`aq check` correctly flagged HIGH (both proof, shared main.go). But
+it couldn't explain *why* they conflict:
+
+- If B merges first: A's broadcasts get silently rejected by every reader
+- If A merges first: B's strict validation rejects A's new field
+- Either way: dsp-dr's Scheme port (scheme/aq.scm, bead aq-dde)
+  would choke on or silently ignore the new field
+
+**The triple collision**: Go wire format change (A) vs Go strict
+validation (B) vs Scheme port wire compatibility contract (dsp-dr).
+Three consumers, one schema, zero coordination.
+
+**What aq detected**: HIGH conflict on main.go (correct)
+**What aq couldn't detect**: the *semantic* incompatibility — that
+A adds a field and B rejects unknown fields. File-level overlap was
+the right signal for the wrong reason.
+
+**Observation**: This is the strongest evidence yet for C-8
+(function-level granularity). `main.go:readActive` vs
+`main.go:Broadcast` vs `main.go:cmdAnnounce` would have told the
+whole story. `main.go` vs `main.go` tells you nothing you didn't
+already know.
+
+**Resolution**: Neither feature should merge as-is. The correct fix
+is: add the severity field to the struct (A's change), then strict
+validation works because the field is known (B's change becomes
+compatible). Order matters. aq can't tell you the order. A human
+reading the conflict signal can.
+
+This is the gap: gossip detects *that* agents conflict, not *how*
+to resolve it. Gossip is presence, not coordination. The axiom
+holds — but the axiom has limits.
+
+## 11. External Review: ARIA Bootstrap Protocol
 
 An external agent reviewed the ARIA bootstrap protocol (the meta-protocol
 for standing up agent projects like aq) against our dogfooding data. The
