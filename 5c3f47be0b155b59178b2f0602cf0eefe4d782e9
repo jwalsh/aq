@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: aq-os0, aq-2ew, aq-33b
+X-Conjectures: C-1, C-2, C-4
+X-Testing: 32/32 tests pass, go test ./... clean
+X-Invariants: tests use t.TempDir for isolation, no global state leakage
+X-Deviations: none
+X-Timeline: step 3 of 5 (tests — satisfies build order steps 2-3)
