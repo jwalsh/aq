@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: aq-os0
+X-Conjectures: C-1, C-4
+X-Testing: go build passes, 32 tests pass, smoke test (init/announce/status/doctor) passes
+X-Invariants: wire format matches Python prototype, filesystem-first transport preserved
+X-Deviations: aqHome() now checks .aq/ in cwd first (improvement over Python, per originating agent git note)
+X-Timeline: step 2 of 5 (core implementation — merged from 4 parallel agents)
