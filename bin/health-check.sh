@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}/src:${PYTHONPATH:-}"
+
 STATUS="ok"
 HARD_PASS=0
 HARD_FAIL=0
@@ -40,7 +43,7 @@ check_hard "CLAUDE.md"     "test -f CLAUDE.md"
 check_hard "AGENTS.md"     "test -f AGENTS.md"
 check_hard "cprr store"    "command -v cprr"
 check_hard "remote"        "git remote get-url origin"
-check_hard "python import" "python -c 'from aq.protocol import Broadcast'"
+check_hard "python import" "python3 -c 'from aq.protocol import Broadcast'"
 
 check_soft "bd server"     "bd list"
 check_soft "bd ready"      "bd ready"
