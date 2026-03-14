@@ -1,0 +1,9 @@
+X-Agent-Role: bootstrap
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: none
+X-Conjectures: none
+X-Testing: n/a (docs only)
+X-Invariants: CLAUDE.md axiom still before line 10
+X-Deviations: none
+X-Timeline: final bootstrap commit before handoff
