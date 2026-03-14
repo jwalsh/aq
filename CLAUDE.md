@@ -133,6 +133,29 @@ For C-4: compare alert rates between phase-based and flat severity.
 - pytest for testing
 - FSEvents (macOS) / inotify (Linux) for daemon
 
+## Git Notes (mandatory on every commit)
+
+After every commit, run `git notes add` with these trailers:
+
+```
+X-Agent-Role: <builder|reviewer|bootstrap|researcher>
+X-Agent-Runner: Claude Code <version>
+X-Agent-Model: <model name>
+X-Beads: <bead IDs touched, e.g. aq-os0, aq-78a>
+X-Conjectures: <conjecture IDs relevant, e.g. C-1, C-6>
+X-Testing: <what was tested, pass/fail>
+X-Invariants: <contracts or invariants preserved or violated>
+X-Deviations: <any deviation from plan or spec, or "none">
+X-Timeline: <wall clock if relevant, e.g. "step 3 of 9">
+```
+
+Push notes after pushing commits: `git push origin refs/notes/commits`
+
+Why: this project will be rebuilt multiple times by different agents.
+Notes are the provenance trail — which agent, which model, what was
+tested, what broke, what deviated. Without them, each rebuild starts
+cold.
+
 ## Acceptance: End-to-End Test
 
 Two agents in separate worktrees. Agent A announces `C-1, phase=proof, files=[auth.py]`.
