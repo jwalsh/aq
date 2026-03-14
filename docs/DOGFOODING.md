@@ -313,6 +313,79 @@ C-6 is already implemented. C-7 is build step 5. C-8 is the hardest and
 most interesting -- it's where aq either becomes useful for the single-file
 ecosystem convention or admits that file-level is the wrong abstraction.
 
+## 9. External Review: ARIA Bootstrap Protocol
+
+An external agent reviewed the ARIA bootstrap protocol (the meta-protocol
+for standing up agent projects like aq) against our dogfooding data. The
+review validates nearly every failure we documented and identifies where
+the bootstrap protocol itself is broken. Key findings:
+
+### What the dogfooding broke in the bootstrap protocol
+
+1. **Phase 9 (parallel agents) is dangerously naive.** "Launch parallel
+   agents: one per conjecture, one per component" with no mention of the
+   bootstrap paradox, TTL cliff, or worktree address instability. Our
+   session tested this on itself and failed in three documented ways
+   (§1, §2, §4). Phase 9 needs a "known failure modes" subsection
+   pointing at our JOURNEY.md patterns.
+
+2. **No presence layer in Phase 1.** The bootstrap sequence sets up `git`,
+   `bd`, `sb`, `cprr` but nothing coordinates agent awareness during
+   parallel work. Should add `aq init && aq announce` to Phase 1.
+   The absence of presence is what produces Humor Log #4 ("Gossip 0,
+   Chaos 1").
+
+3. **Phase 6 memory files are pre-JITIR.** `user_role.md`,
+   `project_state.md` are hand-written files that go stale. The actual
+   L2 memory layer is JITIR (sqlite-vec retrieval). The protocol only
+   describes session memory (`.claude/` files), not corpus memory.
+
+4. **No empirical update cycle.** Phase 4 review happens before any code
+   runs. There's no "Phase 10: after first dogfooding run, update
+   conjecture statuses and open new conjectures for observed failure
+   modes." This is the CPRR loop failing to close. We produced C-1
+   partially refuted, C-2 refuted, C-4 partially refuted in 58 minutes
+   -- and the protocol has no phase for absorbing that.
+
+5. **Conjectures treated as backlog items.** `cprr add` appears alongside
+   `bd create` as if they're the same thing. A bead is a task
+   (authoritative, L1). A conjecture is an epistemic frame (L3).
+   Conjectures are not done when their build step merges; they're done
+   when their measurement hook has produced data.
+
+### The anti-pattern we should have named
+
+| Anti-pattern | Description |
+|-------------|-------------|
+| Reinventing WS-* | If your protocol is structurally equivalent to UDDI (discovery), WS-Notification (broadcast), WS-Coordination (consensus), or WS-AtomicTransaction (distributed commit) — and it probably is — name the prior art and explain why the 2005 version failed. The failure reasons usually still apply. |
+| Self-bootstrapping | This protocol cannot bootstrap itself. Gossip was silent during its own construction. The first run is always manual. Phases 1-3 are necessarily human-driven. The automation starts at Phase 4. The ouroboros is the design, not a bug. |
+
+### What the review got right about axioms
+
+> "The axiom must survive 8k token context compression, which means it
+> should be both short *and* non-obvious. 'Don't build a task queue' is
+> a good axiom because it's counterintuitive. 'Build good software' is
+> a bad axiom because it compresses to nothing."
+
+Our axiom — "aq is gossip, not coordination" — survives compression
+because it's counterintuitive. You'd expect a multi-agent tool to
+coordinate. Saying it doesn't is the information-carrying signal.
+
+### Seven Concerns gap
+
+The review notes that an agent building at L5 (SEFACA/control) needs
+different framing than one at L1 (bd/work state). CLAUDE.md should have
+a one-liner: `## Position in Seven Concerns` with
+`L[N]: [Concern] — answers: [question]`. We have this in README.org's
+full table but not in the agent-facing CLAUDE.md template.
+
+### What this means for the rebuild
+
+This session's data — the failures, the humor log, the protocol gaps,
+the external review — is the input for the next version of the bootstrap
+protocol. The spec (spec.org) was what we thought we wanted to build.
+DOGFOODING.md is what we actually learned. The next spec starts here.
+
 ## Summary
 
 aq's design is sound for its intended use case (ambient presence in
@@ -325,6 +398,11 @@ heuristic all proved their worth. The tool needs to exist before it can
 be evaluated fairly -- and now it does.
 
 Post-merge, two more issues surfaced: ghost broadcasts (claims about
-non-existent files) and the SOA déjà vu (every aq problem has WS-*
-prior art). The invariant system catches the first. History catches
-the second.
+non-existent files), the SOA déjà vu (every aq problem has WS-*
+prior art), and an agent that forgot to announce while documenting
+gossip. The invariant system catches the first. History catches the
+second. Irony catches the third.
+
+External review of the bootstrap protocol confirmed: the dogfooding
+data is load-bearing for the next version. The spec was pre-empirical.
+This document is the empirical record. The rebuild starts from here.
