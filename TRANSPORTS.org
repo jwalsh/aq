@@ -68,6 +68,155 @@ Scores are 0–100 against L1.5 requirements. Higher = better fit.
 
 * The TRAMP Principle
 
+** TRAMP as Design Philosophy, Not Just Transport
+
+Emacs [[https://www.gnu.org/software/tramp/][TRAMP]] — *Transparent Remote Access, Multiple Protocols* — is the
+closest prior art for what =aq='s transport layer should be. Not because
+TRAMP is /a/ transport option (though it is), but because TRAMP's
+architecture is the architecture =aq='s transport layer should follow.
+
+The structural parallel:
+
+| Concept                | TRAMP                             | aq                                 |
+|------------------------+-----------------------------------+------------------------------------|
+| Core operation         | =find-file= on any path           | =announce()= on any channel       |
+| Caller awareness       | None — local and remote identical  | None — filesystem and NATS identical |
+| Method registration    | =tramp-methods= alist             | =Channel= interface (3 methods)   |
+| Composition            | Multi-hop: =ssh:\vert{}bastille:=  | Multi-transport fan-out            |
+| Auto-routing           | =tramp-default-proxies-alist=     | transport config by context        |
+| Degradation            | Falls back to local paths          | Falls back to filesystem           |
+| What it doesn't do     | Doesn't manage files               | Doesn't manage work                |
+| What it provides       | Transparent access to remote files | Transparent access to remote presence |
+
+TRAMP's key insight, articulated in 1998: *the consumer of file I/O
+should not change behavior based on where the file lives.* A =save-buffer=
+on =/ssh:nexus:/root/.aq/broadcasts/aq-123.json= is identical to a
+=save-buffer= on =/root/.aq/broadcasts/aq-123.json=. Emacs doesn't know.
+The user doesn't care.
+
+=aq='s transport insight is the same: *the consumer of presence should
+not change behavior based on how the broadcast propagated.* An
+=aq check= that reads from a NATS subject returns the same conflict
+signals as =aq check= that reads from a local directory. The agent
+doesn't know. The operator doesn't care.
+
+** TRAMP Method Registration → aq Channel Registration
+
+TRAMP registers methods in a flat alist:
+
+#+begin_src elisp :eval no
+(add-to-list 'tramp-methods
+  '("bastille"
+    (tramp-login-program "sudo")
+    (tramp-login-args (("bastille") ("console") ("%h")))
+    (tramp-remote-shell "/bin/sh")
+    (tramp-remote-shell-args ("-i" "-c"))))
+#+end_src
+
+Three required fields: a login program, arguments, and a shell. That's it.
+Every TRAMP operation — =file-exists-p=, =insert-file-contents=,
+=write-region= — works through this registration without knowing whether
+the underlying transport is SSH, Docker, or a FreeBSD jail.
+
+=aq='s Channel interface follows the same pattern:
+
+#+begin_src go :eval no
+type Channel interface {
+    Publish(broadcast Broadcast) error
+    Subscribe(handler func(Broadcast)) error
+    Active() ([]Broadcast, error)
+}
+#+end_src
+
+Three required methods: Publish, Subscribe, Active. Every =aq= operation
+— =announce=, =check=, =status= — works through this registration without
+knowing whether the underlying transport is a directory, a NATS subject,
+or a Postgres LISTEN/NOTIFY channel.
+
+The correspondence:
+
+| TRAMP method field      | aq Channel method | Purpose                    |
+|-------------------------+-------------------+----------------------------|
+| =tramp-login-program=   | (constructor)     | How to connect             |
+| =insert-file-contents=  | =Active()=        | Read what's there          |
+| =write-region=          | =Publish()=       | Write a presence entry     |
+| =file-notify-add-watch= | =Subscribe()=     | React to changes           |
+
+** TRAMP Multi-Hop → aq Multi-Transport
+
+TRAMP's most powerful feature is multi-hop composition:
+
+#+begin_example
+/ssh:operator@restricted|ssh:operator@sandbox|bastille:agent-alpha:/root/.aq/
+#+end_example
+
+Three protocols chained. The final =find-file= doesn't know it crossed
+two SSH sessions and a jail boundary. Each hop only knows about its
+neighbors.
+
+=aq='s equivalent: a =MultiChannel= compositor that fans out a single
+=Publish()= to multiple backends:
+
+#+begin_src go :eval no
+type MultiChannel struct {
+    channels []Channel
+}
+
+func (mc *MultiChannel) Publish(b Broadcast) error {
+    for _, ch := range mc.channels {
+        ch.Publish(b) // Errors are non-fatal — gossip is lossy-ok
+    }
+    return nil
+}
+#+end_src
+
+An =aq announce= writes to the local directory AND broadcasts via mDNS
+AND publishes to NATS. Each backend only knows about its own protocol.
+The agent doesn't know how many transports are active.
+
+This is TRAMP's multi-hop, rotated 90°: instead of chaining protocols in
+series (SSH → SSH → jail), =aq= fans them out in parallel (filesystem +
+mDNS + NATS). Same principle — transparent composition of protocol
+methods — different topology.
+
+** TRAMP Proxy Auto-Routing → aq Transport Context
+
+TRAMP's =tramp-default-proxies-alist= auto-routes based on hostname patterns:
+
+#+begin_src elisp :eval no
+;; Any host matching "agent-.*" routes through sandbox
+(add-to-list 'tramp-default-proxies-alist
+             '("agent-.*" nil "/ssh:operator@sandbox:"))
+#+end_src
+
+The user types =/bastille:agent-alpha:/root/=. TRAMP silently prepends
+the SSH hop. No manual multi-hop syntax needed.
+
+=aq= should do the same with transport context. A config file
+(=~/.aq/config.toml=) maps contexts to transports:
+
+#+begin_src toml :eval no
+# When inside a k8s pod, also announce via NATS
+[transport.nats]
+enabled = true
+match = "*.pod.cluster.local"
+url = "nats://nats.aq-system:4222"
+
+# When on the local network, also announce via mDNS
+[transport.mdns]
+enabled = true
+match = "*.tail"
+#+end_src
+
+Like TRAMP's proxy list, the agent never specifies the transport. The
+context determines which channels are active. =aq announce= in a k8s pod
+automatically fans out to filesystem + NATS. =aq announce= on a Tailscale
+host automatically fans out to filesystem + mDNS. The agent's code is
+identical in both cases.
+
+** TRAMP as Concrete Transport
+
+Beyond the design philosophy, TRAMP is also a literal Tier 0.5 transport.
 From Emacs, any path TRAMP understands is a valid =AQ_HOME=:
 
 #+begin_src elisp :eval no
@@ -75,6 +224,7 @@ From Emacs, any path TRAMP understands is a valid =AQ_HOME=:
 (setenv "AQ_HOME" "/ssh:nexus:/home/jasonwalsh/.aq")
 (setenv "AQ_HOME" "/docker:aq-agent-1:/tmp/.aq")
 (setenv "AQ_HOME" "/kubernetes:pod/aq-worker:/tmp/.aq")
+(setenv "AQ_HOME" "/bastille:agent-alpha:/root/.aq")
 (setenv "AQ_HOME" "/s3:aq-presence-bucket:/channels")
 #+end_src
 
@@ -84,15 +234,19 @@ path is a valid aq transport with zero code changes.*
 
 TRAMP protocols relevant to the nexus+mini+k8s mesh:
 
-| TRAMP method | Underlying protocol | Use case                        |
-|--------------+---------------------+---------------------------------|
-| =/ssh:=      | SSH                 | nexus ↔ mini over Tailscale     |
-| =/sftp:=     | SFTP                | same, SFTP semantics            |
-| =/docker:=   | Docker exec         | agents in containers            |
-| =/podman:=   | Podman exec         | rootless containers             |
-| =/kubernetes:= | kubectl exec      | k8s pod agents                  |
-| =/s3:=       | S3 API (tramp-s3)   | cloud agents, MinIO             |
-| =/sudo:=     | local sudo          | privileged jail agents          |
+| TRAMP method   | Underlying protocol | Use case                        |
+|----------------+---------------------+---------------------------------|
+| =/ssh:=        | SSH                 | nexus ↔ mini over Tailscale     |
+| =/sftp:=       | SFTP                | same, SFTP semantics            |
+| =/docker:=     | Docker exec         | agents in containers            |
+| =/podman:=     | Podman exec         | rootless containers             |
+| =/kubernetes:= | kubectl exec        | k8s pod agents                  |
+| =/bastille:=   | bastille console    | FreeBSD jail agents             |
+| =/s3:=         | S3 API (tramp-s3)   | cloud agents, MinIO             |
+| =/sudo:=       | local sudo          | privileged jail agents          |
+
+See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for the full multi-hop topology with
+FreeBSD Bastille jails, ECS, GKE, and Compute Engine methods.
 
 This means the Elisp =emacs-mcp-maximalist= integration gets cross-machine
 =aq= for free — =aq-announce= from Emacs on mini can write to nexus's

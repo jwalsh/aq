@@ -8,12 +8,14 @@
 // Postgres LISTEN if AQ_POSTGRES_URL is set.
 //
 // Usage:
-//   go run contrib/dashboard/server.go
+//
+//	go run contrib/dashboard/server.go
 //
 // Environment:
-//   AQ_DASHBOARD_PORT  — HTTP port (default 8085)
-//   AQ_HOME            — aq state directory (default ~/.aq)
-//   AQ_POSTGRES_URL    — optional Postgres connection for live NOTIFY
+//
+//	AQ_DASHBOARD_PORT  — HTTP port (default 8085)
+//	AQ_HOME            — aq state directory (default ~/.aq)
+//	AQ_POSTGRES_URL    — optional Postgres connection for live NOTIFY
 package main
 
 import (

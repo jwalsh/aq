@@ -6,11 +6,13 @@
 // Postgres is a Tier 2 transport. Filesystem (Tier 0) is always required.
 //
 // Dependencies (not in go.mod -- this file is standalone):
-//   go get github.com/lib/pq
+//
+//	go get github.com/lib/pq
 //
 // Usage:
-//   export AQ_POSTGRES_URL="postgres://localhost:5432/aq?sslmode=disable"
-//   go run contrib/postgres/aq-pg.go
+//
+//	export AQ_POSTGRES_URL="postgres://localhost:5432/aq?sslmode=disable"
+//	go run contrib/postgres/aq-pg.go
 package main
 
 import (

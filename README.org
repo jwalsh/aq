@@ -26,6 +26,34 @@ aq is gossip, not coordination. Agents broadcast presence; nobody is
 required to listen.
 #+end_quote
 
+** The TRAMP Principle
+
+Emacs [[https://www.gnu.org/software/tramp/][TRAMP]] — *Transparent Remote Access, Multiple Protocols* — makes
+remote files look local. =find-file= on =/ssh:host:/path= works exactly
+like =find-file= on =/path=. The caller doesn't know or care about the
+transport. The method is registered once; every operation thereafter is
+transparent.
+
+=aq= follows the same principle for presence: *Transparent Remote
+Presence, Multiple Transports*. =announce()= on a NATS subject works
+exactly like =announce()= on a local directory. The transport is
+registered once; every operation thereafter is transparent. The caller
+never knows how the broadcast propagated.
+
+| TRAMP                         | aq                              |
+|-------------------------------+---------------------------------|
+| =find-file= — one interface  | =announce()= — one interface    |
+| =tramp-methods= alist        | =Channel= interface (3 methods) |
+| =/ssh:\vert{}bastille:= hops | filesystem + mDNS + NATS fan-out |
+| =tramp-default-proxies-alist= | transport auto-routing by context |
+| Degrades to local paths       | Degrades to filesystem           |
+| Doesn't manage files          | Doesn't manage work              |
+
+TRAMP is not /a/ transport for =aq=. TRAMP is the /design philosophy/
+that =aq='s transport layer embodies. The filesystem is just the first
+method. See [[file:TRANSPORTS.org][TRANSPORTS.org]] §The TRAMP Principle for the full mapping,
+and =contrib/tramp/= for the Emacs integration.
+
 ** What aq is NOT
 
 - *Not an orchestrator* (Temporal, Airflow, CrewAI) --- orchestrators
@@ -198,25 +226,33 @@ Point =AQ_HOME= at the mount and it works:
 AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
 #+end_src
 
-** TRAMP Overlay
+** TRAMP as Concrete Transport
 
-[[https://github.com/aygp-dr/tramp-workshop][Emacs TRAMP]] is a Tier 0.5 transport that deserves special mention.
-TRAMP makes remote filesystems transparent to Emacs --- multi-hop SSH,
-sudo escalation, and even FreeBSD Bastille jail access all collapse into
-a single path. Since aq's filesystem transport is just =read()= and
-=write()= on =AQ_HOME=, TRAMP-accessed paths work without modification:
+TRAMP is also a literal Tier 0.5 transport. Any TRAMP path works as =AQ_HOME=:
 
 #+begin_src emacs-lisp
-;; Agent in a Bastille jail broadcasts via TRAMP
+;; Local (Tier 0)
+(setq aq-home "~/.aq")
+
+;; Remote via SSH (Tier 0.5)
+(setq aq-home "/ssh:nexus:/home/jasonwalsh/.aq")
+
+;; FreeBSD jail (Tier 0.5) — see aygp-dr/tramp-workshop
 (setq aq-home "/ssh:operator@sandbox|bastille:agent-alpha:/root/.aq/")
+
+;; Multi-home fan-out (TRAMP multi-hop, rotated 90°)
+(setq aq-homes '("~/.aq"
+                  "/ssh:nexus:/home/jasonwalsh/.aq"
+                  "/bastille:agent-alpha:/root/.aq"))
 #+end_src
 
-This matters for agentic isolation: each agent runs in its own jail with
-its own =~/.aq/=, but the operator sees all broadcasts from Emacs via
-TRAMP hops. The gossip layer follows the same transparent-FS principle
-as NFS/SMB --- it doesn't know or care that the files are remote.
+The =contrib/tramp/aq-tramp.el= package provides =aq-announce=,
+=aq-status=, =aq-check=, and =aq-watch= — all implemented with Emacs
+file primitives (=write-region=, =directory-files=, =file-notify-add-watch=)
+that TRAMP makes transparent. Zero network code.
 
-See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for the full multi-hop topology.
+See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for the multi-hop topology (Bastille jails,
+ECS, GKE, Compute Engine).
 
 Full evaluation of all transports, including scoring methodology and
 sketches for NATS, etcd, S3, MQTT, IRC, and BBS implementations:
