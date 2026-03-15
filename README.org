@@ -52,7 +52,7 @@ never knows how the broadcast propagated.
 
 TRAMP is not /a/ transport for =aq=. TRAMP is the /design philosophy/
 that =aq='s transport layer embodies. The filesystem is just the first
-method. See [[file:TRANSPORTS.org][TRANSPORTS.org]] §The TRAMP Principle for the full mapping,
+method. See [[file:docs/TRANSPORTS.org][docs/TRANSPORTS.org]] §The TRAMP Principle for the full mapping,
 and =contrib/tramp/= for the Emacs integration.
 
 ** What aq is NOT
@@ -290,7 +290,7 @@ ECS, GKE, Compute Engine).
 
 Full evaluation of all transports, including scoring methodology and
 sketches for NATS, etcd, S3, MQTT, IRC, and BBS implementations:
-[[file:TRANSPORTS.org][TRANSPORTS.org]].
+[[file:docs/TRANSPORTS.org][docs/TRANSPORTS.org]].
 
 * Position in Seven Concerns
 
