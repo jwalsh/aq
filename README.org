@@ -180,6 +180,7 @@ requirements.
 |-------+------------------------+----------+-----------------------------------------|
 | 0     | Filesystem (~/.aq/)    |       95 | Canonical. Debuggable with =ls= and =cat=. |
 | 0.5   | NFS / SMB / WebDAV     |       50--72 | Same code, just mount and set =AQ_HOME= |
+| 0.5   | TRAMP (Emacs)          |       70 | Multi-hop transparent remote FS via Emacs |
 | 1     | NATS / Redis pub/sub   |    68--88 | When cross-machine latency matters      |
 | 1.5   | S3 / MinIO             |       58 | Cloud or k8s-hosted agents              |
 | 2     | etcd                   |       62 | Already present if running k8s          |
@@ -196,6 +197,26 @@ Point =AQ_HOME= at the mount and it works:
 #+begin_src bash
 AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
 #+end_src
+
+** TRAMP Overlay
+
+[[https://github.com/aygp-dr/tramp-workshop][Emacs TRAMP]] is a Tier 0.5 transport that deserves special mention.
+TRAMP makes remote filesystems transparent to Emacs --- multi-hop SSH,
+sudo escalation, and even FreeBSD Bastille jail access all collapse into
+a single path. Since aq's filesystem transport is just =read()= and
+=write()= on =AQ_HOME=, TRAMP-accessed paths work without modification:
+
+#+begin_src emacs-lisp
+;; Agent in a Bastille jail broadcasts via TRAMP
+(setq aq-home "/ssh:operator@sandbox|bastille:agent-alpha:/root/.aq/")
+#+end_src
+
+This matters for agentic isolation: each agent runs in its own jail with
+its own =~/.aq/=, but the operator sees all broadcasts from Emacs via
+TRAMP hops. The gossip layer follows the same transparent-FS principle
+as NFS/SMB --- it doesn't know or care that the files are remote.
+
+See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for the full multi-hop topology.
 
 Full evaluation of all transports, including scoring methodology and
 sketches for NATS, etcd, S3, MQTT, IRC, and BBS implementations:
