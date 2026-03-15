@@ -63,6 +63,43 @@ func generateULID() string {
 
 // ---------- Broadcast payload ----------
 
+// Phase represents a CPRR epistemic phase.
+type Phase string
+
+const (
+	PhaseConjecture Phase = "conjecture"
+	PhaseProof      Phase = "proof"
+	PhaseRefutation Phase = "refutation"
+	PhaseRefinement Phase = "refinement"
+)
+
+// Valid returns true if p is one of the four CPRR phases.
+func (p Phase) Valid() bool {
+	switch p {
+	case PhaseConjecture, PhaseProof, PhaseRefutation, PhaseRefinement:
+		return true
+	}
+	return false
+}
+
+// Status represents a broadcast's work status.
+type Status string
+
+const (
+	StatusProsecuting Status = "prosecuting"
+	StatusDone        Status = "done"
+	StatusBlocked     Status = "blocked"
+)
+
+// Severity represents a conflict severity level.
+type Severity string
+
+const (
+	SeverityHigh   Severity = "high"
+	SeverityMedium Severity = "medium"
+	SeverityLow    Severity = "low"
+)
+
 // Broadcast is the ambient presence payload. Lifecycle:
 //  1. announce() before touching files
 //  2. re-announce every TTL/2 while working
@@ -72,8 +109,8 @@ type Broadcast struct {
 	Worktree        string   `json:"worktree"`
 	ConjectureID    string   `json:"conjecture_id"`
 	ConjectureClaim string   `json:"conjecture_claim"`
-	Phase           string   `json:"phase"`
-	Status          string   `json:"status"`
+	Phase           Phase    `json:"phase"`
+	Status          Status   `json:"status"`
 	Files           []string `json:"files"`
 	Ts              float64  `json:"ts"`
 	TTL             int      `json:"ttl"`
@@ -132,14 +169,14 @@ type ConflictSignal struct {
 	A           Broadcast `json:"a"`
 	B           Broadcast `json:"b"`
 	SharedFiles []string  `json:"shared_files"`
-	Severity    string    `json:"severity"` // low | medium | high
+	Severity    Severity  `json:"severity"`
 }
 
 // Summary returns a human-readable one-liner for the conflict.
 func (c *ConflictSignal) Summary() string {
 	files := strings.Join(c.SharedFiles, ", ")
 	return fmt.Sprintf("[%s] %s (%s) <-> %s (%s) -- shared: %s",
-		strings.ToUpper(c.Severity),
+		strings.ToUpper(string(c.Severity)),
 		c.A.Agent, c.A.ConjectureID,
 		c.B.Agent, c.B.ConjectureID,
 		files)
@@ -234,14 +271,8 @@ func checkGitBranchMatches(worktree string) InvariantResult {
 }
 
 // checkPhaseValid verifies that the phase is one of the four valid CPRR phases.
-func checkPhaseValid(phase string) InvariantResult {
-	valid := map[string]bool{
-		"conjecture": true,
-		"proof":      true,
-		"refutation": true,
-		"refinement": true,
-	}
-	if !valid[phase] {
+func checkPhaseValid(phase Phase) InvariantResult {
+	if !phase.Valid() {
 		return InvariantResult{
 			Name:     "phase_valid",
 			Passed:   false,
@@ -508,7 +539,7 @@ func checkNoDuplicateActive(channel string) InvariantResult {
 	var duplicates []string
 
 	for _, b := range active {
-		if b.Status == "done" {
+		if b.Status == StatusDone {
 			continue
 		}
 		k := key{b.Agent, b.ConjectureID}
@@ -888,14 +919,14 @@ func readActive(channel string) ([]Broadcast, error) {
 
 // ---------- Conflict detection ----------
 
-// severityRank maps severity strings to sort order (lower = more severe).
-func severityRank(s string) int {
+// severityRank maps Severity to sort order (lower = more severe).
+func severityRank(s Severity) int {
 	switch s {
-	case "high":
+	case SeverityHigh:
 		return 0
-	case "medium":
+	case SeverityMedium:
 		return 1
-	case "low":
+	case SeverityLow:
 		return 2
 	default:
 		return 3
@@ -917,7 +948,7 @@ func checkConflicts(me Broadcast, channel string) ([]ConflictSignal, error) {
 		}
 		// Skip agents that have announced they're done — their broadcast
 		// is still active (not expired) but should not trigger conflicts.
-		if other.Status == "done" {
+		if other.Status == StatusDone {
 			continue
 		}
 
@@ -939,13 +970,13 @@ func checkConflicts(me Broadcast, channel string) ([]ConflictSignal, error) {
 		sort.Strings(shared)
 
 		// Severity: three lines, not a table (per originating agent's note).
-		bothProof := me.Phase == "proof" && other.Phase == "proof"
-		oneProof := me.Phase == "proof" || other.Phase == "proof"
-		severity := "low"
+		bothProof := me.Phase == PhaseProof && other.Phase == PhaseProof
+		oneProof := me.Phase == PhaseProof || other.Phase == PhaseProof
+		severity := SeverityLow
 		if bothProof {
-			severity = "high"
+			severity = SeverityHigh
 		} else if oneProof {
-			severity = "medium"
+			severity = SeverityMedium
 		}
 
 		signals = append(signals, ConflictSignal{
@@ -1044,8 +1075,8 @@ func buildAnnounceBroadcast(p announceParams) Broadcast {
 	b.Worktree = sb.Branch
 	b.ConjectureID = p.conjecture
 	b.ConjectureClaim = claim
-	b.Phase = p.phase
-	b.Status = p.status
+	b.Phase = Phase(p.phase)
+	b.Status = Status(p.status)
 	b.Files = parseFileList(p.files)
 	b.TTL = p.ttl
 	return b
@@ -1173,8 +1204,8 @@ func buildCheckBroadcast(p checkParams) Broadcast {
 	me.Agent = sb.AgentAddress
 	me.Worktree = sb.Branch
 	me.ConjectureID = conjecture
-	me.Phase = p.phase
-	me.Status = "prosecuting"
+	me.Phase = Phase(p.phase)
+	me.Status = StatusProsecuting
 	me.Files = parseFileList(p.files)
 	return me
 }
@@ -1200,7 +1231,7 @@ func outputConflictSignals(signals []ConflictSignal) int {
 	}
 
 	for _, s := range signals {
-		if s.Severity == "high" {
+		if s.Severity == SeverityHigh {
 			return 1
 		}
 	}
@@ -1373,80 +1404,76 @@ func cmdDoctor(args []string) int {
 
 Usage: aq doctor
 
-Checks AQ_HOME, channel directories, config, active broadcasts,
-and ecosystem tool availability.
+Verifies AQ_HOME, channels, config, broadcasts, and tools.
 `)
 			return 0
 		}
 	}
 
-	fmt.Println("aq doctor — health check")
-	fmt.Println()
-
 	home := aqHome()
-	var warnings, errors int
+	var errs, warns int
 
-	// AQ_HOME exists.
+	// Core paths.
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
-		fmt.Printf("x AQ_HOME: %s does not exist\n", home)
-		fmt.Println("  Fix: aq init")
-		errors++
+		fmt.Printf("FAIL  home       %s (run: aq init)\n", home)
+		errs++
 	} else {
-		fmt.Printf("+ AQ_HOME: %s\n", home)
+		fmt.Printf("ok    home       %s\n", home)
 	}
 
-	// Channel directory.
 	ch := channelPath(channelName)
 	if info, err := os.Stat(ch); err != nil || !info.IsDir() {
-		fmt.Printf("x Channel '%s': not found\n", channelName)
-		errors++
+		fmt.Printf("FAIL  channel    %s not found\n", channelName)
+		errs++
 	} else {
-		fmt.Printf("+ Channel '%s': %s\n", channelName, ch)
+		fmt.Printf("ok    channel    %s\n", channelName)
 	}
 
-	// Config file.
 	configPath := filepath.Join(home, "config.json")
 	if _, err := os.Stat(configPath); err != nil {
-		fmt.Println("! Config: config.json missing")
-		warnings++
+		fmt.Printf("warn  config     missing\n")
+		warns++
 	} else {
-		fmt.Println("+ Config: config.json present")
+		fmt.Printf("ok    config     present\n")
 	}
 
-	// Active broadcasts.
+	// Broadcasts.
 	active, err := readActive(channelName)
 	if err != nil {
-		fmt.Printf("! Active broadcasts: error reading (%v)\n", err)
-		warnings++
+		fmt.Printf("warn  broadcasts read error\n")
+		warns++
 	} else {
-		fmt.Printf("+ Active broadcasts: %d\n", len(active))
+		fmt.Printf("ok    broadcasts %d active\n", len(active))
 	}
 
-	// Sandbox detection.
+	// Agent identity.
 	sb := detectSandbox()
-	fmt.Printf("+ Agent address: %s\n", sb.AgentAddress)
+	fmt.Printf("ok    agent      %s\n", sb.AgentAddress)
 
-	// Ecosystem tools.
+	// Ecosystem tools: git is required, others optional.
 	for _, tool := range []string{"git", "sb", "cprr"} {
-		cmd := exec.Command(tool, "version")
-		out, err := cmd.Output()
-		if err != nil {
-			fmt.Printf("! %s: not found\n", tool)
+		if _, err := exec.LookPath(tool); err != nil {
 			if tool == "git" {
-				errors++
+				fmt.Printf("FAIL  tool       %s not found\n", tool)
+				errs++
 			} else {
-				warnings++
+				fmt.Printf("warn  tool       %s not found\n", tool)
+				warns++
 			}
 		} else {
-			fmt.Printf("+ %s: %s\n", tool, strings.TrimSpace(string(out)))
+			fmt.Printf("ok    tool       %s\n", tool)
 		}
 	}
 
-	fmt.Println()
-	fmt.Printf("Overall: %d warning(s), %d error(s)\n", warnings, errors)
-
-	if errors > 0 {
+	// Summary.
+	if errs > 0 {
+		fmt.Printf("\n%d error(s), %d warning(s)\n", errs, warns)
 		return 1
+	}
+	if warns > 0 {
+		fmt.Printf("\nall ok, %d warning(s)\n", warns)
+	} else {
+		fmt.Printf("\nall ok\n")
 	}
 	return 0
 }
@@ -1468,12 +1495,12 @@ Usage: aq quickstart
 	active, _ := readActive(channelName)
 	var highCount, medCount int
 	for _, b := range active {
-		me := Broadcast{Agent: sb.AgentAddress, Phase: "proof", Files: b.Files}
+		me := Broadcast{Agent: sb.AgentAddress, Phase: PhaseProof, Files: b.Files}
 		signals, _ := checkConflicts(me, channelName)
 		for _, s := range signals {
-			if s.Severity == "high" {
+			if s.Severity == SeverityHigh {
 				highCount++
-			} else if s.Severity == "medium" {
+			} else if s.Severity == SeverityMedium {
 				medCount++
 			}
 		}
@@ -1562,7 +1589,7 @@ Options:
 		b := NewBroadcast()
 		b.Agent = sb.AgentAddress
 		b.Worktree = sb.Branch
-		b.Phase = "proof"
+		b.Phase = PhaseProof
 		results = runSelfChecks(b)
 	case "world":
 		if !jsonOutput {

@@ -137,9 +137,22 @@ the best ideas from each agent is the right approach:
 - **Skip**: redundant simplifications where two agents did the same thing
   differently (5 vs 10 on readActive)
 
-## Protocol Gap
+## Protocol Gaps
 
-This experiment documents **Protocol Gap #11**: concept-level conflict
-detection is load-bearing, not optional. The gossip layer can see all
-broadcasts but cannot interpret semantic overlap between claims. C-9
-is promoted from "proposed" to "required."
+**#11**: Concept-level conflict detection is load-bearing, not optional.
+The gossip layer can see all broadcasts but cannot interpret semantic
+overlap between claims. C-9 is promoted from "proposed" to "required."
+
+**#12 (Monorepo Pathology)**: Agent identity is tied to worktree address,
+not to the agent itself. When multiple logical agents share one physical
+worktree (monorepo, or parallel agents in the same checkout), the
+self-exclusion logic (`if other.Agent == my.Agent { continue }`) makes
+them invisible to each other. Discovered when 5 builder agents all ran
+from `github.com/jwalsh/builder-workspace/main` — Agent 5 (SmartPetFeeder)
+checked for conflicts against Agent 3's (PeerLearningNetwork) files and
+got "no conflicts" because both had the same agent address.
+
+The fix: agent identity should come from the broadcast (conjecture ID,
+claim, or an explicit `--agent-id` flag), not from `git remote + branch`.
+Two broadcasts with different conjecture IDs from the same worktree are
+different agents.

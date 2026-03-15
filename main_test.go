@@ -875,7 +875,7 @@ func TestFilesExist_Empty(t *testing.T) {
 }
 
 func TestPhaseValid_AllPhases(t *testing.T) {
-	valid := []string{"conjecture", "proof", "refutation", "refinement"}
+	valid := []Phase{PhaseConjecture, PhaseProof, PhaseRefutation, PhaseRefinement}
 	for _, phase := range valid {
 		result := checkPhaseValid(phase)
 		if !result.Passed {
@@ -885,7 +885,7 @@ func TestPhaseValid_AllPhases(t *testing.T) {
 }
 
 func TestPhaseValid_Invalid(t *testing.T) {
-	invalid := []string{"", "draft", "done", "PROOF", "Proof"}
+	invalid := []Phase{"", "draft", "done", "PROOF", "Proof"}
 	for _, phase := range invalid {
 		result := checkPhaseValid(phase)
 		if result.Passed {
