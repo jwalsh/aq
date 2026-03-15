@@ -21,18 +21,22 @@ make it coordinate. It broadcasts. That's it.
 aq is installed. Use it. Every session, no exceptions:
 
 ```bash
-# BEFORE touching any files — announce what you're about to do
-aq announce -c <conjecture> --claim "<what>" --phase <phase> -f "<files>"
+# BEFORE starting — announce your intent (what you're thinking, not what files)
+aq announce -c <conjecture> --claim "<your intent in plain language>" --phase <phase>
 
-# WHILE working — check for conflicts
-aq check -c <conjecture> -f "<files>"
+# WHILE working — check if anyone else is in the same conceptual space
+aq check -c <conjecture> --claim "<your intent>"
 
 # AFTER finishing — announce done
-aq announce -c <conjecture> --phase <phase> -f "<files>" --status done
+aq announce -c <conjecture> --claim "<what you did>" --phase <phase> --status done
 
 # BEFORE committing — validate invariants
 aq validate
 ```
+
+The claim is the primary signal. Write it so another agent reading it
+would *feel* the conceptual overlap with their own work. Not "touching
+auth.py" — instead "replacing session tokens with OAuth2 flow."
 
 If you skip the announce, you are the problem the tool was built to solve.
 The dogfooding proved this: agents forgot to announce every single time.
@@ -42,8 +46,9 @@ because of documented evidence in docs/DOGFOODING.md §8.
 ## Confirmation Gate
 
 Before writing any code, output a summary of: (1) which build step you are
-addressing, (2) which files you will touch, (3) which conjectures are relevant,
-(4) what the acceptance test is. Wait for confirmation before proceeding.
+addressing, (2) what your intent is (the claim another agent should feel
+overlap with), (3) which conjectures are relevant, (4) what the acceptance
+test is. Wait for confirmation before proceeding.
 
 ## What You Are Building
 
@@ -54,6 +59,10 @@ addressing, (2) which files you will touch, (3) which conjectures are relevant,
 
 ## Explicit Anti-Goals
 
+- **Not file locking** (VSS, RCS, SourceSafe): the problem is conceptual
+  and architectural conflict, not who has a file checked out. If `aq`
+  reduces to file overlap, it is VSS circa 2000. The conflict surface is
+  intent — incompatible ideas, not shared filenames.
 - **Not an orchestrator** (Temporal, Airflow, CrewAI): orchestrators create
   coupling and single points of failure. `aq` is peer-to-peer broadcast.
 - **Not a message broker** (Redis, RabbitMQ, NATS): brokers require a running
@@ -102,13 +111,13 @@ context (cprr), and the broadcast itself (aq). Do not decouple them.
 |-------------------|------------|------------------------------------------|
 | agent             | string     | `{remote}/{branch}` or worktree address  |
 | worktree          | string     | branch name                              |
-| conjecture_id     | string     | e.g. `C-1`                               |
-| conjecture_claim  | string     | human-readable claim                     |
+| conjecture_id     | string     | e.g. `C-1` — the idea being pursued     |
+| conjecture_claim  | string     | intent in plain language (primary signal) |
 | phase             | enum       | conjecture/proof/refutation/refinement   |
 | status            | enum       | prosecuting/done/blocked                 |
-| files             | list[str]  | files being touched                      |
+| files             | list[str]  | optional supporting context              |
 | ts                | float      | unix timestamp                           |
-| ttl               | int        | seconds until expiry (default 300)       |
+| ttl               | int        | seconds until expiry (default 3600)      |
 | id                | string     | ULID                                     |
 
 ## Build Order
@@ -116,7 +125,7 @@ context (cprr), and the broadcast itself (aq). Do not decouple them.
 1. **Tangle source from spec.org** — acceptance: `python -c "from aq.protocol import Broadcast"` succeeds
 2. **Unit tests for protocol** — acceptance: `pytest tests/` passes with ≥5 tests covering Broadcast, announce, read_active
 3. **Unit tests for conflict detection** — acceptance: tests cover all severity levels (low/medium/high) and expiry
-4. **CLI smoke test** — acceptance: `aq announce -c C-1 -f "foo.py"` writes a file; `aq status` reads it back
+4. **CLI smoke test** — acceptance: `aq announce -c C-1 --claim "testing transport"` writes a broadcast; `aq status` reads it back
 5. **Daemon with filesystem watch** — acceptance: new broadcast triggers conflict check within 1s
 6. **Integration: sb detect → aq announce** — acceptance: `aq announce -c C-1` auto-detects worktree without `--worktree` flag
 7. **Benchmark at scale** — acceptance: 10 agents, 100 msg/min, p99 < 500ms

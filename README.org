@@ -10,9 +10,10 @@
 * Overview
 
 =aq= is a gossip layer for multi-agent development. Agents broadcast
-presence --- which worktree, which conjecture, which files --- via
+intent --- which conjecture, what claim, what phase --- via
 filesystem-backed channels so peers detect semantic conflicts before
-they become merge conflicts. It is the mDNS of coding agents:
+they become merge conflicts. The conflict surface is *ideas and
+architecture*, not files. It is the mDNS of coding agents:
 "does anyone know this address?" Nobody is required to answer.
 
 =aq= occupies *L1.5* in a seven-concern stack, between =bd= (L1,
@@ -56,6 +57,12 @@ and =contrib/tramp/= for the Emacs integration.
 
 ** What aq is NOT
 
+- *Not file locking* (VSS, RCS, SourceSafe) --- the collaboration
+  problem is conceptual and architectural, not about who has a file
+  checked out. If =aq= reduces to "which files are touched," it is
+  VSS circa 2000 with extra steps. The real conflict surface is
+  *intent*: two agents pursuing incompatible ideas, even if they
+  touch zero shared files.
 - *Not an orchestrator* (Temporal, Airflow, CrewAI) --- orchestrators
   create coupling and single points of failure. =aq= is peer-to-peer
   broadcast.
@@ -88,16 +95,16 @@ make build && make install   # installs to ~/.local/bin
 # Initialize the channel directory
 aq init
 
-# Announce what you're working on
-aq announce -c C-1 -f "auth.py,session.py" --phase proof
+# Announce your intent — what you're thinking about, not just what you'll touch
+aq announce -c C-1 --claim "adding OAuth2 flow to replace session tokens" --phase proof
 
-# Whisper (low-priority, 60s TTL)
-aq whisper -c C-1 -f "readme.md"
+# Whisper a low-priority thought (60s TTL)
+aq whisper -c C-3 --claim "considering whether Wave semantics need OT"
 
-# Check for conflicts against active broadcasts
-aq check -c C-2 -f "auth.py"
+# Check: is anyone else working on a related idea?
+aq check -c C-2 --claim "removing legacy auth middleware"
 
-# See who's broadcasting
+# See who's broadcasting — what are agents thinking about right now?
 aq status
 
 # Health check
@@ -107,6 +114,15 @@ aq doctor
 aq status --json
 #+end_src
 
+The primary signal is the *conjecture and claim* --- what you intend,
+what you believe, what you're investigating. Files (=-f=) are optional
+supporting context, not the headline. Two agents can conflict on zero
+shared files if their claims are architecturally incompatible ("adding
+OAuth" vs "removing auth middleware"). Two agents touching the same file
+may not conflict at all if their conjectures are independent.
+
+=aq= is about *feels, not files*. The gossip carries intent.
+
 The Go binary is the primary implementation. The Python prototype in
 =src/aq/= is the canonical wire format reference. Both produce and
 consume the same NDJSON files in =~/.aq/channels/broadcast/=.
@@ -115,7 +131,8 @@ consume the same NDJSON files in =~/.aq/channels/broadcast/=.
 
 ** Broadcast payload
 
-Each broadcast is a single JSON object, one per file, newline-terminated:
+Each broadcast is a single JSON object, newline-terminated. The primary
+payload is the conjecture and claim --- the agent's intent:
 
 #+begin_src json
 {
@@ -127,7 +144,7 @@ Each broadcast is a single JSON object, one per file, newline-terminated:
   "status": "prosecuting",
   "files": ["auth.py", "session.py"],
   "ts": 1741824000.0,
-  "ttl": 300,
+  "ttl": 3600,
   "id": "01jd5abc12defg3456hi"
 }
 #+end_src
@@ -138,13 +155,13 @@ Each broadcast is a single JSON object, one per file, newline-terminated:
 |--------------------+------------+----------------------------------------|
 | =agent=            | string     | ~{remote}/{branch}~ or worktree addr   |
 | =worktree=         | string     | branch name                            |
-| =conjecture_id=    | string     | e.g. ~C-1~                             |
-| =conjecture_claim= | string     | human-readable claim                   |
+| =conjecture_id=    | string     | e.g. ~C-1~ --- the idea being pursued  |
+| =conjecture_claim= | string     | human-readable intent (primary signal)  |
 | =phase=            | enum       | conjecture / proof / refutation / refinement |
 | =status=           | enum       | prosecuting / done / blocked           |
-| =files=            | list[str]  | files being touched                    |
+| =files=            | list[str]  | optional --- files as supporting context |
 | =ts=               | float      | unix timestamp                         |
-| =ttl=              | int        | seconds until expiry (default 300)     |
+| =ttl=              | int        | seconds until expiry (default 3600)    |
 | =id=               | string     | ULID                                   |
 
 ** Filename format
@@ -159,7 +176,7 @@ needed for cleanup --- prune-on-read handles it.
 
 ** Lifecycle
 
-1. =announce()= before touching files
+1. =announce()= before starting work --- broadcast your intent
 2. Re-announce every ~TTL/2~ while working
 3. =announce(status="done")= when finished
 
@@ -180,23 +197,40 @@ coupled by design. An agent without spatial context is lost; a broadcast
 without epistemic context is noise; presence without a channel is
 silence.
 
-* Conflict Severity
+* Conflict Detection
 
-Three lines of logic, derived from CPRR phase:
+Conflicts are about *intent*, not files. Two agents conflict when their
+goals are architecturally incompatible --- even if they touch completely
+different code. The conflict signal is a composite of several inputs,
+ordered by priority:
 
 #+begin_src
-both proof + shared files = HIGH
-one proof  + shared files = MEDIUM
-neither proof + shared files = LOW
+1. Same conjecture ID                          → HIGH (always)
+2. Both proof phase + incompatible claims       → HIGH
+3. One proof phase + overlapping claims         → MEDIUM
+4. Overlapping files (legacy, lowest priority)  → context-dependent
 #+end_src
 
-Two agents in =proof= phase over the same files are actively building
-competing implementations. That is high risk. An agent in =conjecture=
-phase is still planning --- overlap is informational, not urgent.
+Examples:
+
+| Agent A claim                    | Agent B claim                   | Shared files? | Severity |
+|----------------------------------+---------------------------------+---------------+----------|
+| "adding OAuth2 flow"             | "removing auth middleware"      | none          | HIGH     |
+| "adding OAuth2 flow"             | "adding OAuth2 flow"            | none          | HIGH     |
+| "refactoring test helpers"       | "adding new integration tests"  | test_utils.py | LOW      |
+| "proving C-1 at scale"           | "proving C-1 at scale"          | main.go       | HIGH     |
+
+The first example is the critical case: zero file overlap, but the
+intents are architecturally incompatible. A file-only detector misses
+this entirely. The claim and conjecture are the primary signals; file
+overlap is supporting context.
 
 The exit condition: when one agent announces =status=done=, its
 broadcast stops matching in the next =read_active()= sweep (or expires
 via TTL). Conflict clears itself.
+
+See [[file:docs/CONCEPT-CONFLICTS.md][docs/CONCEPT-CONFLICTS.md]] for the full seven-level conflict
+taxonomy and composite scoring model (C-9).
 
 * Transport Tiers
 
@@ -371,6 +405,22 @@ without measurement are decorative.
   /Measurement/: compare alert rates between phase-based and flat
   severity.
 
+- *C-6*: Local-first =.aq/= in cwd before =~/.aq/=.
+  /Refutation/: local-first causes confusion when agents operate from
+  different cwd.
+  /Measurement/: track false routing incidents in multi-cwd sessions.
+
+- *C-7*: Auto-renewal / heartbeat prevents TTL cliff.
+  /Refutation/: heartbeat daemon adds coupling that violates gossip
+  axiom.
+  /Measurement/: compare broadcast coverage with and without heartbeat.
+
+- *C-8*: Function-level granularity resolves single-file false positives.
+  /Refutation/: AST parsing adds complexity that exceeds the value of
+  finer-grained conflict detection.
+  /Measurement/: compare false positive rates between file-level and
+  function-level detection.
+
 * Ecosystem
 
 =aq= is one tool in the DefRecord ecosystem:
@@ -387,6 +437,22 @@ Pattern reference for the Go port: =sb= and =cprr= are single-file Go
 CLIs using stdlib only with manual dispatch. =aq= follows the same
 pattern.
 
+* Contrib Packages
+
+The =contrib/= directory contains optional extensions that are not part
+of the core binary:
+
+| Package     | Description                                          |
+|-------------+------------------------------------------------------|
+| =dashboard= | WebSocket-based live dashboard (localhost:8085)      |
+| =postgres=  | PostgreSQL transport (Tier 1 alternative to filesystem) |
+| =mdns=      | mDNS/Bonjour broadcast demo (macOS)                 |
+| =chaos=     | Chaos test suite --- 6 scenarios, subprocess-based   |
+| =tramp=     | Emacs TRAMP integration (=aq-tramp.el=)              |
+
+All contrib packages are optional. The core =aq= binary has zero
+dependencies beyond Go stdlib.
+
 * Development
 
 ** Build and test
@@ -398,6 +464,15 @@ make test             # Run tests
 make test-race        # Run tests with race detector
 make lint             # go vet + fmt check + golangci-lint
 make install          # Install to ~/.local/bin
+
+# Demos and experiments
+make demo-announce    # Announce presence and show status
+make demo-conflict    # Two-agent conflict scenario
+make demo-status      # Show active broadcasts
+make demo-dashboard   # Start web dashboard (localhost:8085)
+make demo-mdns        # mDNS broadcast demo (macOS)
+make demo-chaos       # Run chaos tests (~2 min)
+make demo-bench       # Run Go benchmarks
 
 # Python (prototype, wire format reference)
 PYTHONPATH=src python -c "from aq.protocol import Broadcast"
@@ -438,10 +513,15 @@ tried to build =aq= using =aq=. Highlights:
   HIGH. Signal-to-noise ratio: zero. File-overlap detection assumes
   file-level isolation; single-file repos are the worst case.
 - TTL of 300s meant every broadcast expired while agents were still
-  working. Gossip with amnesia.
+  working. Gossip with amnesia. (DefaultTTL has since been bumped to
+  3600s to match real session length.)
 - Agents created their /own/ worktrees instead of using the ones set up
   for them. The gossip layer had perfect information about the wrong
   worktrees. Score: Gossip 0, Chaos 1.
+- Build step 7 chaos tests proved C-1 at scale: six scenarios, all
+  passing. 10 agents at p99 = 77ms; 50 agents at p99 = 239ms --- both
+  well under the 500ms refutation threshold. Filesystem transport is
+  not the bottleneck; subprocess overhead (~60ms per =aq announce=) is.
 
 Full account: [[file:docs/JOURNEY.md][docs/JOURNEY.md]].
 
@@ -457,5 +537,4 @@ This is the system's definition of done.
 
 * License
 
-TODO --- no LICENSE file yet. This is a public repository at
-[[https://github.com/jwalsh/aq][github.com/jwalsh/aq]].
+MIT. See [[file:LICENSE][LICENSE]].
