@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0
+X-Conjectures: C-1
+X-Testing: none (documentation only)
+X-Invariants: preserved
+X-Deviations: none
+X-Timeline: documentation addition per user request
