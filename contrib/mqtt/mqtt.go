@@ -37,16 +37,16 @@ import (
 
 // Broadcast is the aq broadcast payload. Same schema as main.go.
 type Broadcast struct {
-	ID               string   `json:"id"`
-	Agent            string   `json:"agent"`
-	Worktree         string   `json:"worktree"`
-	ConjectureID     string   `json:"conjecture_id"`
-	ConjectureClaim  string   `json:"conjecture_claim,omitempty"`
-	Phase            string   `json:"phase"`
-	Status           string   `json:"status"`
-	Files            []string `json:"files,omitempty"`
-	Timestamp        float64  `json:"ts"`
-	TTL              int      `json:"ttl"`
+	ID              string   `json:"id"`
+	Agent           string   `json:"agent"`
+	Worktree        string   `json:"worktree"`
+	ConjectureID    string   `json:"conjecture_id"`
+	ConjectureClaim string   `json:"conjecture_claim,omitempty"`
+	Phase           string   `json:"phase"`
+	Status          string   `json:"status"`
+	Files           []string `json:"files,omitempty"`
+	Timestamp       float64  `json:"ts"`
+	TTL             int      `json:"ttl"`
 }
 
 // MQTTChannel implements the Channel interface over MQTT.
@@ -91,9 +91,9 @@ func NewMQTTChannel(brokerURL, repo, agent, branch string) (*MQTTChannel, error)
 
 	// Will message: auto-announce done on unexpected disconnect.
 	willPayload := Broadcast{
-		Agent:    agent,
-		Worktree: branch,
-		Status:   "done",
+		Agent:     agent,
+		Worktree:  branch,
+		Status:    "done",
 		Timestamp: float64(time.Now().Unix()),
 	}
 	willBytes, _ := json.Marshal(willPayload)
