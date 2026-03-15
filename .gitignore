@@ -51,3 +51,10 @@ worktrees/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# TLA+ trace artifacts
+spec/*_TTrace_*.bin
+spec/*_TTrace_*.tla
+
+# PID/lock files
+*.pid.lock
