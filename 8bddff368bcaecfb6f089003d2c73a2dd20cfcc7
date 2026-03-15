@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0
+X-Conjectures: C-1, C-3, C-6
+X-Testing: go vet clean, gofmt clean, 71 tests pass
+X-Invariants: preserved — TRAMP principle is architectural, not behavioral
+X-Deviations: TRAMP elevated from transport line-item to design philosophy
+X-Timeline: TRAMP metaphor push per user request
