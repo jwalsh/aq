@@ -214,7 +214,6 @@ requirements.
 |-------+------------------------+----------+-----------------------------------------|
 | 0     | Filesystem (~/.aq/)    |       95 | Canonical. Debuggable with =ls= and =cat=. |
 | 0.5   | NFS / SMB / WebDAV     |       50--72 | Same code, just mount and set =AQ_HOME= |
-| 0.5   | TRAMP (Emacs)          |       70 | Multi-hop transparent remote FS via Emacs |
 | 1     | NATS / Redis pub/sub   |    68--88 | When cross-machine latency matters      |
 | 1.5   | S3 / MinIO             |       58 | Cloud or k8s-hosted agents              |
 | 2     | etcd                   |       62 | Already present if running k8s          |
@@ -229,40 +228,11 @@ NFS, SMB, and WebDAV mounts are transparent to =announce()= and
 Point =AQ_HOME= at the mount and it works:
 
 #+begin_src bash
-AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
+AQ_HOME=/mnt/nexus-aq aq announce -c C-1 --claim "proving filesystem transport"
 #+end_src
 
-** TRAMP as Concrete Transport
-
-TRAMP is also a literal Tier 0.5 transport. Any TRAMP path works as =AQ_HOME=:
-
-#+begin_src emacs-lisp
-;; Local (Tier 0)
-(setq aq-home "~/.aq")
-
-;; Remote via SSH (Tier 0.5)
-(setq aq-home "/ssh:nexus:/home/jasonwalsh/.aq")
-
-;; FreeBSD jail (Tier 0.5) — see aygp-dr/tramp-workshop
-(setq aq-home "/ssh:operator@sandbox|bastille:agent-alpha:/root/.aq/")
-
-;; Multi-home fan-out (TRAMP multi-hop, rotated 90°)
-(setq aq-homes '("~/.aq"
-                  "/ssh:nexus:/home/jasonwalsh/.aq"
-                  "/bastille:agent-alpha:/root/.aq"))
-#+end_src
-
-The =contrib/tramp/aq-tramp.el= package provides =aq-announce=,
-=aq-status=, =aq-check=, and =aq-watch= — all implemented with Emacs
-file primitives (=write-region=, =directory-files=, =file-notify-add-watch=)
-that TRAMP makes transparent. Zero network code.
-
-See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for the multi-hop topology (Bastille jails,
-ECS, GKE, Compute Engine).
-
-Full evaluation of all transports, including scoring methodology and
-sketches for NATS, etcd, S3, MQTT, IRC, and BBS implementations:
-[[file:docs/TRANSPORTS.org][docs/TRANSPORTS.org]].
+Full evaluation of all transports (including the TRAMP design philosophy
+that governs the transport layer): [[file:docs/TRANSPORTS.org][docs/TRANSPORTS.org]].
 
 * Position in Seven Concerns
 
