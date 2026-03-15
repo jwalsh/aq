@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0, aq-78a, aq-14i
+X-Conjectures: C-1, C-3, C-7, C-8
+X-Testing: 71 tests pass, 21 benchmarks, 6 chaos scenarios, go vet clean
+X-Invariants: INV-TTL (updated to 3600s), INV-ARCHIVE (concurrent safety), INV-DONE (done-status filtering)
+X-Deviations: TTL changed from 300→3600 per dogfooding evidence
+X-Timeline: step 7 of 9 — build step 7 proven (p99=77ms at 10 agents)
