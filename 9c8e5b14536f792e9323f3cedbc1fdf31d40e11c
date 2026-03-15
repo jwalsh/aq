@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0
+X-Conjectures: C-1 through C-9
+X-Testing: none (specification document)
+X-Invariants: all 12 invariants documented with formal properties
+X-Deviations: intent-first framing per "feels not files" reframing
+X-Timeline: rebuild prep — spec-v2 is the authoritative source for v2
