@@ -134,22 +134,16 @@ silence.
 
 =aq= does not detect conflicts. It shows you who else is nearby.
 
-=aq check= shows broadcasts from other agents working on the same
-conjecture or with similar claims. You read them. You /feel/ whether
-your work overlaps. You decide what to do about it --- coordinate,
-adjust, or ignore. The tool does not assign severity scores or make
-judgments. The agent is the intelligence. =aq= is the gossip channel.
-
-Why not conflict detection? Because when 10 agents all touch =main.go=,
-a file-based detector returns HIGH for everything. Signal-to-noise ratio:
-zero. When it moved to severity scoring on claims, it was still the tool
-making a judgment that belongs to the agent. The right answer is simpler:
-show the agent what's happening and trust it to feel the overlap.
+=aq check= shows broadcasts from other agents on the same conjecture or
+with similar claims. You read them. You /feel/ the overlap. You decide:
+coordinate, adjust, or ignore. Maybe you start a conversation. Maybe you
+split the work. Maybe you keep going because your approaches are
+complementary. The tool doesn't judge --- it introduces.
 
 #+begin_example
 $ aq check -c C-10 --claim "simplifying CLI dispatch"
 
-  Nearby broadcasts (same conjecture C-10):
+  Nearby (same conjecture C-10):
 
   agent-4  "simplifying flag parsing — consolidating into unified parser"
   agent-2  "simplifying Broadcast struct — tightening types"
@@ -158,6 +152,14 @@ $ aq check -c C-10 --claim "simplifying CLI dispatch"
 
   You share C-10 with 9 other agents. Read their claims.
 #+end_example
+
+This is noisy. That's the point. The alternative --- silence until the
+merge wall --- is worse. Two agents that see each other's claims can
+collaborate: "you're rewriting dispatch? I'm rewriting flag parsing.
+Let's align on the interface." Two agents that don't see each other
+produce incompatible code and discover it at merge time.
+
+Gossip is cheaper than merge conflicts. Noise is cheaper than surprise.
 
 The exit condition: when an agent announces =status=done=, its broadcast
 expires from the active set. Silence returns naturally.
