@@ -28,8 +28,14 @@ var (
 )
 
 // Default configuration constants.
+//
+// DefaultTTL is 3600s (1 hour) to match real agent session length.
+// The original 300s (5min) caused "gossip with amnesia" — broadcasts
+// expired while agents were still working. Observed 5 times during
+// dogfooding (DOGFOODING.md §4, §8). Whisper remains 60s for
+// transient read-level presence signals.
 const (
-	DefaultTTL     = 300
+	DefaultTTL     = 3600
 	WhisperTTL     = 60
 	DefaultChannel = "broadcast"
 )
@@ -865,10 +871,14 @@ func readActive(channel string) ([]Broadcast, error) {
 		}
 
 		if b.IsExpired() {
-			// Move to archive.
+			// Move to archive. Use rename-or-skip to handle concurrent
+			// readers: if another process already archived this file,
+			// the rename returns an error (ENOENT) and we skip it.
 			archDir := archivePath(channel)
 			_ = os.MkdirAll(archDir, 0o755)
-			_ = os.Rename(path, filepath.Join(archDir, entry.Name()))
+			if err := os.Rename(path, filepath.Join(archDir, entry.Name())); err != nil {
+				continue // Already archived by another reader.
+			}
 		} else {
 			active = append(active, b)
 		}
@@ -903,6 +913,11 @@ func checkConflicts(me Broadcast, channel string) ([]ConflictSignal, error) {
 	var signals []ConflictSignal
 	for _, other := range active {
 		if other.Agent == me.Agent {
+			continue
+		}
+		// Skip agents that have announced they're done — their broadcast
+		// is still active (not expired) but should not trigger conflicts.
+		if other.Status == "done" {
 			continue
 		}
 
@@ -1062,7 +1077,7 @@ Options:
   --claim <text>           Human-readable claim
   --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
   --status <status>        prosecuting|done|blocked (default: prosecuting)
-  --ttl <seconds>          Time to live (default: 300)
+  --ttl <seconds>          Time to live (default: 3600)
   --validate               Run pre-flight invariant checks (advisory, never blocks)
   -h, --help               Show this help
 `)

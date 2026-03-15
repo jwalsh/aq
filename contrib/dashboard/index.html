@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aq dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --orange: #db6d28;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 1rem;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  header h1 span { color: var(--text-dim); font-weight: 400; }
+  .status-bar {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .status-bar .count { color: var(--text); font-weight: 600; }
+
+  /* Filters */
+  .filters {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  .filters input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    outline: none;
+    min-width: 200px;
+  }
+  .filters input:focus { border-color: var(--accent); }
+  .filters input::placeholder { color: var(--text-dim); }
+
+  /* Section titles */
+  .section-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 1.5rem 0 0.75rem;
+  }
+
+  /* Conflicts */
+  .conflicts-section { margin-bottom: 1rem; }
+  .conflict-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    border-left: 3px solid var(--border);
+  }
+  .conflict-card.high { border-left-color: var(--red); }
+  .conflict-card.medium { border-left-color: var(--yellow); }
+  .conflict-card.low { border-left-color: var(--green); }
+  .conflict-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+  .severity-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    letter-spacing: 0.05em;
+  }
+  .severity-badge.high { background: var(--red); color: #fff; }
+  .severity-badge.medium { background: var(--yellow); color: #000; }
+  .severity-badge.low { background: var(--green); color: #000; }
+  .conflict-detail { font-size: 0.8rem; color: var(--text-dim); }
+  .conflict-detail code {
+    background: rgba(88, 166, 255, 0.1);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+  }
+
+  /* Broadcast cards */
+  .broadcast-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 0.75rem;
+  }
+  .broadcast-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    position: relative;
+    transition: border-color 0.2s;
+  }
+  .broadcast-card:hover { border-color: var(--accent); }
+  .broadcast-card .agent {
+    font-weight: 600;
+    color: var(--accent);
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+    word-break: break-all;
+  }
+  .broadcast-card .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+    font-size: 0.8rem;
+  }
+  .tag {
+    background: rgba(88, 166, 255, 0.1);
+    border: 1px solid rgba(88, 166, 255, 0.2);
+    color: var(--accent);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+  .tag.phase-proof { background: rgba(219, 109, 40, 0.15); border-color: rgba(219, 109, 40, 0.3); color: var(--orange); }
+  .tag.phase-conjecture { background: rgba(88, 166, 255, 0.1); border-color: rgba(88, 166, 255, 0.2); color: var(--accent); }
+  .tag.phase-refutation { background: rgba(248, 81, 73, 0.1); border-color: rgba(248, 81, 73, 0.2); color: var(--red); }
+  .tag.phase-refinement { background: rgba(63, 185, 80, 0.1); border-color: rgba(63, 185, 80, 0.2); color: var(--green); }
+  .tag.status-done { background: rgba(63, 185, 80, 0.15); border-color: rgba(63, 185, 80, 0.3); color: var(--green); }
+  .tag.status-blocked { background: rgba(248, 81, 73, 0.15); border-color: rgba(248, 81, 73, 0.3); color: var(--red); }
+  .files-list {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-top: 0.5rem;
+    word-break: break-all;
+  }
+  .ttl-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    border-radius: 0 0 8px 8px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .ttl-bar-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width 1s linear, background-color 0.5s;
+  }
+  .ttl-bar-fill.warning { background: var(--yellow); }
+  .ttl-bar-fill.critical { background: var(--red); }
+  .ttl-text {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.75rem;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: "SFMono-Regular", Consolas, monospace;
+  }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-dim);
+  }
+  .empty-state h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+  .empty-state p { font-size: 0.85rem; }
+  .empty-state code {
+    background: var(--surface);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>aq <span>dashboard</span></h1>
+  <div class="status-bar">
+    <div>Broadcasts: <span class="count" id="broadcast-count">0</span></div>
+    <div>Conflicts: <span class="count" id="conflict-count">0</span></div>
+    <div>Updated: <span id="last-update">--</span></div>
+  </div>
+</header>
+
+<div class="filters">
+  <input type="text" id="filter-input" placeholder="Filter by agent, conjecture, or file...">
+</div>
+
+<div class="conflicts-section" id="conflicts-section" style="display:none">
+  <div class="section-title">Conflicts</div>
+  <div id="conflicts-container"></div>
+</div>
+
+<div class="section-title">Active Broadcasts</div>
+<div class="broadcast-grid" id="broadcasts-container">
+  <div class="empty-state">
+    <h2>No active broadcasts</h2>
+    <p>Announce with <code>aq announce -c C-1 -f "file.py"</code></p>
+  </div>
+</div>
+
+<script>
+const API_POLL_MS = 2000;
+let filterText = '';
+
+document.getElementById('filter-input').addEventListener('input', (e) => {
+  filterText = e.target.value.toLowerCase();
+  renderState(lastState);
+});
+
+let lastState = { broadcasts: [], conflicts: [] };
+
+function formatTTL(ts, ttl) {
+  const now = Date.now() / 1000;
+  const remaining = Math.max(0, (ts + ttl) - now);
+  if (remaining <= 0) return 'expired';
+  if (remaining < 60) return Math.floor(remaining) + 's';
+  if (remaining < 3600) return Math.floor(remaining / 60) + 'm ' + Math.floor(remaining % 60) + 's';
+  return Math.floor(remaining / 3600) + 'h ' + Math.floor((remaining % 3600) / 60) + 'm';
+}
+
+function ttlPercent(ts, ttl) {
+  const now = Date.now() / 1000;
+  const remaining = Math.max(0, (ts + ttl) - now);
+  return Math.min(100, (remaining / ttl) * 100);
+}
+
+function matchesFilter(broadcast) {
+  if (!filterText) return true;
+  const haystack = [
+    broadcast.agent,
+    broadcast.conjecture_id,
+    broadcast.conjecture_claim,
+    broadcast.phase,
+    broadcast.status,
+    ...(broadcast.files || [])
+  ].join(' ').toLowerCase();
+  return haystack.includes(filterText);
+}
+
+function renderState(state) {
+  lastState = state;
+  const broadcasts = (state.broadcasts || []).filter(matchesFilter);
+  const conflicts = (state.conflicts || []).filter(c =>
+    matchesFilter(c.a) || matchesFilter(c.b)
+  );
+
+  document.getElementById('broadcast-count').textContent = (state.broadcasts || []).length;
+  document.getElementById('conflict-count').textContent = (state.conflicts || []).length;
+  document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+  // Render conflicts
+  const conflictsSection = document.getElementById('conflicts-section');
+  const conflictsContainer = document.getElementById('conflicts-container');
+  if (conflicts.length > 0) {
+    conflictsSection.style.display = 'block';
+    conflictsContainer.innerHTML = conflicts.map(c => {
+      const sev = c.severity || 'low';
+      return `<div class="conflict-card ${sev}">
+        <div class="conflict-header">
+          <span class="severity-badge ${sev}">${sev}</span>
+          <span>${esc(c.a.agent)} / ${esc(c.a.conjecture_id)}
+          &harr; ${esc(c.b.agent)} / ${esc(c.b.conjecture_id)}</span>
+        </div>
+        <div class="conflict-detail">Shared files:
+          ${(c.shared_files || []).map(f => `<code>${esc(f)}</code>`).join(', ')}
+          | Phases: ${esc(c.a.phase)} / ${esc(c.b.phase)}
+        </div>
+      </div>`;
+    }).join('');
+  } else {
+    conflictsSection.style.display = 'none';
+  }
+
+  // Render broadcasts
+  const container = document.getElementById('broadcasts-container');
+  if (broadcasts.length === 0) {
+    container.innerHTML = `<div class="empty-state">
+      <h2>No active broadcasts</h2>
+      <p>Announce with <code>aq announce -c C-1 -f "file.py"</code></p>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = broadcasts.map(b => {
+    const pct = ttlPercent(b.ts, b.ttl);
+    const ttlClass = pct < 15 ? 'critical' : pct < 40 ? 'warning' : '';
+    const phaseClass = 'phase-' + (b.phase || 'conjecture');
+    const statusClass = 'status-' + (b.status || 'prosecuting');
+    const files = (b.files || []).join(', ');
+    const claim = b.conjecture_claim ? ' — ' + esc(b.conjecture_claim) : '';
+
+    return `<div class="broadcast-card">
+      <div class="ttl-text">${formatTTL(b.ts, b.ttl)}</div>
+      <div class="agent">${esc(b.agent)}</div>
+      <div class="meta">
+        <span class="tag">${esc(b.conjecture_id)}${claim}</span>
+        <span class="tag ${phaseClass}">${esc(b.phase)}</span>
+        <span class="tag ${statusClass}">${esc(b.status)}</span>
+      </div>
+      ${files ? `<div class="files-list">${esc(files)}</div>` : ''}
+      <div class="ttl-bar"><div class="ttl-bar-fill ${ttlClass}" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join('');
+}
+
+function esc(s) {
+  if (!s) return '';
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+async function poll() {
+  try {
+    const resp = await fetch('/api/state');
+    if (resp.ok) {
+      const state = await resp.json();
+      renderState(state);
+    }
+  } catch (e) {
+    // Network error -- will retry next poll.
+  }
+}
+
+// Initial fetch + polling loop.
+poll();
+setInterval(poll, API_POLL_MS);
+
+// Update TTL countdowns every second without re-fetching.
+setInterval(() => {
+  document.querySelectorAll('.broadcast-card').forEach((card, i) => {
+    const b = lastState.broadcasts && lastState.broadcasts[i];
+    if (!b) return;
+    const ttlEl = card.querySelector('.ttl-text');
+    const fillEl = card.querySelector('.ttl-bar-fill');
+    if (ttlEl) ttlEl.textContent = formatTTL(b.ts, b.ttl);
+    if (fillEl) {
+      const pct = ttlPercent(b.ts, b.ttl);
+      fillEl.style.width = pct + '%';
+      fillEl.className = 'ttl-bar-fill' + (pct < 15 ? ' critical' : pct < 40 ? ' warning' : '');
+    }
+  });
+}, 1000);
+</script>
+</body>
+</html>

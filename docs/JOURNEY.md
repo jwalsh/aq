@@ -269,6 +269,40 @@ Three consumers, one schema, zero coordination.
 
 aq detected HIGH on main.go. Correct signal, wrong granularity.
 
+### #7: "Build Step 7 Proven" (2026-03-14)
+
+The chaos test suite proved C-1 at scale. Six scenarios, all passing:
+
+```
+Sustained Load (10 agents, 10s):  p50=68ms  p95=74ms  p99=77ms
+Burst Storm (500 announces):      500/500 visible
+Conflict Detection:               Self-exclusion correct
+TTL Churn (3s TTL):               Appeared <2s, expired on time
+Archive Flood (200 broadcasts):   200/200 archived, 0 active
+Fan-Out Scaling:
+  N=2   p99=61ms
+  N=5   p99=63ms
+  N=10  p99=88ms   ← build step 7 target
+  N=20  p99=126ms
+  N=50  p99=239ms  ← still under 500ms
+```
+
+C-1 is not refuted. Filesystem transport handles 50 concurrent agents
+at p99 < 250ms on M4. Build step 7 acceptance criteria met.
+
+Also shipped: L7 review fixes (done-status filtering, concurrent archive
+safety), DefaultTTL bumped from 300s to 3600s (session-length memory),
+71 tests + 21 benchmarks, `contrib/` with Postgres transport, WebSocket
+dashboard, and mDNS demo.
+
+### #8: "go vet catches what we don't" (2026-03-14)
+
+During the stability sweep, `go vet` found a lock copy bug in the
+benchmark tests (`_ = mu` copies a `sync.Mutex` by value). The
+benchmark agent generated it; the vet pass caught it. One-line fix.
+
+Lesson: always run `go vet` before declaring stable. Add it to CI.
+
 ## Metrics We're Watching
 
 - **Broadcasts written**: total across all agents

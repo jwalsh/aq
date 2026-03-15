@@ -580,3 +580,38 @@ second. Irony catches the third.
 External review of the bootstrap protocol confirmed: the dogfooding
 data is load-bearing for the next version. The spec was pre-empirical.
 This document is the empirical record. The rebuild starts from here.
+
+### §12: Build Step 7 — Chaos Test Results (2026-03-14)
+
+Build step 7 acceptance criterion: "10 agents, 100 msg/min, p99 < 500ms."
+
+We built a chaos test suite (`contrib/chaos/`) that shells out to the
+`aq` binary for all operations. Six scenarios, all passing:
+
+| Scenario | Result | Key Metric |
+|----------|--------|------------|
+| Sustained Load (10 agents) | PASS | p99 = 77ms |
+| Burst Storm (500 announces) | PASS | 500/500 visible |
+| Conflict Detection | PASS | Self-exclusion correct |
+| TTL Churn (3s TTL) | PASS | Appeared <2s, expired on time |
+| Archive Flood (200 broadcasts) | PASS | 200/200 archived |
+| Fan-Out Scaling (2→50 agents) | PASS | p99 = 239ms at N=50 |
+
+**C-1 is not refuted.** Filesystem transport handles 50 concurrent agents
+at p99 < 250ms. The refutation criterion (p99 > 500ms at 10 agents) is
+not triggered even at 5x the target scale.
+
+Protocol gap #9: **Subprocess overhead dominates latency.** Each `aq announce`
+spawns a process (~60ms on M4). The actual file write is ~68μs (measured
+by Go benchmarks). If aq becomes a long-running daemon or library, the
+500ms budget has ~3 orders of magnitude of headroom.
+
+Protocol gap #10: **`go vet` caught a lock copy bug in benchmark code.**
+Agent-generated test code included `_ = mu` which copies a `sync.Mutex`
+by value. Always run `go vet` after agent code generation.
+
+Also in this session: DefaultTTL bumped 300s → 3600s to match session
+length (see §4, §8 for the "gossip with amnesia" problem), L7 review
+fixes (done-status filtering in `checkConflicts`, concurrent archive
+safety in `readActive`), and `contrib/` with Postgres transport,
+WebSocket dashboard, and mDNS demo.

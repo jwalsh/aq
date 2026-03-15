@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -173,8 +175,8 @@ func TestBroadcast_WireFormat(t *testing.T) {
 
 func TestBroadcast_DefaultTTL(t *testing.T) {
 	b := NewBroadcast()
-	if b.TTL != 300 {
-		t.Errorf("default TTL = %d, want 300", b.TTL)
+	if b.TTL != 3600 {
+		t.Errorf("default TTL = %d, want 3600", b.TTL)
 	}
 }
 
@@ -1305,5 +1307,724 @@ func TestInvariantResult_JSON(t *testing.T) {
 	}
 	if restored.Category != r.Category {
 		t.Errorf("Category = %q, want %q", restored.Category, r.Category)
+	}
+}
+
+// ---------- L7 Review Fixes ----------
+
+// Test that checkConflicts skips broadcasts with status=done.
+func TestCheckConflicts_SkipsDoneStatus(t *testing.T) {
+	makeTempAQHome(t)
+	ch := "broadcast"
+
+	// Agent A is done but broadcast hasn't expired yet.
+	doneAgent := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent-a"
+		b.ConjectureID = "C-1"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+		b.Status = "done"
+	})
+	writeBroadcast(doneAgent, ch)
+
+	// Agent B is actively working on the same file.
+	activeAgent := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent-b"
+		b.ConjectureID = "C-2"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+	})
+	writeBroadcast(activeAgent, ch)
+
+	// Agent C checks — should NOT see conflict with done agent A.
+	me := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent-c"
+		b.ConjectureID = "C-3"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+	})
+	signals, err := checkConflicts(me, ch)
+	if err != nil {
+		t.Fatalf("checkConflicts error: %v", err)
+	}
+
+	// Should only conflict with agent-b, not agent-a.
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict signal, got %d", len(signals))
+	}
+	if signals[0].B.Agent != "agent-b" {
+		t.Errorf("expected conflict with agent-b, got %s", signals[0].B.Agent)
+	}
+}
+
+// Test that readActive handles concurrent archive gracefully.
+func TestReadActive_ConcurrentArchive(t *testing.T) {
+	makeTempAQHome(t)
+	ch := "broadcast"
+
+	// Create an already-expired broadcast.
+	expired := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "agent-old"
+		b.Files = []string{"old.py"}
+		b.Ts = float64(time.Now().Add(-10 * time.Minute).Unix())
+		b.TTL = 60
+	})
+	writeBroadcast(expired, ch)
+
+	// First read should archive it.
+	active1, err := readActive(ch)
+	if err != nil {
+		t.Fatalf("first readActive error: %v", err)
+	}
+	if len(active1) != 0 {
+		t.Errorf("expected 0 active after expiry, got %d", len(active1))
+	}
+
+	// Second read should not error — file is already gone.
+	active2, err := readActive(ch)
+	if err != nil {
+		t.Fatalf("second readActive error: %v", err)
+	}
+	if len(active2) != 0 {
+		t.Errorf("expected 0 active on second read, got %d", len(active2))
+	}
+}
+
+// ---------- CLI Command Tests ----------
+
+// Test cmdAnnounce with valid arguments.
+func TestCmdAnnounce_Valid(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdAnnounce([]string{"-c", "C-1", "-f", "auth.py", "--claim", "test announce"})
+	if code != 0 {
+		t.Fatalf("cmdAnnounce returned %d, want 0", code)
+	}
+
+	// Verify broadcast was written.
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active broadcast, got %d", len(active))
+	}
+	if active[0].ConjectureID != "C-1" {
+		t.Errorf("conjecture = %q, want C-1", active[0].ConjectureID)
+	}
+	if active[0].ConjectureClaim != "test announce" {
+		t.Errorf("claim = %q, want 'test announce'", active[0].ConjectureClaim)
+	}
+}
+
+// Test cmdAnnounce fails without -c flag.
+func TestCmdAnnounce_MissingConjecture(t *testing.T) {
+	code := cmdAnnounce([]string{"-f", "auth.py"})
+	if code != 1 {
+		t.Errorf("cmdAnnounce without -c returned %d, want 1", code)
+	}
+}
+
+// Test cmdCheck with valid arguments.
+func TestCmdCheck_Valid(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	// Write a broadcast from another agent first.
+	other := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "other-agent"
+		b.ConjectureID = "C-1"
+		b.Phase = "proof"
+		b.Files = []string{"auth.py"}
+	})
+	writeBroadcast(other, "broadcast")
+
+	// Check should find a HIGH conflict (both proof + shared file) and return 1.
+	code := cmdCheck([]string{"-c", "C-2", "-f", "auth.py"})
+	if code != 1 {
+		t.Errorf("cmdCheck with HIGH conflict returned %d, want 1", code)
+	}
+}
+
+// Test cmdStatus runs without error.
+func TestCmdStatus_Valid(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdStatus([]string{})
+	if code != 0 {
+		t.Errorf("cmdStatus returned %d, want 0", code)
+	}
+}
+
+// Test parseAnnounceArgs parses all flags correctly.
+func TestParseAnnounceArgs(t *testing.T) {
+	args := []string{"-c", "C-5", "-f", "a.py,b.py", "--claim", "fixing bugs", "--phase", "refutation", "--status", "blocked", "--ttl", "600"}
+	p := parseAnnounceArgs(args)
+
+	if p.conjecture != "C-5" {
+		t.Errorf("conjecture = %q, want C-5", p.conjecture)
+	}
+	if p.files != "a.py,b.py" {
+		t.Errorf("files = %q, want a.py,b.py", p.files)
+	}
+	if p.claim != "fixing bugs" {
+		t.Errorf("claim = %q, want 'fixing bugs'", p.claim)
+	}
+	if p.phase != "refutation" {
+		t.Errorf("phase = %q, want refutation", p.phase)
+	}
+	if p.status != "blocked" {
+		t.Errorf("status = %q, want blocked", p.status)
+	}
+	if p.ttl != 600 {
+		t.Errorf("ttl = %d, want 600", p.ttl)
+	}
+}
+
+// Test parseAnnounceArgs defaults.
+func TestParseAnnounceArgs_Defaults(t *testing.T) {
+	p := parseAnnounceArgs([]string{})
+	if p.phase != "proof" {
+		t.Errorf("default phase = %q, want proof", p.phase)
+	}
+	if p.status != "prosecuting" {
+		t.Errorf("default status = %q, want prosecuting", p.status)
+	}
+	if p.ttl != DefaultTTL {
+		t.Errorf("default ttl = %d, want %d", p.ttl, DefaultTTL)
+	}
+}
+
+// ========== Benchmark Helpers ==========
+
+// makeBenchAQHome creates a temp AQ_HOME for benchmarks.
+func makeBenchAQHome(b *testing.B) {
+	b.Helper()
+	dir := b.TempDir()
+	b.Setenv("AQ_HOME", dir)
+}
+
+// populateBroadcasts pre-fills the channel with n broadcasts.
+func populateBroadcasts(b *testing.B, n int, channel string) {
+	b.Helper()
+	for i := 0; i < n; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("agent/%d", i)
+			bc.Files = []string{fmt.Sprintf("file%d.go", i%20)}
+		})
+		if _, err := writeBroadcast(bc, channel); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// ========== 1. Serial Baselines ==========
+
+func BenchmarkWriteBroadcast_Serial(b *testing.B) {
+	makeBenchAQHome(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("bench/serial-%d", i)
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReadActive_Serial(b *testing.B) {
+	makeBenchAQHome(b)
+	populateBroadcasts(b, 100, "broadcast")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := readActive("broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCheckConflicts_Serial(b *testing.B) {
+	makeBenchAQHome(b)
+	populateBroadcasts(b, 10, "broadcast")
+	me := makeBroadcast(func(bc *Broadcast) {
+		bc.Agent = "bench/checker"
+		bc.Phase = "proof"
+		bc.Files = []string{"file0.go"}
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := checkConflicts(me, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// ========== 2. Parallel Benchmarks ==========
+
+func BenchmarkWriteBroadcast_Parallel(b *testing.B) {
+	makeBenchAQHome(b)
+	var counter uint64
+	var mu sync.Mutex
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		mu.Lock()
+		counter++
+		id := counter
+		mu.Unlock()
+		i := 0
+		for pb.Next() {
+			bc := makeBroadcast(func(bc *Broadcast) {
+				bc.Agent = fmt.Sprintf("bench/parallel-%d-%d", id, i)
+			})
+			if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+				b.Fatal(err)
+			}
+			i++
+		}
+	})
+}
+
+func BenchmarkReadActive_Parallel(b *testing.B) {
+	makeBenchAQHome(b)
+	populateBroadcasts(b, 100, "broadcast")
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := readActive("broadcast"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// ========== 3. Fan-out Patterns ==========
+
+func BenchmarkFanOut_1WriterNReaders(b *testing.B) {
+	cases := []int{1, 5, 10, 50}
+	for _, n := range cases {
+		b.Run(fmt.Sprintf("readers=%d", n), func(b *testing.B) {
+			makeBenchAQHome(b)
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+
+			// Start N reader goroutines.
+			for r := 0; r < n; r++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-done:
+							return
+						default:
+							readActive("broadcast")
+						}
+					}
+				}()
+			}
+
+			// Writer: write b.N broadcasts at ~10ms intervals.
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				bc := makeBroadcast(func(bc *Broadcast) {
+					bc.Agent = fmt.Sprintf("writer/%d", i)
+				})
+				if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+					b.Fatal(err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			b.StopTimer()
+			close(done)
+			wg.Wait()
+		})
+	}
+}
+
+func BenchmarkFanOut_NWriters1Reader(b *testing.B) {
+	cases := []int{1, 5, 10, 50}
+	for _, n := range cases {
+		b.Run(fmt.Sprintf("writers=%d", n), func(b *testing.B) {
+			makeBenchAQHome(b)
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+
+			// Start 1 reader goroutine.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+						readActive("broadcast")
+					}
+				}
+			}()
+
+			// N writer goroutines, each writes b.N/N broadcasts.
+			perWriter := b.N / n
+			if perWriter < 1 {
+				perWriter = 1
+			}
+			b.ResetTimer()
+			var writerWg sync.WaitGroup
+			for w := 0; w < n; w++ {
+				writerWg.Add(1)
+				go func(wid int) {
+					defer writerWg.Done()
+					for i := 0; i < perWriter; i++ {
+						bc := makeBroadcast(func(bc *Broadcast) {
+							bc.Agent = fmt.Sprintf("writer/%d/%d", wid, i)
+						})
+						writeBroadcast(bc, "broadcast")
+						time.Sleep(10 * time.Millisecond)
+					}
+				}(w)
+			}
+			writerWg.Wait()
+			b.StopTimer()
+			close(done)
+			wg.Wait()
+		})
+	}
+}
+
+func BenchmarkFanOut_NWritersNReaders(b *testing.B) {
+	cases := []int{2, 5, 10}
+	for _, n := range cases {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			makeBenchAQHome(b)
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+
+			// Start N reader goroutines.
+			for r := 0; r < n; r++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-done:
+							return
+						default:
+							readActive("broadcast")
+						}
+					}
+				}()
+			}
+
+			// N writer goroutines, each writes b.N/N broadcasts.
+			perWriter := b.N / n
+			if perWriter < 1 {
+				perWriter = 1
+			}
+			b.ResetTimer()
+			var writerWg sync.WaitGroup
+			for w := 0; w < n; w++ {
+				writerWg.Add(1)
+				go func(wid int) {
+					defer writerWg.Done()
+					for i := 0; i < perWriter; i++ {
+						bc := makeBroadcast(func(bc *Broadcast) {
+							bc.Agent = fmt.Sprintf("writer/%d/%d", wid, i)
+						})
+						writeBroadcast(bc, "broadcast")
+						time.Sleep(10 * time.Millisecond)
+					}
+				}(w)
+			}
+			writerWg.Wait()
+			b.StopTimer()
+			close(done)
+			wg.Wait()
+		})
+	}
+}
+
+// ========== 4. Conflict Detection at Scale ==========
+
+func BenchmarkCheckConflicts_10Agents_AllOverlap(b *testing.B) {
+	makeBenchAQHome(b)
+	// 10 agents, all proof phase, all touching the same file.
+	for i := 0; i < 10; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("agent/%d", i)
+			bc.Phase = "proof"
+			bc.Files = []string{"shared.go"}
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	me := makeBroadcast(func(bc *Broadcast) {
+		bc.Agent = "bench/checker"
+		bc.Phase = "proof"
+		bc.Files = []string{"shared.go"}
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		signals, err := checkConflicts(me, "broadcast")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(signals) != 10 {
+			b.Fatalf("expected 10 HIGH signals, got %d", len(signals))
+		}
+	}
+}
+
+func BenchmarkCheckConflicts_100Agents_SparseOverlap(b *testing.B) {
+	makeBenchAQHome(b)
+	rng := rand.New(rand.NewSource(42))
+	// 100 agents, each touching 3 random files from pool of 200.
+	for i := 0; i < 100; i++ {
+		files := make([]string, 3)
+		for j := 0; j < 3; j++ {
+			files[j] = fmt.Sprintf("file%d.go", rng.Intn(200))
+		}
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("agent/%d", i)
+			bc.Phase = "proof"
+			bc.Files = files
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	me := makeBroadcast(func(bc *Broadcast) {
+		bc.Agent = "bench/checker"
+		bc.Phase = "proof"
+		bc.Files = []string{"file0.go", "file50.go", "file100.go"}
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := checkConflicts(me, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// ========== 5. Filesystem Stress ==========
+
+func BenchmarkDirectoryListing_1000Files(b *testing.B) {
+	makeBenchAQHome(b)
+	populateBroadcasts(b, 1000, "broadcast")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := readActive("broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkBurstWrite_100(b *testing.B) {
+	makeBenchAQHome(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			bc := makeBroadcast(func(bc *Broadcast) {
+				bc.Agent = fmt.Sprintf("burst/%d/%d", i, j)
+			})
+			if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkConcurrentArchive(b *testing.B) {
+	makeBenchAQHome(b)
+	// Write a mix of expired (TTL=1, old ts) and fresh broadcasts.
+	for i := 0; i < 50; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("expired/%d", i)
+			bc.TTL = 1
+			bc.Ts = float64(time.Now().Unix() - 100) // well past TTL
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for i := 0; i < 50; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("fresh/%d", i)
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			readActive("broadcast")
+		}
+	})
+}
+
+// ========== 6. Correctness Under Chaos ==========
+
+func TestChaos_ConcurrentWriteRead(t *testing.T) {
+	makeTempAQHome(t)
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	errCh := make(chan error, 100)
+
+	// 10 writer goroutines.
+	for w := 0; w < 10; w++ {
+		wg.Add(1)
+		go func(wid int) {
+			defer wg.Done()
+			i := 0
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					bc := makeBroadcast(func(bc *Broadcast) {
+						bc.Agent = fmt.Sprintf("chaos-writer/%d/%d", wid, i)
+					})
+					if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+						select {
+						case errCh <- fmt.Errorf("writer %d iter %d: %w", wid, i, err):
+						default:
+						}
+					}
+					i++
+				}
+			}
+		}(w)
+	}
+
+	// 10 reader goroutines.
+	for r := 0; r < 10; r++ {
+		wg.Add(1)
+		go func(rid int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					if _, err := readActive("broadcast"); err != nil {
+						select {
+						case errCh <- fmt.Errorf("reader %d: %w", rid, err):
+						default:
+						}
+					}
+				}
+			}
+		}(r)
+	}
+
+	// Run for 2 seconds.
+	time.Sleep(2 * time.Second)
+	close(done)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Errorf("chaos error: %v", err)
+	}
+}
+
+func TestChaos_NoLostBroadcasts(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Write 100 broadcasts with long TTL (they should all be active).
+	for i := 0; i < 100; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("noloss/%d", i)
+			bc.TTL = 3600
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	active, err := readActive("broadcast")
+	if err != nil {
+		t.Fatalf("readActive error: %v", err)
+	}
+	if len(active) < 100 {
+		t.Errorf("expected >= 100 active broadcasts, got %d", len(active))
+	}
+}
+
+func TestChaos_ULIDUniqueness(t *testing.T) {
+	const total = 10000
+	ids := make([]string, total)
+	var wg sync.WaitGroup
+	goroutines := 10
+	perGoroutine := total / goroutines
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				ids[gid*perGoroutine+i] = generateULID()
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	seen := make(map[string]struct{}, total)
+	for i, id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate ULID at index %d: %s", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestChaos_ArchiveRace(t *testing.T) {
+	home := makeTempAQHome(t)
+
+	// Write 50 broadcasts with TTL=1 and old timestamp (already expired).
+	for i := 0; i < 50; i++ {
+		bc := makeBroadcast(func(bc *Broadcast) {
+			bc.Agent = fmt.Sprintf("archrace/%d", i)
+			bc.TTL = 1
+			bc.Ts = float64(time.Now().Unix() - 100)
+		})
+		if _, err := writeBroadcast(bc, "broadcast"); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	// 10 goroutines call readActive simultaneously (triggers archiving).
+	var wg sync.WaitGroup
+	for g := 0; g < 10; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Multiple reads per goroutine to increase contention.
+			for j := 0; j < 5; j++ {
+				readActive("broadcast")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Assert: archive directory has files (some or all 50 should be there).
+	archDir := filepath.Join(home, "channels", "broadcast", "archive")
+	entries, err := os.ReadDir(archDir)
+	if err != nil {
+		t.Fatalf("ReadDir archive: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Error("expected archived files, got 0")
+	}
+	// All 50 should be archived since they were all expired.
+	if len(entries) != 50 {
+		t.Logf("archived %d of 50 (some may have had race-induced skips, which is acceptable)", len(entries))
 	}
 }

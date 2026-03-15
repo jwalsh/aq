@@ -1,4 +1,5 @@
-.PHONY: all build test clean lint fmt install help build-all test-race version-info quickstart check-up-to-date
+.PHONY: all build test clean lint fmt install help build-all test-race version-info quickstart check-up-to-date \
+	demo-dashboard demo-mdns demo-announce demo-conflict demo-status examples
 
 GO ?= go
 BINARY := aq
@@ -86,6 +87,58 @@ version-info:
 quickstart: build
 	./$(BINARY) quickstart
 
+# ---------- Examples and demos ----------
+
+demo-announce: build
+	@echo "==> Announcing presence..."
+	./$(BINARY) announce -c C-1 --claim "demo announce" --phase proof -f "main.go"
+	@echo ""
+	@echo "==> Current status:"
+	./$(BINARY) status
+
+demo-conflict: build
+	@echo "==> Setting up conflict scenario..."
+	./$(BINARY) announce -c C-1 --claim "agent-a working" --phase proof -f "auth.py,session.py"
+	./$(BINARY) announce -c C-2 --claim "agent-b working" --phase proof -f "auth.py"
+	@echo ""
+	@echo "==> Checking for conflicts:"
+	./$(BINARY) check -c C-3 -f "auth.py" || true
+	@echo ""
+	@echo "==> Status:"
+	./$(BINARY) status
+
+demo-status: build
+	./$(BINARY) status
+
+demo-dashboard: build
+	@echo "==> Starting dashboard on http://localhost:8085"
+	@echo "==> Press Ctrl-C to stop"
+	$(GO) run contrib/dashboard/server.go
+
+demo-mdns:
+	@echo "==> Running mDNS demo (macOS only, uses dns-sd)..."
+	chmod +x contrib/mdns/demo.sh
+	contrib/mdns/demo.sh
+
+demo-chaos: build
+	@echo "==> Building chaos runner..."
+	@$(GO) build -o /tmp/aq-chaos contrib/chaos/chaos.go
+	@echo "==> Running chaos tests (takes ~2 minutes)..."
+	@/tmp/aq-chaos --aq-binary ./aq --duration 10s
+
+demo-bench: build
+	@echo "==> Running benchmarks..."
+	$(GO) test -bench . -benchtime 2s -count=1 ./...
+
+examples: demo-announce
+	@echo ""
+	@echo "Available demos:"
+	@echo "  make demo-announce    Announce and show status"
+	@echo "  make demo-conflict    Two-agent conflict scenario"
+	@echo "  make demo-status      Show active broadcasts"
+	@echo "  make demo-dashboard   Start web dashboard (:8085)"
+	@echo "  make demo-mdns        mDNS broadcast demo (macOS)"
+
 clean:
 	rm -f $(BINARY) $(BINARY)-*
 
@@ -104,6 +157,16 @@ help:
 	@echo "Lint:"
 	@echo "  make lint        Run go vet, fmt check, golangci-lint"
 	@echo "  make fmt         Auto-format Go files"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make examples        Run announce demo + list all demos"
+	@echo "  make demo-announce   Announce presence and show status"
+	@echo "  make demo-conflict   Two-agent conflict scenario"
+	@echo "  make demo-status     Show active broadcasts"
+	@echo "  make demo-dashboard  Start web dashboard (localhost:8085)"
+	@echo "  make demo-mdns       mDNS broadcast demo (macOS)"
+	@echo "  make demo-chaos      Run chaos tests (~2 min)"
+	@echo "  make demo-bench      Run Go benchmarks"
 	@echo ""
 	@echo "Other:"
 	@echo "  make clean        Remove build artifacts"
