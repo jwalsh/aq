@@ -1,0 +1,79 @@
+# aq transport configuration — Serf/memberlist (Tier 2.2)
+#
+# This is a mock config showing how a 3-node aq deployment would be
+# configured with memberlist as primary and filesystem as fallback.
+
+[transport.filesystem]
+enabled  = true
+priority = 0          # Always active as fallback
+path     = "~/.aq/channels/broadcast/"
+
+[transport.memberlist]
+enabled  = true
+priority = 1          # Primary when cluster is reachable
+
+# Bind address for this node's memberlist agent.
+bind_addr = "0.0.0.0"
+bind_port = 7946
+
+# Encryption key for memberlist traffic (32-byte base64).
+# All nodes in the cluster must share this key.
+encrypt_key = "PXVxfLhcH8myb3GHGGn66kaQNbInEUaGAmnbsAP120s="
+
+# Initial cluster peers to join on startup.
+# memberlist will discover the rest via gossip protocol.
+join = [
+    "nexus.tail:7946",
+    "mini.tail:7946",
+    "k8s-pod.tail:7946",
+]
+
+# --- Event mapping ---
+# aq announce → Serf UserEvent (broadcast to all nodes)
+# aq status   → Serf Query (request/reply with timeout)
+[transport.memberlist.events]
+announce_type = "user_event"      # fire-and-forget epidemic broadcast
+status_type   = "query"           # request/reply, 2s timeout
+query_timeout = "2s"
+
+# --- TTL mapping ---
+# memberlist has its own protocol period (~200ms default) for gossip
+# protocol ticks. aq's TTL (3600s) is unrelated — it controls how
+# long a broadcast is considered active in the local cache.
+# Protocol period controls how fast events propagate (protocol-level).
+# aq TTL controls how long events are cached (application-level).
+[transport.memberlist.timing]
+protocol_period   = "200ms"   # SWIM protocol tick (memberlist default)
+suspicion_mult    = 4         # Suspicion multiplier for failure detection
+retransmit_mult   = 4         # Retransmit multiplier for convergence
+aq_default_ttl    = 3600      # Application-level TTL for cached broadcasts
+aq_whisper_ttl    = 60        # Short-lived broadcast TTL
+
+# --- Node tags ---
+# memberlist nodes carry key-value tags visible to all peers.
+# aq uses these for agent metadata so new joiners immediately see
+# what each agent is working on without waiting for a UserEvent.
+
+# Node: nexus (FreeBSD/ZFS server)
+[[nodes]]
+name       = "nexus"
+addr       = "nexus.tail:7946"
+tags.agent = "origin/feat-transport"
+tags.conjecture = "C-1"
+tags.phase = "proof"
+
+# Node: mini (macOS M4)
+[[nodes]]
+name       = "mini"
+addr       = "mini.tail:7946"
+tags.agent = "origin/feat-conflict"
+tags.conjecture = "C-4"
+tags.phase = "refinement"
+
+# Node: k8s-pod (ephemeral Kubernetes workload)
+[[nodes]]
+name       = "k8s-pod"
+addr       = "k8s-pod.tail:7946"
+tags.agent = "origin/feat-bench"
+tags.conjecture = "C-1"
+tags.phase = "proof"

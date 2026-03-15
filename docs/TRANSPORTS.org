@@ -47,6 +47,7 @@ Scores are 0–100 against L1.5 requirements. Higher = better fit.
 | Transport              | L1.5 fit | Latency | Zero-deps | Multicast | Persist | Tier          |
 |------------------------+----------+---------+-----------+-----------+---------+---------------|
 | Filesystem (~/.aq/)    |       95 |      75 |       100 |        80 |      90 | canonical     |
+| Serf / memberlist      |       92 |      95 |        65 |        99 |      30 | true gossip   |
 | NATS                   |       88 |      99 |        70 |        99 |      60 | light broker  |
 | NFS mount              |       72 |      65 |        90 |        80 |      90 | network-fs    |
 | etcd                   |       62 |      90 |        40 |        85 |      95 | k8s-native    |
@@ -745,6 +746,7 @@ Tier 0.5 (mounted):  NFS / SMB / WebDAV       — same code, shared path (AQ_HOM
 Tier 1 (local net):  NATS or Redis pub/sub    — when nexus↔mini latency matters
 Tier 1.5 (object):   S3 / MinIO              — cloud or k8s-hosted agents
 Tier 2 (k8s):        etcd                    — already present if running k8s
+Tier 2.2 (gossip):   Serf / memberlist       — true SWIM gossip; semantics match aq's
 Tier 3 (IoT/hybrid): MQTT (Mosquitto)        — already deployed for Meshtastic
 Tier 4 (monitor):    IRC (#aq-presence)       — human+agent hybrid view
 Tier ∞ (ceremony):   BBS echomail            — daily CPRR digest
