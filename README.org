@@ -27,6 +27,21 @@ aq is gossip, not coordination. Agents broadcast presence; nobody is
 required to listen.
 #+end_quote
 
+** The TRAMP Principle
+
+Emacs TRAMP --- Transparent Remote Access, Multiple Protocols --- coined
+the design pattern =aq= follows: *the consumer of an operation should
+not change behavior based on where the data lives or how it got there.*
+A =find-file= in TRAMP works the same on a local path, an SSH host, or
+a Kubernetes pod. The caller never knows.
+
+=aq= applies this to presence. =announce()= writes a broadcast.
+=read_active()= lists what is live. Whether the underlying transport is
+a local directory, an NFS mount, or a NATS subject is invisible to the
+caller --- the =Channel= interface (Publish, Subscribe, Active) abstracts
+it, and the filesystem is always the fallback. The agent's code never
+changes. See [[file:docs/TRANSPORTS.org][docs/TRANSPORTS.org]] for the full treatment.
+
 ** What aq is NOT
 
 - *Not file locking* (VSS, RCS, SourceSafe) --- the collaboration
