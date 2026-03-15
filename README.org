@@ -130,40 +130,37 @@ coupled by design. An agent without spatial context is lost; a broadcast
 without epistemic context is noise; presence without a channel is
 silence.
 
-* Conflict Detection
+* Awareness, Not Conflict Detection
 
-Conflicts are about *intent*, not files. Two agents conflict when their
-goals are architecturally incompatible --- even if they touch completely
-different code. The conflict signal is a composite of several inputs,
-ordered by priority:
+=aq= does not detect conflicts. It shows you who else is nearby.
 
-#+begin_src
-1. Same conjecture ID                          → HIGH (always)
-2. Both proof phase + incompatible claims       → HIGH
-3. One proof phase + overlapping claims         → MEDIUM
-4. Overlapping files (legacy, lowest priority)  → context-dependent
-#+end_src
+=aq check= shows broadcasts from other agents working on the same
+conjecture or with similar claims. You read them. You /feel/ whether
+your work overlaps. You decide what to do about it --- coordinate,
+adjust, or ignore. The tool does not assign severity scores or make
+judgments. The agent is the intelligence. =aq= is the gossip channel.
 
-Examples:
+Why not conflict detection? Because when 10 agents all touch =main.go=,
+a file-based detector returns HIGH for everything. Signal-to-noise ratio:
+zero. When it moved to severity scoring on claims, it was still the tool
+making a judgment that belongs to the agent. The right answer is simpler:
+show the agent what's happening and trust it to feel the overlap.
 
-| Agent A claim                    | Agent B claim                   | Shared files? | Severity |
-|----------------------------------+---------------------------------+---------------+----------|
-| "adding OAuth2 flow"             | "removing auth middleware"      | none          | HIGH     |
-| "adding OAuth2 flow"             | "adding OAuth2 flow"            | none          | HIGH     |
-| "refactoring test helpers"       | "adding new integration tests"  | test_utils.py | LOW      |
-| "proving C-1 at scale"           | "proving C-1 at scale"          | main.go       | HIGH     |
+#+begin_example
+$ aq check -c C-10 --claim "simplifying CLI dispatch"
 
-The first example is the critical case: zero file overlap, but the
-intents are architecturally incompatible. A file-only detector misses
-this entirely. The claim and conjecture are the primary signals; file
-overlap is supporting context.
+  Nearby broadcasts (same conjecture C-10):
 
-The exit condition: when one agent announces =status=done=, its
-broadcast stops matching in the next =read_active()= sweep (or expires
-via TTL). Conflict clears itself.
+  agent-4  "simplifying flag parsing — consolidating into unified parser"
+  agent-2  "simplifying Broadcast struct — tightening types"
+  agent-9  "simplifying doctor command — cleaner output"
+  ... 7 more
 
-See [[file:docs/CONCEPT-CONFLICTS.md][docs/CONCEPT-CONFLICTS.md]] for the full seven-level conflict
-taxonomy and composite scoring model (C-9).
+  You share C-10 with 9 other agents. Read their claims.
+#+end_example
+
+The exit condition: when an agent announces =status=done=, its broadcast
+expires from the active set. Silence returns naturally.
 
 * Transport Tiers
 
