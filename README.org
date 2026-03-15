@@ -110,62 +110,8 @@ may not conflict at all if their conjectures are independent.
 
 =aq= is about *feels, not files*. The gossip carries intent.
 
-The Go binary is the primary implementation. The Python prototype in
-=src/aq/= is the canonical wire format reference. Both produce and
-consume the same NDJSON files in =~/.aq/channels/broadcast/=.
-
-* Wire Format
-
-** Broadcast payload
-
-Each broadcast is a single JSON object, newline-terminated. The primary
-payload is the conjecture and claim --- the agent's intent:
-
-#+begin_src json
-{
-  "agent": "github.com/jwalsh/aq/feature-auth",
-  "worktree": "feature-auth",
-  "conjecture_id": "C-1",
-  "conjecture_claim": "Filesystem-first transport is sufficient",
-  "phase": "proof",
-  "status": "prosecuting",
-  "files": ["auth.py", "session.py"],
-  "ts": 1741824000.0,
-  "ttl": 3600,
-  "id": "01jd5abc12defg3456hi"
-}
-#+end_src
-
-** Schema
-
-| Field              | Type       | Description                            |
-|--------------------+------------+----------------------------------------|
-| =agent=            | string     | ~{remote}/{branch}~ or worktree addr   |
-| =worktree=         | string     | branch name                            |
-| =conjecture_id=    | string     | e.g. ~C-1~ --- the idea being pursued  |
-| =conjecture_claim= | string     | human-readable intent (primary signal)  |
-| =phase=            | enum       | conjecture / proof / refutation / refinement |
-| =status=           | enum       | prosecuting / done / blocked           |
-| =files=            | list[str]  | optional --- files as supporting context |
-| =ts=               | float      | unix timestamp                         |
-| =ttl=              | int        | seconds until expiry (default 3600)    |
-| =id=               | string     | ULID                                   |
-
-** Filename format
-
-#+begin_example
-aq-{ts14d}-{ulid}.json
-#+end_example
-
-Files live in =~/.aq/channels/broadcast/requests/=. Expired broadcasts
-are moved to =~/.aq/channels/broadcast/archive/= on read. No daemon
-needed for cleanup --- prune-on-read handles it.
-
-** Lifecycle
-
-1. =announce()= before starting work --- broadcast your intent
-2. Re-announce every ~TTL/2~ while working
-3. =announce(status="done")= when finished
+Wire format details (JSON schema, filename conventions, lifecycle) are
+in [[file:spec-v2.org][spec-v2.org]]. You don't need to understand the protocol to use the tool.
 
 * Three-Primitive Interlock
 
