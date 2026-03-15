@@ -1,0 +1,955 @@
+#+TITLE: aq Specification v2
+#+SUBTITLE: Self-contained rebuild spec for the ambient agent queue
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-14
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* 0. Foundational Axiom
+
+aq is gossip, not coordination. Agents broadcast presence; nobody is
+required to listen.
+
+=aq= occupies L1.5 in the seven-concern stack --- between authoritative
+work state (L1, =bd=) and established knowledge retrieval (L2,
+=JITIR=). It is the mDNS of multi-agent development: broadcast "does
+anyone know this address?", cost near zero, benefit when someone does
+know is conflict avoidance before the merge wall. No orchestrator, no
+broker, no authority. Just gossip.
+
+Do not make =aq= authoritative, do not make it a retrieval system, do
+not make it coordinate. It broadcasts. That is it.
+
+* 1. Wire Format
+
+** 1.1 Broadcast Payload --- JSON Schema
+
+Each broadcast is a single JSON object, one per file, newline-terminated.
+
+#+begin_src json
+{
+  "agent": "github.com/jwalsh/aq/feature-auth",
+  "worktree": "feature-auth",
+  "conjecture_id": "C-1",
+  "conjecture_claim": "Filesystem-first transport is sufficient",
+  "phase": "proof",
+  "status": "prosecuting",
+  "files": ["auth.py", "session.py"],
+  "ts": 1741824000.0,
+  "ttl": 3600,
+  "id": "01936d2a1f00ab3c4d5e6f"
+}
+#+end_src
+
+** 1.2 Field Definitions
+
+| Field              | JSON key           | Type       | Required | Default        | Description                              |
+|--------------------+--------------------+------------+----------+----------------+------------------------------------------|
+| Agent              | =agent=            | string     | yes      | auto-detected  | ={remote}/{branch}= or worktree address. Auto-detected from git remote + branch. Linked worktrees use ={remote}/worktrees/{branch}=. |
+| Worktree           | =worktree=         | string     | yes      | auto-detected  | Branch name. Auto-detected from =git rev-parse --abbrev-ref HEAD=. |
+| ConjectureID       | =conjecture_id=    | string     | yes      | ---            | Conjecture identifier, e.g. =C-1=. Required by CLI. |
+| ConjectureClaim    | =conjecture_claim= | string     | no       | "working on {conjecture_id}" | Human-readable description of the conjecture. |
+| Phase              | =phase=            | enum       | yes      | ="proof"=      | One of: =conjecture=, =proof=, =refutation=, =refinement=. The four CPRR phases. |
+| Status             | =status=           | enum       | yes      | ="prosecuting"= | One of: =prosecuting=, =done=, =blocked=. |
+| Files              | =files=            | list[str]  | no       | =[]= (empty)   | Files being touched. Must be relative paths (no absolute paths). Comma-separated on CLI. |
+| Timestamp          | =ts=               | float64    | yes      | =time.Now().Unix()= | Unix timestamp (seconds since epoch). |
+| TTL                | =ttl=              | int        | yes      | =3600=         | Seconds until expiry. |
+| ID                 | =id=               | string     | yes      | auto-generated | 22-character ULID: 12 hex chars (millisecond timestamp) + 10 hex chars (random). |
+
+** 1.3 Enumerations
+
+*** Phase (CPRR)
+
+| Value        | Meaning                                      |
+|--------------+----------------------------------------------|
+| =conjecture= | Planning, hypothesizing. Not yet building.   |
+| =proof=      | Actively building to confirm the conjecture. |
+| =refutation= | Building evidence against the conjecture.    |
+| =refinement= | Improving after initial proof.               |
+
+*** Status
+
+| Value         | Meaning                                        |
+|---------------+------------------------------------------------|
+| =prosecuting= | Actively working. Default state.               |
+| =done=        | Finished. Broadcast should not trigger conflicts. |
+| =blocked=     | Waiting on something. Still holds the claim.   |
+
+** 1.4 ULID Generation
+
+22 characters total. No external dependency.
+
+#+begin_src go
+func generateULID() string {
+    ms := time.Now().UnixMilli()
+    ts := fmt.Sprintf("%012x", ms)     // 12 hex chars
+    b := make([]byte, 5)
+    _, _ = rand.Read(b)                 // crypto/rand
+    r := hex.EncodeToString(b)          // 10 hex chars
+    return ts + r                       // 22 chars total
+}
+#+end_src
+
+Properties:
+- Timestamp portion (first 12 chars) is monotonically increasing.
+- Random portion (last 10 chars) uses =crypto/rand= (not =math/rand=).
+- Lexicographic sort of ULIDs = chronological order (within clock precision).
+- Uniqueness: collision probability ~1 in 2^40 per millisecond.
+
+** 1.5 Filename Format
+
+#+begin_example
+aq-{ts14d}-{id}.json
+#+end_example
+
+Where ={ts14d}= is the Unix timestamp zero-padded to 14 decimal digits,
+and ={id}= is the ULID.
+
+Example: =aq-00001741824000-01936d2a1f00ab3c4d5e6f.json=
+
+Files live in =~/.aq/channels/{channel}/requests/=. Expired broadcasts
+are moved to =~/.aq/channels/{channel}/archive/= on read.
+
+** 1.6 Lifecycle
+
+1. =announce()= before touching files.
+2. Re-announce every ~TTL/2 while working.
+3. =announce(status="done")= when finished.
+
+* 2. Invariants
+
+Invariants are advisory assertions --- they warn but never block.
+Gossip without invariants is rumor; gossip with invariants is intelligence.
+
+Three layers, twelve invariants total:
+
+** 2.1 Layer A: Self-Check (pre-write verification)
+
+These verify a broadcast's claims against reality before writing.
+
+| # | Name                | Severity | Property                                                                 |
+|---+---------------------+----------+--------------------------------------------------------------------------|
+| 1 | =files_exist=       | warning  | For all f in broadcast.files: os.Stat(f) succeeds.                      |
+| 2 | =git_branch_matches= | warning | =git rev-parse --abbrev-ref HEAD= equals broadcast.worktree.            |
+| 3 | =phase_valid=       | error    | broadcast.phase is in {conjecture, proof, refutation, refinement}.       |
+| 4 | =ttl_reasonable=    | warning  | 10 <= broadcast.ttl <= 86400. Below 10s is a mistake; above 24h is stale. |
+| 5 | =paths_relative=    | error    | For all f in broadcast.files: not filepath.IsAbs(f). Absolute paths leak filesystem structure. |
+
+** 2.2 Layer B: World-Check (environment verification)
+
+These verify that the world has not changed since the agent last looked.
+
+| # | Name                   | Severity | Property                                                                 |
+|---+------------------------+----------+--------------------------------------------------------------------------|
+| 6 | =branch_not_diverged=  | warning  | =git rev-list --count HEAD..origin/main= <= 50. More than 50 commits behind suggests rebase needed. |
+| 7 | =no_ghost_broadcasts=  | warning  | No active broadcast from this agent has less than 20% TTL remaining. Ghosts suggest forgotten announces. |
+| 8 | =disk_space_ok=        | warning  | Total size of AQ_HOME < 100MB. Above that, run gc.                      |
+
+** 2.3 Layer C: Protocol-Check (structural verification)
+
+These verify the gossip protocol's structural properties.
+
+| # | Name                    | Severity | Property                                                                    |
+|---+-------------------------+----------+-----------------------------------------------------------------------------|
+|  9 | =ulid_unique=          | error    | No two broadcasts (active + archived) share the same ULID.                  |
+| 10 | =no_duplicate_active=  | warning  | No agent has two non-done active broadcasts for the same conjecture_id.     |
+| 11 | =timestamps_sane=      | error    | No active broadcast has timestamp > now + 60s. Allows 60s clock skew.       |
+| 12 | =all_paths_relative=   | error    | No active broadcast contains absolute file paths.                           |
+
+** 2.4 Formal Properties (from Property-Based Testing)
+
+These 12 properties should hold for all valid inputs. They are the
+specification against which any implementation can be verified.
+
+| # | Property                        | Statement                                                                       |
+|---+---------------------------------+---------------------------------------------------------------------------------|
+| 1 | Broadcast Roundtrip             | For any Broadcast b: BroadcastFromJSON(b.ToJSON()) == b.                       |
+| 2 | TTL Monotonicity                | For any Broadcast b with TTL>0: not b.IsExpired() at creation; b.IsExpired() after TTL seconds. |
+| 3 | Conflict Symmetry               | a.Overlaps(b) == b.Overlaps(a) for all broadcasts a, b.                        |
+| 4 | Conflict Severity Determinism   | computeSeverity(phaseA, phaseB) is a pure function with no randomness.          |
+| 5 | ULID Uniqueness                 | For N calls to generateULID(), all results are distinct.                        |
+| 6 | ULID Ordering                   | For ULIDs generated at T1 < T2, id1[:12] <= id2[:12].                          |
+| 7 | Prune-on-Read Idempotency       | readActive() called twice in succession returns the same set (modulo time advancement). |
+| 8 | Archive Completeness            | Every expired broadcast is eventually archived. active + archived = total written. |
+| 9 | No False Negatives on Overlap   | Two broadcasts with different agents, shared files, status!=done -> checkConflicts returns signal. |
+| 10 | Phase Severity Ordering         | severity(both_proof) >= severity(one_proof) >= severity(neither_proof).          |
+| 11 | Done-Status Exclusion           | A broadcast with status=done never appears in conflict signals.                 |
+| 12 | File List Commutativity         | Conflict detection is independent of file list ordering.                        |
+
+* 3. Transport Interface
+
+** 3.1 Channel Interface
+
+Three methods. Every =aq= operation works through this interface
+without knowing the underlying transport.
+
+#+begin_src go
+type Channel interface {
+    Publish(broadcast Broadcast) error
+    Subscribe(ctx context.Context) <-chan Broadcast
+    Active() ([]Broadcast, error)
+}
+#+end_src
+
+| Method    | CLI equivalent | Semantics                                                                 |
+|-----------+----------------+---------------------------------------------------------------------------|
+| Publish   | =aq announce=  | Write a broadcast. Fire-and-forget. Error return is for local failures only (disk full, etc.), not delivery failures. |
+| Subscribe | =aq watch=     | Stream of broadcasts as they arrive. Blocking. Used by daemon.            |
+| Active    | =aq status=    | Snapshot of all non-expired broadcasts. Used for one-shot queries.        |
+
+** 3.2 Filesystem Implementation (Tier 0)
+
+The canonical implementation. All other transports are optional upgrades.
+
+#+begin_src go
+type FilesystemChannel struct {
+    requests string   // ~/.aq/channels/{channel}/requests/
+    archive  string   // ~/.aq/channels/{channel}/archive/
+}
+#+end_src
+
+- =Publish=: Write JSON to ={requests}/aq-{ts14d}-{id}.json=.
+- =Active=: List ={requests}/aq-*.json=, parse each, move expired to ={archive}/=, return non-expired. Sort by filename (chronological).
+- =Subscribe=: Use FSEvents (macOS) / inotify (Linux) / kqueue (FreeBSD) to watch ={requests}/=. Future daemon feature.
+
+Prune-on-read: =Active()= moves expired broadcasts to the archive
+directory. No daemon required for cleanup. Concurrent readers handle
+the move-or-skip race: if another process already archived the file,
+=os.Rename= returns ENOENT and the reader skips it.
+
+** 3.3 Multi-Channel Composition
+
+Fan out a single Publish to multiple backends. Deduplicate Active by
+broadcast ID.
+
+#+begin_src go
+type MultiChannel struct {
+    channels []Channel
+}
+
+func (mc *MultiChannel) Publish(b Broadcast) error {
+    for _, ch := range mc.channels {
+        ch.Publish(b) // Errors are non-fatal --- gossip is lossy-ok
+    }
+    return nil
+}
+
+func (mc *MultiChannel) Active() ([]Broadcast, error) {
+    seen := make(map[string]struct{})
+    var out []Broadcast
+    for _, ch := range mc.channels {
+        active, _ := ch.Active()
+        for _, b := range active {
+            if _, dup := seen[b.ID]; !dup {
+                seen[b.ID] = struct{}{}
+                out = append(out, b)
+            }
+        }
+    }
+    return out, nil
+}
+#+end_src
+
+** 3.4 Transport Tiers
+
+| Tier  | Transport              | L1.5 Fit | Requires code change | Notes                                   |
+|-------+------------------------+----------+----------------------+-----------------------------------------|
+|     0 | Filesystem (~/.aq/)    |       95 | No                   | Canonical. Debuggable with =ls= and =cat=. |
+|   0.5 | NFS / SMB / WebDAV     |    50-72 | No                   | Same code, set =AQ_HOME= to mount path. |
+|   0.5 | TRAMP (Emacs)          |       70 | No                   | Multi-hop transparent remote FS via Emacs. |
+|     1 | NATS / Redis pub/sub   |    68-88 | Yes (new Channel)    | When cross-machine latency matters.     |
+|   1.5 | S3 / MinIO             |       58 | Yes (new Channel)    | Cloud or k8s-hosted agents.             |
+|     2 | etcd                   |       62 | Yes (new Channel)    | Already present if running k8s.         |
+|     3 | MQTT (Mosquitto)       |       65 | Yes (new Channel)    | IoT pub/sub; QoS 0 = fire-and-forget.  |
+|     4 | IRC (#aq-presence)     |       55 | Yes (new Channel)    | Human+agent hybrid monitoring.          |
+
+Key insight: Tier 0 and Tier 0.5 share /identical/ code. NFS, SMB, and
+WebDAV mounts are transparent to =Publish()= and =Active()=. Point
+=AQ_HOME= at the mount:
+
+#+begin_src bash
+AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
+#+end_src
+
+* 4. Conflict Detection
+
+** 4.1 Current Algorithm (File-Level)
+
+The conflict detection algorithm in =checkConflicts()=:
+
+#+begin_src
+for each active broadcast B where B.agent != me.agent:
+    if B.status == "done": skip
+    shared = intersection(me.files, B.files)
+    if len(shared) == 0: skip
+    severity = computeSeverity(me.phase, B.phase)
+    emit ConflictSignal{A: me, B: B, SharedFiles: shared, Severity: severity}
+
+sort signals by severity descending (HIGH first)
+#+end_src
+
+** 4.2 Severity Computation
+
+Three lines of logic, derived from CPRR phase:
+
+#+begin_src
+both proof + shared files = HIGH
+one proof  + shared files = MEDIUM
+neither proof + shared files = LOW
+#+end_src
+
+Two agents in =proof= phase over the same files are actively building
+competing implementations --- high risk. An agent in =conjecture=
+phase is still planning --- overlap is informational, not urgent.
+
+#+begin_src go
+func computeSeverity(phaseA, phaseB string) string {
+    bothProof := phaseA == "proof" && phaseB == "proof"
+    oneProof := phaseA == "proof" || phaseB == "proof"
+    if bothProof {
+        return "high"
+    } else if oneProof {
+        return "medium"
+    }
+    return "low"
+}
+#+end_src
+
+** 4.3 Done-Status Filtering
+
+A broadcast with =status=done= is excluded from conflict detection.
+The agent has finished its work. The broadcast remains active (not yet
+expired via TTL) but should not trigger conflict signals.
+
+The exit condition: when one agent announces =status=done=, its
+broadcast stops matching in the next conflict check. Conflict clears
+itself.
+
+** 4.4 Self-Exclusion
+
+A broadcast from the same agent (=other.Agent == me.Agent=) is
+excluded. An agent does not conflict with itself.
+
+** 4.5 ConflictSignal Structure
+
+#+begin_src go
+type ConflictSignal struct {
+    A           Broadcast `json:"a"`
+    B           Broadcast `json:"b"`
+    SharedFiles []string  `json:"shared_files"`
+    Severity    string    `json:"severity"` // low | medium | high
+}
+#+end_src
+
+The Summary format:
+
+#+begin_example
+[HIGH] github.com/jwalsh/aq/feature-auth (C-1) <-> github.com/jwalsh/aq/feature-db (C-7) -- shared: auth.py
+#+end_example
+
+** 4.6 Proposed: Concept-Level Signals (C-9)
+
+The current algorithm gates entirely on file intersection. This misses
+architectural contradictions where agents work on different files but
+conflicting concepts. Proposed extensions (additive, not replacing
+file-level detection):
+
+*** P0: Conjecture ID Matching
+
+If two non-done broadcasts from different agents share the same
+=conjecture_id= and overlap on files, they are automatically in conflict.
+Trivial: one string comparison.
+
+*** P1: Claim Similarity
+
+Jaccard similarity on word tokens of =conjecture_claim=. Fifteen lines
+of code, no external dependencies. Tokenize with =strings.Fields()= +
+=strings.ToLower()=. Stop word list: ~15 hardcoded common words.
+
+*** P2: Tags Field (Wire Format Extension)
+
+Add an optional =tags= field (=list[str]=) to the broadcast payload.
+Backward compatible --- existing readers ignore unknown fields.
+Structured concept matching without NLP.
+
+*** P3: Composite Scoring
+
+Replace the boolean file-overlap gate with a weighted score:
+
+#+begin_src
+score = w_file * file_overlap_score
+      + w_cid  * conjecture_match_score
+      + w_claim * claim_similarity_score
+      + w_tag  * tag_overlap_score
+
+severity = computeSeverity(phaseA, phaseB) * score
+#+end_src
+
+Phase severity remains as a multiplier across all signals, consistent
+with C-4.
+
+*** P2: Namespace-Qualified Paths
+
+Prefix file paths with repo identity to eliminate cross-repo false
+positives on basename collision (e.g., two repos both touching
+=main.go=).
+
+*** Proposed ConflictSignal Extension
+
+#+begin_src go
+type ConflictSignal struct {
+    A           Broadcast `json:"a"`
+    B           Broadcast `json:"b"`
+    SharedFiles []string  `json:"shared_files"`
+    Severity    string    `json:"severity"`
+    Reason      string    `json:"reason"`  // "file_overlap", "same_conjecture", "claim_similarity=0.35"
+    Score       float64   `json:"score"`   // composite score before thresholding
+}
+#+end_src
+
+* 5. CLI Commands
+
+** 5.1 Global Flags
+
+| Flag            | Default       | Description                        |
+|-----------------+---------------+------------------------------------|
+| =--json=        | =false=       | Machine-readable JSON output.      |
+| =--channel=     | ="broadcast"= | Channel name.                      |
+
+** 5.2 Subcommands
+
+*** =announce= (aliases: =ann=, =a=)
+
+Broadcast presence. Writes a JSON file to the channel's requests directory.
+
+| Flag / Alias            | Required | Default          | Description                                              |
+|-------------------------+----------+------------------+----------------------------------------------------------|
+| =-c=, =--conjecture=   | yes      | ---              | Conjecture ID (e.g., =C-1=).                            |
+| =-f=, =--files=        | no       | =""=             | Comma-separated file list.                               |
+| =--claim=              | no       | "working on {c}" | Human-readable claim.                                    |
+| =--phase=              | no       | ="proof"=        | conjecture / proof / refutation / refinement.            |
+| =--status=             | no       | ="prosecuting"=  | prosecuting / done / blocked.                            |
+| =--ttl=                | no       | =3600=           | Seconds until expiry.                                    |
+| =--validate=           | no       | =false=          | Run pre-flight invariant checks (advisory, never blocks). |
+| =-h=, =--help=         | no       | ---              | Show help.                                               |
+
+Exit codes:
+- 0: success.
+- 1: error (missing =-c= flag, write failure).
+
+*** =whisper=
+
+Like =announce= but with a short TTL (60s). Accepts all =announce= flags.
+If =--ttl= is not explicitly specified, injects =--ttl 60=.
+
+Exit codes: same as =announce=.
+
+*** =check=
+
+Check for conflicts against active broadcasts.
+
+| Flag / Alias            | Required | Default     | Description                                       |
+|-------------------------+----------+-------------+---------------------------------------------------|
+| =-c=, =--conjecture=   | no       | ="C-?"=     | Conjecture ID.                                    |
+| =-f=, =--files=        | no       | =""=        | Comma-separated file list.                        |
+| =--phase=              | no       | ="proof"=   | Phase for severity computation.                   |
+| =-h=, =--help=         | no       | ---         | Show help.                                        |
+
+Exit codes:
+- 0: no conflicts, or only LOW/MEDIUM conflicts.
+- 1: HIGH conflict detected, or read error.
+
+*** =status= (alias: =ls=)
+
+List active broadcasts.
+
+| Flag / Alias    | Description        |
+|-----------------+--------------------|
+| =-h=, =--help= | Show help.         |
+
+Exit codes:
+- 0: success (including zero active broadcasts).
+- 1: read error.
+
+Output format (human): one line per broadcast:
+
+#+begin_example
+  {agent:50s}  {conjecture_id}  [{phase}]  {files}
+#+end_example
+
+*** =init=
+
+Create the =~/.aq= directory structure. Writes =config.json=.
+Installs git hooks (=.githooks/pre-commit=, =.githooks/post-commit=)
+if in a git repo. Hooks are advisory: they exit 0 if =aq= is not
+installed.
+
+Exit codes:
+- 0: success.
+- 1: directory creation or config write error.
+
+*** =doctor=
+
+Health check. Verifies:
+- AQ_HOME exists and is a directory.
+- Channel directory exists.
+- =config.json= present.
+- Active broadcast count.
+- Agent address (auto-detected).
+- Ecosystem tools: =git=, =sb=, =cprr=.
+
+Exit codes:
+- 0: no errors (warnings are OK).
+- 1: errors found (e.g., AQ_HOME missing, git not found).
+
+*** =validate=
+
+Run invariant checks across all three layers (self, world, protocol).
+
+| Flag / Alias     | Default | Description                                           |
+|------------------+---------+-------------------------------------------------------|
+| =--category=     | all     | Run only: =self=, =world=, =protocol=, or all.       |
+| =-h=, =--help=   | ---     | Show help.                                            |
+
+Exit codes:
+- 0: no errors (warnings are OK). Warnings are expected in gossip.
+- 1: at least one error-severity invariant failed.
+
+*** =quickstart= (alias: =prime=)
+
+Agent-consumable context dump. Shows AQ_HOME, active broadcast count,
+conflict summary, quick commands, three-primitive interlock, version.
+
+Exit codes: always 0.
+
+*** =version= (aliases: =--version=, =-v=)
+
+Print version, commit hash, and build date.
+
+#+begin_example
+aq {version} (commit: {hash}, built: {date})
+#+end_example
+
+*** =help= (aliases: =--help=, =-h=)
+
+Print usage text.
+
+* 6. Constants
+
+| Name            | Value        | Rationale                                                                 |
+|-----------------+--------------+---------------------------------------------------------------------------|
+| =DefaultTTL=    | =3600=       | 1 hour. Matches real agent session length. The original 300s (5 min) caused "gossip with amnesia" --- broadcasts expired while agents were still working. Observed 5 times during dogfooding. |
+| =WhisperTTL=    | =60=         | 60 seconds. For transient read-level presence signals.                    |
+| =DefaultChannel= | ="broadcast"= | The default channel name.                                                |
+
+** 6.1 Path Layout
+
+#+begin_example
+$AQ_HOME/                         # default: ~/.aq/
+  config.json                     # version, default_channel, default_ttl
+  channels/
+    broadcast/                    # DefaultChannel
+      requests/                   # active broadcasts (aq-*.json)
+      archive/                    # expired broadcasts (moved on read)
+  agents/                         # future: agent registry
+  logs/                           # future: event logs
+#+end_example
+
+** 6.2 AQ_HOME Resolution Order
+
+1. =AQ_HOME= environment variable (if set).
+2. =.aq/= in current working directory (local-first, if directory exists). This enables per-repo isolation --- same pattern as =cprr=.
+3. =~/.aq/= (global fallback).
+
+** 6.3 Sandbox Detection
+
+The agent address is auto-detected from git state:
+
+#+begin_src
+remote_url = git remote get-url origin
+    -> strip "git@github.com:" -> "github.com/"
+    -> strip "https://github.com/" -> "github.com/"
+    -> strip ".git" suffix
+
+branch = git rev-parse --abbrev-ref HEAD
+
+is_linked_worktree = (git rev-parse --git-common-dir) != (git rev-parse --git-dir)
+
+if is_linked_worktree:
+    agent_address = "{remote}/worktrees/{branch}"
+else:
+    agent_address = "{remote}/{branch}"
+#+end_src
+
+* 7. Build Order
+
+Seven steps with acceptance gates. If a gate fails, stop. Document
+what failed and surface it as a CPRR refutation candidate.
+
+** Step 1: Protocol Core
+
+Build the =Broadcast= struct, serialization, ULID generation.
+
+*Acceptance*: =Broadcast= can be created, serialized to JSON, and
+deserialized back. In Go: =go test -run TestBroadcast=. In Python:
+=python -c "from aq.protocol import Broadcast"=.
+
+*Status*: PASS. Both Go and Python implementations exist and pass.
+
+** Step 2: Unit Tests for Protocol
+
+*Acceptance*: Test suite passes with at least 5 tests covering
+Broadcast creation, JSON roundtrip, ULID generation, IsExpired, and
+Overlaps.
+
+*Status*: PASS. Go test suite has 58+ tests including property-based
+tests for roundtrip, symmetry, monotonicity, and uniqueness.
+
+** Step 3: Unit Tests for Conflict Detection
+
+*Acceptance*: Tests cover all severity levels (low/medium/high),
+done-status exclusion, self-exclusion, and TTL expiry.
+
+*Status*: PASS. Tests cover HIGH (both proof), MEDIUM (one proof), LOW
+(neither proof), done-status filtering, and self-agent exclusion.
+
+** Step 4: CLI Smoke Test
+
+*Acceptance*: =aq announce -c C-1 -f "foo.py"= writes a file; =aq
+status= reads it back.
+
+*Status*: PASS. Go binary fully implements announce, whisper, check,
+status, init, doctor, validate, quickstart, version, and help.
+
+** Step 5: Daemon with Filesystem Watch
+
+*Acceptance*: New broadcast triggers conflict check within 1s.
+
+*Status*: NOT STARTED. Subscribe method in Channel interface is
+defined but not implemented. Requires FSEvents (macOS) / inotify
+(Linux).
+
+** Step 6: Integration: sb detect -> aq announce
+
+*Acceptance*: =aq announce -c C-1= auto-detects worktree without
+=--worktree= flag.
+
+*Status*: PASS. =detectSandbox()= auto-detects branch, remote, and
+linked worktree status from git state. Announce uses this automatically.
+
+** Step 7: Benchmark at Scale
+
+*Acceptance*: 10 agents, 100 msg/min, p99 < 500ms.
+
+*Status*: PASS. Benchmark data (M4 Mac mini, APFS):
+
+| Metric                            | Result       | Budget | Verdict |
+|-----------------------------------+--------------+--------+---------|
+| writeBroadcast (serial)           | 77us         | N/A    | ---     |
+| readActive (100 files)            | 1.4ms        | N/A    | ---     |
+| checkConflicts (10 agents)        | 162us        | N/A    | ---     |
+| checkConflicts (100 agents)       | 1.5ms        | N/A    | ---     |
+| CLI p99 (10 agents, sustained)    | 82ms         | 500ms  | PASS    |
+| CLI p99 (50 agents, sustained)    | 258ms        | 500ms  | PASS    |
+| Burst storm (500 writes)          | 0 lost       | N/A    | PASS    |
+| TTL churn (3s TTL)                | Correct      | N/A    | PASS    |
+| Archive flood (200 expired)       | 200 archived | N/A    | PASS    |
+
+Dominant cost is process spawn overhead (fork+exec), not filesystem
+I/O. In-process =writeBroadcast= is ~1000x faster than CLI invocation.
+
+Scaling characteristics:
+
+| Operation          | Scaling     | Evidence                              |
+|--------------------+-------------+---------------------------------------|
+| writeBroadcast     | O(1)        | ~77us regardless of existing files    |
+| readActive         | O(N)        | 1.4ms/100 files, 14.8ms/1000 files   |
+| checkConflicts     | O(N*F)      | N=agents, F=files per agent           |
+| Concurrent writes  | O(1) amort  | No contention on APFS atomic creates  |
+| Fan-out (N writers)| Near-linear | 50 writers amortize to 234us/op       |
+
+* 8. Open Conjectures
+
+| ID  | Claim                                                      | Status     | Refutation Criterion                                               | Evidence                                                 |
+|-----+------------------------------------------------------------+------------+--------------------------------------------------------------------+----------------------------------------------------------|
+| C-1 | Filesystem-first transport is sufficient                   | CONFIRMED  | p99 > 500ms at 10 agents, 100 msg/min                             | Benchmark: p99 = 82ms at 10 agents, 258ms at 50 agents. |
+| C-2 | Conjecture identity prevents semantic conflicts            | OPEN       | False negatives on overlapping files with different conjecture IDs. | Dogfooding showed file-level detection works; concept-level gaps exist (see C-9). |
+| C-3 | Wave presence semantics without Wave data model            | OPEN       | NDJSON+TTL cannot express a necessary coordination pattern.        | No coordination pattern has been identified that requires more than NDJSON+TTL. |
+| C-4 | CPRR phase modulates conflict severity                     | OPEN       | Phase-based severity produces more false positives than flat severity. | Implemented. No comparative measurement yet. |
+| C-5 | (Not assigned)                                             | ---        | ---                                                                | ---                                                      |
+| C-6 | Local-first .aq/ in cwd before ~/.aq/                      | OPEN       | Local-first causes confusion when agents operate from different cwd. | Implemented in aqHome(). No confusion reported yet. |
+| C-7 | Auto-renewal / heartbeat prevents TTL cliff                | OPEN       | Heartbeat daemon adds coupling that violates gossip axiom.         | Not implemented. DefaultTTL raised from 300s to 3600s as mitigation. |
+| C-8 | Function-level granularity resolves single-file false positives | OPEN   | AST parsing adds complexity exceeding the value.                   | Not implemented. Dogfooding confirmed single-file false positives are real. |
+| C-9 | Concept-level conflict detection reduces false negatives    | PROPOSED   | Concept-level signals produce more false positives than they eliminate false negatives. | Research document complete (CONCEPT-CONFLICTS.md). Not implemented. |
+
+** 8.1 Instrumentation Requirements
+
+Every conjecture must have a measurement hook:
+
+- *C-1*: Measure p99 latency at load. (Done --- benchmarks.)
+- *C-2*: Track false negative rate in multi-agent sessions.
+- *C-3*: Log coordination patterns that NDJSON+TTL cannot express.
+- *C-4*: Compare alert rates between phase-based and flat severity.
+- *C-6*: Track whether local-first resolution causes agent confusion.
+- *C-7*: Measure ghost broadcast frequency and impact.
+- *C-8*: Measure false positive rate in single-file repos.
+- *C-9*: Compare alert sets between file-only and multi-signal detection.
+
+* 9. TRAMP Principle
+
+** 9.1 Design Philosophy
+
+Emacs TRAMP --- /Transparent Remote Access, Multiple Protocols/ --- is
+the design philosophy that =aq='s transport layer embodies. The key
+insight: the consumer of presence should not change behavior based on
+how the broadcast propagated.
+
+An =aq check= that reads from a NATS subject returns the same conflict
+signals as =aq check= that reads from a local directory. The agent
+does not know. The operator does not care.
+
+** 9.2 Structural Parallel
+
+| Concept           | TRAMP                             | aq                                 |
+|-------------------+-----------------------------------+------------------------------------|
+| Core operation    | =find-file= on any path           | =announce()= on any channel       |
+| Caller awareness  | None --- local and remote identical | None --- filesystem and NATS identical |
+| Method registration | =tramp-methods= alist            | =Channel= interface (3 methods)   |
+| Composition       | Multi-hop: =ssh:\vert{}bastille:=  | Multi-transport fan-out            |
+| Auto-routing      | =tramp-default-proxies-alist=     | Transport config by context        |
+| Degradation       | Falls back to local paths          | Falls back to filesystem           |
+| What it does NOT do | Does not manage files            | Does not manage work               |
+
+** 9.3 TRAMP as Concrete Transport
+
+Beyond the design philosophy, TRAMP is also a literal Tier 0.5
+transport. Any TRAMP path works as =AQ_HOME=:
+
+#+begin_src elisp
+(setenv "AQ_HOME" "/ssh:nexus:/home/jasonwalsh/.aq")
+(setenv "AQ_HOME" "/docker:aq-agent-1:/tmp/.aq")
+(setenv "AQ_HOME" "/bastille:agent-alpha:/root/.aq")
+#+end_src
+
+The principle: any resource:location that can be expressed as a
+filesystem path is a valid aq transport with zero code changes.
+
+* 10. Anti-Goals
+
+=aq= must NOT become any of the following. These are explicit
+architectural boundaries.
+
+** 10.1 Not an Orchestrator
+
+/Examples: Temporal, Airflow, CrewAI./
+
+Orchestrators create coupling and single points of failure. =aq= is
+peer-to-peer broadcast. No agent depends on another agent's liveness.
+No central coordinator assigns work or sequences tasks.
+
+** 10.2 Not a Message Broker
+
+/Examples: Redis, RabbitMQ, NATS (as requirement)./
+
+Brokers require a running service. =aq= degrades to filesystem-only
+with zero dependencies. NATS is an /upgrade path/, not a requirement.
+If the broker dies, =aq= continues working via filesystem.
+
+** 10.3 Not Google Wave's Operational Transform
+
+Wave's value was the ambient presence stream, not the data model. =aq=
+takes the presence semantics and drops the complexity. No operational
+transform, no real-time sync, no document model.
+
+** 10.4 Not a Task Queue
+
+/Examples: Celery, Bull./
+
+Task queues assign work. =aq= does not assign --- it broadcasts what
+agents are already doing. No jobs, no workers, no schedulers.
+
+** 10.5 Not Visual SourceSafe
+
+VSS used file-level exclusive locking as the collaboration model.
+=aq= adds awareness ("someone else is in this namespace") without
+adding prevention ("you cannot enter this namespace"). Broadcasts
+never block work. Conflict signals are advisory.
+
+** 10.6 Not an Authority
+
+Broadcasts carry no obligation. All expire via TTL. Silence is
+normal. A missed broadcast is not a failure --- it is the expected
+steady state. =aq= is probabilistic, not authoritative.
+
+* 11. Three-Primitive Interlock
+
+=aq= does not exist alone. It is the temporal layer in a
+three-primitive system:
+
+| Primitive | Dimension | Question        | Implementation | Tool |
+|-----------+-----------+-----------------+----------------+------|
+| sb        | spatial   | where am I?     | git worktree   | =sb= |
+| cprr      | epistemic | why am I here?  | conjecture     | =cprr= |
+| aq        | temporal  | who else knows? | broadcast      | =aq= |
+
+A broadcast payload requires all three: worktree identity (=sb=),
+conjecture context (=cprr=), and the broadcast itself (=aq=). They
+are coupled by design.
+
+- An agent without spatial context is lost.
+- A broadcast without epistemic context is noise.
+- Presence without a channel is silence.
+
+** 11.1 How They Interlock
+
+1. =sb detect= determines the worktree identity (branch, remote,
+   linked worktree status). This populates =agent= and =worktree= in
+   the broadcast payload.
+
+2. =cprr= provides the conjecture context (=conjecture_id=, =phase=).
+   This is the semantic payload that makes gossip meaningful ---
+   not just "I am here" but "I am here /because/ of this conjecture."
+
+3. =aq announce= combines spatial and epistemic context into a
+   timestamped, TTL-bounded broadcast. =aq check= reads active
+   broadcasts and computes conflict signals.
+
+** 11.2 Ecosystem
+
+| Tool   | Layer | Role                           |
+|--------+-------+--------------------------------|
+| =sb=   | L1.5  | Worktree auditor (spatial)     |
+| =cprr= | L3    | Conjecture tracker (epistemic) |
+| =bd=   | L1    | Bead-based issue tracking      |
+| =JITIR= | L2   | Knowledge retrieval            |
+| =aq=   | L1.5  | Ambient presence gossip        |
+
+Pattern reference for implementation: =sb= and =cprr= are single-file
+Go CLIs using stdlib only with manual dispatch. =aq= follows the same
+pattern.
+
+** 11.3 Position in Seven Concerns
+
+| L   | Concern         | Question                                      | Tool          |
+|-----+-----------------+-----------------------------------------------+---------------|
+|   7 | Coordination    | Who does what, in what order?                 | Gastown       |
+|   6 | Instrumentation | Which workflow governs this session?           | Organon       |
+|   5 | Control         | Who is allowed to act, can we prove it?        | SEFACA        |
+|   4 | Validation      | Built right, built correctly?                  | Elenctic-Spec |
+|   3 | Reasoning       | What do we believe, how would we know wrong?   | CPRR          |
+|   2 | Memory          | What do we already know before we re-learn it? | JITIR         |
+| 1.5 | *Presence*      | *Does anyone know what is happening right now?* | *aq*         |
+|   1 | Work            | What needs doing, what is its state?           | bd / beads    |
+
+L1 (=bd=) is authoritative --- a bead's state is a fact. L2 (=JITIR=)
+is retrieval --- "I indexed this." L1.5 (=aq=) is neither. A broadcast
+carries no obligation and may expire unread.
+
+* 12. Acceptance Test
+
+The system's definition of done. This is the end-to-end test that
+validates =aq= works as designed.
+
+** 12.1 Setup
+
+Two agents in separate worktrees of the same repository. Both share
+the same =AQ_HOME= (or the same filesystem mount).
+
+** 12.2 Sequence
+
+1. *Agent A announces*:
+   #+begin_src bash
+   aq announce -c C-1 --phase proof -f "auth.py" --claim "filesystem transport"
+   #+end_src
+
+2. *Agent B announces*:
+   #+begin_src bash
+   aq announce -c C-7 --phase proof -f "auth.py" --claim "heartbeat daemon"
+   #+end_src
+
+3. *Watcher reads active broadcasts*:
+   #+begin_src bash
+   aq status
+   #+end_src
+   Expected: two active broadcasts, both showing =auth.py=.
+
+4. *Watcher detects conflict*:
+   #+begin_src bash
+   aq check -c C-1 -f "auth.py" --phase proof
+   #+end_src
+   Expected: HIGH conflict (both =proof=, shared file =auth.py=).
+   Exit code: 1.
+
+5. *Agent A finishes*:
+   #+begin_src bash
+   aq announce -c C-1 --phase proof -f "auth.py" --status done
+   #+end_src
+
+6. *Watcher confirms conflict cleared*:
+   #+begin_src bash
+   aq check -c C-7 -f "auth.py" --phase proof
+   #+end_src
+   Expected: no conflicts (Agent A's broadcast has status=done).
+   Exit code: 0.
+
+** 12.3 Acceptance Criteria
+
+- HIGH conflict detected when both agents are in =proof= phase over
+  the same file.
+- Both agents can see the conflict signal independently.
+- Conflict clears when one agent announces =status=done=.
+- No daemon required for any step.
+- All operations use filesystem I/O only.
+
+* 13. Implementation Notes
+
+** 13.1 Language and Dependencies
+
+- Go 1.23+ (target implementation).
+- Zero runtime dependencies --- stdlib only.
+- Single =main.go= file with manual subcommand dispatch.
+- Python 3.11+ prototype in =src/aq/= is the canonical wire format reference.
+- Both produce and consume the same NDJSON files.
+
+** 13.2 Build Tooling
+
+- =hatchling= for Python packaging.
+- =make= for Go build (=make build=, =make test=, =make lint=, =make install=).
+- =mypy= strict for Python type checking.
+- =pytest= for Python testing.
+- =go test -race= for race detection.
+
+** 13.3 Git Notes
+
+After every commit, attach git notes with agent metadata:
+
+#+begin_example
+X-Agent-Role: <builder|reviewer|bootstrap|researcher>
+X-Agent-Runner: Claude Code <version>
+X-Agent-Model: <model name>
+X-Beads: <bead IDs touched>
+X-Conjectures: <conjecture IDs relevant>
+X-Testing: <what was tested, pass/fail>
+X-Invariants: <contracts preserved or violated>
+X-Deviations: <any deviation from plan, or "none">
+X-Timeline: <wall clock if relevant>
+#+end_example
+
+Push notes: =git push origin refs/notes/commits=.
+
+** 13.4 Research Lineage
+
+- *Google Wave Federation Protocol* --- presence-as-stream. Wave was
+  trying to build L1.5 for documents.
+- *Lakatos, Proofs and Refutations* --- the CPRR methodology.
+- *GEACL* (arXiv 2508.01531, 2512.03285) --- gossip as the missing
+  substrate for multi-agent coordination. =aq= is a concrete
+  implementation of this research agenda.
+- *Demers et al., 1987* --- epidemic algorithms for replicated
+  database maintenance. The foundational gossip protocol paper.
+- =sb=, =cprr=, =bd= --- sibling tools in the DefRecord ecosystem.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
