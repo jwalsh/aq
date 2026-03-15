@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0
+X-Conjectures: C-2, C-4, C-8, C-9
+X-Testing: conceptual reframing — no behavioral changes to code
+X-Invariants: VSS anti-pattern now explicit in anti-goals
+X-Deviations: files field demoted from required to optional context
+X-Timeline: fundamental reframing per user feedback
