@@ -216,10 +216,11 @@ The bootstrap problem is real and unavoidable. aq was silent during its own
 build because aq didn't exist yet. The originating agent's git notes were
 more useful than aq's broadcasts — git notes persisted, aq broadcasts expired.
 
-### TTL 300s is correct, but heartbeat is mandatory
-Every observation converges: the TTL is fine for the wire protocol, but
-without auto-renewal it's useless for real sessions. Build step 5 (daemon)
-isn't optional — it's load-bearing.
+### TTL 300s was too short; now 3600s, but heartbeat is still mandatory
+Every observation converges: the original 300s TTL was too short for real
+sessions. DefaultTTL has been bumped to 3600s (1 hour), but even with the
+longer window, auto-renewal is necessary for multi-hour sessions. Build
+step 5 (daemon) isn't optional — it's load-bearing.
 
 ## Protocol Gaps Discovered
 

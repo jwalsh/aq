@@ -31,11 +31,12 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 CONSTANTS
     Agents,          \* Set of agent identifiers, e.g. {"a1", "a2", "a3"}
     MaxBroadcasts,   \* Max broadcasts per agent (bounds state space)
-    TTLValues,       \* Set of allowed TTL values, e.g. {5, 60, 300}
+    TTLValues,       \* Set of allowed TTL values, e.g. {5, 60, 300, 3600}
     MaxClock,        \* Upper bound on clock ticks, e.g. 600
     Files,           \* Universe of files agents can touch
     Phases,          \* CPRR phases: {"conjecture", "proof", "refutation", "refinement"}
-    Conjectures      \* Conjecture IDs, e.g. {"C-1", "C-2", "C-3"}
+    Conjectures,     \* Conjecture IDs, e.g. {"C-1", "C-2", "C-3"}
+    Statuses         \* Agent statuses: {"prosecuting", "done", "blocked"}
 
 \* ====================================================================
 \* Variables
@@ -65,13 +66,13 @@ vars == <<clock, broadcasts, archive, nextId, agentCount>>
 \*   id:             unique identifier (modeled as Nat)
 \*
 \* Omitted from model (not relevant to safety properties):
-\*   worktree, conjecture_claim, status
-\*   (status=done is modeled by letting TTL expire or not announcing)
+\*   worktree, conjecture_claim
 
 BroadcastType ==
     [ agent : Agents,
       conjecture_id : Conjectures,
       phase : Phases,
+      status : Statuses,
       files : SUBSET Files \ {{}},  \* non-empty file sets only
       ts : 0..MaxClock,
       ttl : TTLValues,
@@ -85,8 +86,10 @@ BroadcastType ==
 \* Matches main.go: func (b *Broadcast) IsExpired()
 IsExpired(b) == clock > b.ts + b.ttl
 
-\* The set of currently non-expired broadcasts.
-ActiveBroadcasts == { b \in broadcasts : ~IsExpired(b) }
+\* The set of currently non-expired, non-done broadcasts.
+\* Matches main.go checkConflicts(): broadcasts with status="done" are
+\* skipped even if they haven't expired. See also Lean 4 isActive.
+ActiveBroadcasts == { b \in broadcasts : ~IsExpired(b) /\ b.status /= "done" }
 
 \* The set of currently expired broadcasts still in the requests dir.
 \* These are "zombies" -- expired but not yet pruned by ReadActive.
@@ -194,7 +197,7 @@ Init ==
  *   - Clock has not exceeded MaxClock
  *   - Files must be non-empty
  *)
-Announce(agent, conjecture, phase, fileSet, ttl) ==
+Announce(agent, conjecture, phase, status, fileSet, ttl) ==
     /\ agentCount[agent] < MaxBroadcasts
     /\ clock <= MaxClock
     /\ fileSet /= {}
@@ -203,6 +206,7 @@ Announce(agent, conjecture, phase, fileSet, ttl) ==
            [ agent          |-> agent,
              conjecture_id  |-> conjecture,
              phase          |-> phase,
+             status         |-> status,
              files          |-> fileSet,
              ts             |-> clock,
              ttl            |-> ttl,
@@ -279,9 +283,10 @@ AnnounceAny ==
     \E agent \in Agents :
     \E conj \in Conjectures :
     \E phase \in Phases :
+    \E status \in Statuses :
     \E fileSet \in SUBSET Files \ {{}} :
     \E ttl \in TTLValues :
-        Announce(agent, conj, phase, fileSet, ttl)
+        Announce(agent, conj, phase, status, fileSet, ttl)
 
 \* ====================================================================
 \* Next-state relation
@@ -411,6 +416,19 @@ ConflictSeverityCorrectness ==
             /\ ((b1.phase /= "proof" /\ b2.phase /= "proof")
                 => ComputeSeverity(b1, b2) = "low")
 
+(* ----- DoneStatusClears -----
+ * A broadcast with status="done" is never in the active set.
+ * Matches main.go checkConflicts(): done broadcasts are skipped.
+ * Corresponds to Lean 4 theorem done_status_clears in Aq.lean.
+ *
+ * From CLAUDE.md acceptance test:
+ *   "Agent A finishes and announces status=done.
+ *    Watcher confirms conflict cleared."
+ *)
+DoneStatusClears ==
+    \A b \in broadcasts :
+        b.status = "done" => b \notin ActiveBroadcasts
+
 \* ====================================================================
 \* Temporal properties (liveness -- must eventually hold)
 \* ====================================================================
@@ -449,11 +467,15 @@ EventualArchival ==
 \* The TTL cliff is not a bug -- it is a design consequence of
 \* announce-once-and-forget behavior. This section quantifies it.
 \*
-\* Key numbers from DOGFOODING.md:
+\* Key numbers from DOGFOODING.md (at the original 300s default):
 \*   - TTL=300 (5 min), work session=30 min: 16.7% coverage
 \*   - TTL=300, work session=60 min: 8.3% coverage
 \*   - "For the remaining 25-55 minutes, the gossip layer has no
 \*     memory of the agent's work."
+\*
+\* The default was corrected to 3600s (1 hour) in main.go, which gives
+\* 100% coverage for sessions up to 1 hour. The cliff analysis below
+\* retains the original values to model the documented failure mode.
 \*
 \* The model allows us to observe this directly: after a broadcast
 \* is created at time T with TTL=5, by time T+6 it is expired.
@@ -503,10 +525,11 @@ StateConstraint ==
 \*   CONSTANTS
 \*     Agents      = {"a1", "a2", "a3"}
 \*     MaxBroadcasts = 5
-\*     TTLValues   = {5, 60, 300}
+\*     TTLValues   = {5, 60, 300, 3600}
 \*     MaxClock    = 600
 \*     Files       = {"main.go", "auth.py", "config.py"}
 \*     Phases      = {"conjecture", "proof", "refutation", "refinement"}
+\*     Statuses    = {"prosecuting", "done", "blocked"}
 \*     Conjectures = {"C-1", "C-2", "C-3"}
 \*
 \*   INVARIANTS
@@ -516,6 +539,7 @@ StateConstraint ==
 \*     NoBroadcastLoss
 \*     ConflictDetectionCompleteness
 \*     ConflictSeverityCorrectness
+\*     DoneStatusClears
 \*
 \*   PROPERTIES
 \*     TTLExpiry

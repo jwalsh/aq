@@ -253,10 +253,11 @@ theorem severity_symmetric
       def is_expired(self) -> bool:
           return time.time() > self.ts + self.ttl
 
-    Motivated by DOGFOODING.md Section 4 (The TTL Cliff): the 300-second
-    default TTL caused broadcasts to expire mid-session. This theorem
+    Motivated by DOGFOODING.md Section 4 (The TTL Cliff): the original
+    300-second default TTL caused broadcasts to expire mid-session. The
+    default was corrected to 3600 seconds (1 hour) in main.go. This theorem
     confirms the expiry mechanism itself is correct -- the problem documented
-    in DOGFOODING.md is with the *default value*, not the *mechanism*.
+    in DOGFOODING.md was with the *default value*, not the *mechanism*.
 
     Note: we use `b.ts + b.ttl < now` (strict less-than) matching the
     Python implementation's strict `>` comparison. -/

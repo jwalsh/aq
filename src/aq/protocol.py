@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 AQ_HOME = Path(os.environ.get("AQ_HOME", Path.home() / ".aq"))
-DEFAULT_TTL = 300
+DEFAULT_TTL = 3600
 
 
 def ulid() -> str:

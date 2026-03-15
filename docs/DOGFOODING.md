@@ -80,8 +80,9 @@ again.
 
 ## 4. The TTL Cliff
 
-Default TTL is 300 seconds (5 minutes). For a coding session that runs
-30-60 minutes, that means:
+Default TTL was 300 seconds (5 minutes) at the time of this observation.
+It has since been bumped to 3600s (1 hour) — see §12. For a coding
+session that runs 30-60 minutes, 300s meant:
 
 - Agent announces at T+0
 - Announcement expires at T+5min
