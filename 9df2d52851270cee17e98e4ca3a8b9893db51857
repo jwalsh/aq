@@ -1,0 +1,9 @@
+X-Agent-Role: researcher
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-os0
+X-Conjectures: C-2, C-4, C-8, C-9
+X-Testing: none (research document)
+X-Invariants: preserved — gossip axiom explicitly validated in §9
+X-Deviations: proposes C-9 (concept-level conflict detection)
+X-Timeline: background research agent output
