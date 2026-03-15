@@ -177,7 +177,7 @@ requirements.
 | 1     | NATS / Redis pub/sub   |    68--88 | When cross-machine latency matters      |
 | 1.5   | S3 / MinIO             |       58 | Cloud or k8s-hosted agents              |
 | 2     | etcd                   |       62 | Already present if running k8s          |
-| 3     | MQTT (Mosquitto)       |       65 | IoT pub/sub; QoS 0 = fire-and-forget   |
+| 3     | MQTT (Mosquitto)       |       65 | QoS 0 = gossip; RETAIN = presence; LWT = auto-done. Meshtastic bridge. |
 | 4     | IRC (#aq-presence)     |       55 | Human+agent hybrid monitoring           |
 | \infin | BBS echomail           |       45 | Daily CPRR conjecture digest            |
 | ---   | Carrier pigeons        |        2 | p99 RTT of ~3000s exceeds target by 6 orders of magnitude |
@@ -351,6 +351,7 @@ of the core binary:
 | =mdns=      | mDNS/Bonjour broadcast demo (macOS)                 |
 | =chaos=     | Chaos test suite --- 6 scenarios, subprocess-based   |
 | =tramp=     | Emacs TRAMP integration (=aq-tramp.el=)              |
+| =mqtt=      | MQTT transport (Tier 3, QoS 0 gossip, Meshtastic bridge) |
 
 All contrib packages are optional. The core =aq= binary has zero
 dependencies beyond Go stdlib.

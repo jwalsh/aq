@@ -1,0 +1,87 @@
+# MQTT transport configuration for aq
+#
+# aq broadcasts map to MQTT PUBLISH with QoS 0 and RETAIN=true.
+# This config is illustrative — aq does not read it yet.
+
+[transport]
+type = "mqtt"
+tier = 3
+
+# --- Primary broker (local Mosquitto) ---
+
+[broker.local]
+host = "localhost"
+port = 1883
+tls_port = 8883
+client_id = "aq-${HOSTNAME}-${PID}"
+
+# TLS settings (uncomment for production)
+# [broker.local.tls]
+# ca_cert = "/etc/mosquitto/ca.crt"
+# client_cert = "/etc/mosquitto/client.crt"
+# client_key = "/etc/mosquitto/client.key"
+
+# --- Meshtastic broker ---
+# Same infrastructure already deployed for mesh device telemetry.
+# aq presence rides alongside Meshtastic channels on the same broker.
+
+[broker.meshtastic]
+host = "mqtt.meshtastic.org"
+port = 1883
+client_id = "aq-mesh-${HOSTNAME}"
+# username = "meshdev"
+# password = "large4cats"
+
+# --- Topic mapping ---
+
+[topics]
+# announce → PUBLISH to this topic pattern
+# {repo} and {branch} are substituted at runtime from the broadcast payload.
+announce = "aq/{repo}/{branch}/presence"
+
+# status → SUBSCRIBE to wildcard topics
+# + is MQTT single-level wildcard
+status_repo = "aq/{repo}/+/presence"    # all branches in one repo
+status_all  = "aq/+/+/presence"         # all repos, all branches
+
+# --- QoS and RETAIN ---
+
+[publish]
+qos = 0          # Fire-and-forget. Gossip is lossy-ok.
+retain = true    # Last known state for new subscribers (like aq status for latecomers).
+
+[subscribe]
+qos = 0          # No delivery guarantees needed for presence gossip.
+
+# --- Last Will and Testament ---
+# Set at CONNECT time. If the client disconnects unexpectedly (crash,
+# network loss, kill -9), the broker publishes this message automatically.
+# This solves the heartbeat/TTL-cliff problem (C-7) without a daemon.
+
+[will]
+topic = "aq/{repo}/{branch}/presence"
+qos = 0
+retain = true
+payload = '{"status": "done", "agent": "${AGENT}", "reason": "disconnect"}'
+
+# --- Meshtastic bridge ---
+# Mesh devices publish telemetry to msh/. aq presence on aq/.
+# Both coexist on the same broker. A bridge rule could forward
+# mesh device presence into the aq topic namespace.
+
+[bridge.meshtastic]
+enabled = false
+# Map mesh device node IDs to aq agent addresses
+# source_topic = "msh/seabord/2/json/+/+"
+# dest_topic = "aq/meshtastic/{node_id}/presence"
+# This would let a Meshtastic node running on a Raspberry Pi
+# announce its aq presence over LoRa → MQTT → aq topic tree.
+
+# --- Multiple broker fanout ---
+# When enabled, aq publishes to all configured brokers.
+# Local Mosquitto for same-machine/LAN agents, Meshtastic broker
+# for mesh-connected devices. Subscription merges both.
+
+[fanout]
+enabled = false
+brokers = ["local", "meshtastic"]
