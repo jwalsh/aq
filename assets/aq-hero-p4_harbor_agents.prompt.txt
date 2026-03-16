@@ -1,0 +1,23 @@
+Source: khoj (DALL-E)
+URL: https://generated.khoj.dev/c67218d0-4e1f-40f7-a4a2-fb0c15a3b740/ec457751-c40d-4237-9645-d781fc163729.webp
+
+Prompt:
+A cinematic, long-exposure photograph captures five translucent AI agent silhouettes
+standing atop the calm, dark waters of Boston Harbor at night. In the background,
+massive industrial container ships are docked under the flickering orange glow of pier
+lights, their iron hulls reflecting off the rippling surface. The scene is thick with
+a cold blue fog that catches the ambient light, creating a moody, atmospheric haze.
+Each of the five figures is the source of glowing, circular presence rings that expand
+outward like glowing sonar pulses. These rings overlap and create complex interference
+patterns where they meet, rendered with a subtle dithered gradient that hints at a
+retro digital aesthetic. One specific ring near the foreground is visibly expiring,
+its edges fraying into tiny neon blue sparks as it fades into the misty air. The
+composition uses a wide-angle lens to capture the scale of the harbor, with the
+figures positioned in the middle ground to emphasize their ethereal presence against
+the heavy machinery of the port. The lighting is low-key, defined by the cool blues
+of the fog and the sharp, electrical luminescence of the sonar waves.
+
+Crops generated (center gravity):
+  aq-banner.png   1280x320 (4:1)  -- README banner strip
+  aq-hero.png     1280x720 (16:9) -- full hero image
+  aq-tn.png       320x180  (16:9) -- social/preview thumbnail

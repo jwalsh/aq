@@ -5,6 +5,9 @@
 #+STARTUP: overview
 #+OPTIONS: toc:2 num:nil
 
+#+ATTR_HTML: :width 100%
+[[file:assets/aq-banner.png]]
+
 [[https://github.com/jwalsh/aq/actions/workflows/ci.yml][https://github.com/jwalsh/aq/actions/workflows/ci.yml/badge.svg]] [[https://goreportcard.com/report/github.com/jwalsh/aq][https://img.shields.io/badge/go%20report-A+-brightgreen.svg]] [[https://pkg.go.dev/github.com/jwalsh/aq][https://pkg.go.dev/badge/github.com/jwalsh/aq.svg]] [[https://github.com/jwalsh/aq/blob/main/LICENSE][https://img.shields.io/github/license/jwalsh/aq.svg]] [[https://github.com/jwalsh/aq][https://img.shields.io/github/go-mod/go-version/jwalsh/aq.svg]]
 
 * Overview
