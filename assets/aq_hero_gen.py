@@ -124,6 +124,9 @@ def ollama_generate_image(model: str, prompt: str, negative: str = "") -> bytes 
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             data = json.loads(resp.read())
+            # ZImagePipeline returns base64 PNG in 'image' key
+            if "image" in data and data["image"]:
+                return base64.b64decode(data["image"])
             if "images" in data and data["images"]:
                 return base64.b64decode(data["images"][0])
             if "response" in data:
