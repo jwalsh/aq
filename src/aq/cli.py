@@ -5,6 +5,7 @@ from .sb import Sandbox
 from .protocol import Broadcast, announce, read_active
 from .conflict import check_conflicts
 from .mesh import mesh_broadcast, is_enabled as mesh_is_enabled
+from .mqtt import mqtt_publish, is_enabled as mqtt_is_enabled
 
 
 def cmd_announce(args: argparse.Namespace) -> int:
@@ -27,10 +28,20 @@ def cmd_announce(args: argparse.Namespace) -> int:
         via = getattr(args, "mesh_via", "serial")
         mesh_sent = mesh_broadcast(broadcast, via=via)
 
+    # Best-effort MQTT broadcast (--mqtt flag or AQ_MQTT=1)
+    mqtt_sent = False
+    if getattr(args, "mqtt", False) or mqtt_is_enabled():
+        mqtt_sent = mqtt_publish(broadcast, subtopic="announce")
+
     if args.json:
         print(broadcast.to_json())
     else:
-        suffix = " (+ mesh)" if mesh_sent else ""
+        transports = []
+        if mesh_sent:
+            transports.append("mesh")
+        if mqtt_sent:
+            transports.append("mqtt")
+        suffix = f" (+ {', '.join(transports)})" if transports else ""
         print(f"announced: {broadcast.conjecture_id} \u2192 {path.name}{suffix}")
     return 0
 
@@ -86,6 +97,8 @@ def main() -> int:
     ann.add_argument("--mesh-via", default="serial",
                      choices=["serial", "mqtt"],
                      help="mesh transport (default: serial)")
+    ann.add_argument("--mqtt", action="store_true",
+                     help="also publish to MQTT broker")
 
     chk = sub.add_parser("check")
     chk.add_argument("--conjecture", "-c", default=None)

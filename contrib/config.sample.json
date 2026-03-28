@@ -1,0 +1,17 @@
+{
+  "mqtt": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 1883,
+    "topic": "aq"
+  },
+  "mdns": {
+    "enabled": false,
+    "service_type": "_aq._tcp",
+    "domain": "local"
+  },
+  "mesh": {
+    "enabled": false,
+    "via": "serial"
+  }
+}

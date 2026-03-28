@@ -13,7 +13,7 @@ build/
 venv/
 
 # Go
-aq
+/aq
 aq-linux-*
 aq-darwin-*
 aq-freebsd-*
