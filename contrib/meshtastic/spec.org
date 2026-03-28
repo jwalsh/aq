@@ -1,0 +1,592 @@
+#+TITLE: aq-mesh: Meshtastic Bridge Protocol
+#+SUBTITLE: Proximity-scoped agent gossip over LoRa radio
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* 0. Premise
+
+Physical proximity is a proxy for relevance. If your radio hears it,
+it's probably your concern. No subscription management, no notification
+preferences --- physics handles the filter.
+
+=aq-mesh= bridges aq broadcasts to Meshtastic LoRa mesh radio via the
+=am= CLI. Agents announce work intent over the air. Any node within
+radio range (~5--15 km urban, ~50 km line of sight) receives the
+broadcast. Their agent can =aq check= for conflicts. Walk into range
+and you're subscribed; walk away and you're not.
+
+This is a Tier 3 transport (same tier as MQTT, which it rides). It is
+*not* a replacement for the canonical filesystem transport (Tier 0).
+It is a fanout layer for the specific case where "nearby" is a useful
+approximation of "interested."
+
+* 1. Design Principles
+
+** 1.1 Gossip, not coordination
+
+Same axiom as aq core: broadcast presence, nobody is required to
+listen. A missed broadcast over LoRa is not a failure --- TTL handles
+it. The mesh is lossy by design (radio interference, duty cycle
+limits, packet size constraints). This is fine.
+
+** 1.2 Graceful degradation
+
+Most humans do not have a Meshtastic radio plugged into their laptop
+running Claude. This transport *must* degrade silently:
+
+| Condition                    | Behavior                        |
+|------------------------------+---------------------------------|
+| =am= CLI not installed       | skip, log debug, return success |
+| No device on USB             | skip, log debug, return success |
+| MQTT broker unreachable      | skip, log debug, return success |
+| =MESH_PSK= not set           | skip, log debug, return success |
+| Radio transmit fails         | skip, log warning, return success |
+| Everything works             | broadcast, log info             |
+
+The bridge function returns success in all cases. A failed mesh
+broadcast must *never* block or fail an =aq announce=.
+
+** 1.3 Payload compression
+
+Meshtastic text payloads are limited to ~200 bytes (after encryption
+overhead). A full aq broadcast JSON is ~300--500 bytes. The bridge
+must compress.
+
+Wire format for mesh (fits in one Meshtastic text frame):
+
+#+begin_example
+aq:agent/branch C-id [phase] file1,file2
+#+end_example
+
+Examples:
+#+begin_example
+aq:jwalsh/feat-auth C-42 [proof] api.py,auth.py
+aq:jwalsh/fix-mqtt C-7 [refutation] monitor.py
+aq:daidaitaotao/main C-1 [done] send.py
+#+end_example
+
+Maximum field lengths:
+| Field       | Max  | Notes                    |
+|-------------+------+--------------------------|
+| prefix      |    3 | literal =aq:=            |
+| agent       |   40 | github user/branch       |
+| conjecture  |   10 | =C-= + digits            |
+| phase       |   14 | bracket-wrapped          |
+| files       | ~130 | comma-separated basenames |
+
+Total: comfortably under 200 bytes for typical broadcasts.
+
+** 1.4 Channel isolation
+
+All mesh broadcasts go to the =amigosmalla= channel (index 1), which
+is AES-256-CTR encrypted. Never the default primary (index 0), which
+is unencrypted public mesh.
+
+The =am= CLI enforces this --- it refuses to operate on channel 0 or
+with a default/missing PSK. The bridge inherits this safety.
+
+* 2. Architecture
+
+#+begin_example
++-----------+     +-----------+     +-------------+     +---------+
+| aq        |     | aq-mesh   |     | am CLI      |     | LoRa    |
+| announce  | --> | bridge    | --> | (serial or  | --> | radio   |
+|           |     | (Python)  |     |  MQTT)      |     | mesh    |
++-----------+     +-----------+     +-------------+     +---------+
+     |                  |                                     |
+     v                  v                                     v
+ ~/.aq/channels/    compress to               Meshtastic nodes
+ (Tier 0, always)   ~200 byte text            within radio range
+#+end_example
+
+** 2.1 Broadcast flow
+
+1. Agent calls =aq announce= (writes to filesystem as always)
+2. If =--mesh= flag is set, bridge also calls =am send=
+3. =am= encrypts and transmits via serial (device radio) or MQTT
+4. Nearby nodes receive the broadcast
+5. A listener on the remote node can feed received broadcasts back
+   into =aq check= on their end (future work)
+
+** 2.2 Receive flow (future)
+
+1. =am monitor= receives a broadcast from the mesh
+2. If it starts with =aq:=, parse it back to a Broadcast
+3. Write it to the local =~/.aq/channels/mesh/requests/= directory
+4. Local =aq check= picks it up as a remote broadcast
+
+This creates a true gossip ring: filesystem-local broadcasts fan out
+over radio, radio broadcasts land in remote filesystems.
+
+* 3. CLI Integration
+
+** 3.1 New flag on =aq announce=
+
+#+begin_src bash
+aq announce -c C-42 -f api.py,auth.py --mesh
+aq ann -c C-42 -f api.py --mesh --mesh-via mqtt
+#+end_src
+
+| Flag           | Default  | Effect                           |
+|----------------+----------+----------------------------------|
+| =--mesh=       | off      | also broadcast via am            |
+| =--mesh-via=   | serial   | transport: =serial= or =mqtt=   |
+
+** 3.2 Environment variables
+
+| Variable        | Default        | Purpose                         |
+|-----------------+----------------+---------------------------------|
+| =AQ_MESH=       | =0=            | set =1= to enable mesh by default |
+| =AQ_MESH_VIA=   | =serial=       | default mesh transport          |
+| =MESH_PSK=      | (none)         | required for mesh, from =.env=  |
+| =MESH_CH_INDEX= | =1=            | channel index, must be 1        |
+
+When =AQ_MESH=1=, every =aq announce= also multicasts over mesh
+without needing =--mesh= each time.
+
+* 4. Failure Modes
+
+** 4.1 No Meshtastic hardware (99% of users)
+
+The bridge imports =am= as an optional dependency. If not importable,
+mesh is silently disabled. No error, no warning at default log level.
+The filesystem transport always works.
+
+#+begin_src python
+def mesh_broadcast(broadcast: Broadcast, via: str = "serial") -> bool:
+    """Best-effort mesh broadcast. Returns True if sent, False if skipped."""
+    try:
+        from am.config import load as load_mesh_config
+        from am.cli import _send_serial, _send_mqtt
+    except ImportError:
+        logger.debug("am not installed, skipping mesh broadcast")
+        return False
+    # ...
+#+end_src
+
+** 4.2 Device not connected
+
+=am send= via serial fails if no USB device. The bridge catches the
+subprocess error, logs it, and returns False. =aq announce= succeeds
+regardless.
+
+** 4.3 MQTT broker down
+
+We observed this in practice (2026-03-28): =mqtt.meshtastic.org=
+accepted TCP connections but did not complete MQTT handshake. The
+bridge catches the timeout and returns False.
+
+** 4.4 PSK not configured
+
+=am= exits with code 1 if =MESH_PSK= is unset. The bridge catches
+non-zero exit codes and returns False.
+
+** 4.5 Summary: the bridge is a best-effort side-effect
+
+#+begin_example
+announce() {
+    write_to_filesystem()  // always, this is aq's job
+    mesh_broadcast()       // best-effort, never fails announce()
+}
+#+end_example
+
+* 5. Security Considerations
+
+- All mesh payloads are AES-256-CTR encrypted with the channel PSK
+- The =aq:= prefix in the payload is encrypted --- passive observers
+  see only ciphertext
+- The PSK is distributed out-of-band (Keybase/Signal), never committed
+- Broadcast payloads contain repo paths and filenames --- these are
+  *metadata about work*, not code. Acceptable risk for an encrypted
+  channel among known collaborators.
+- The bridge never transmits file contents, diffs, or secrets
+
+* 6. Compatibility Matrix
+
+| Setup                          | Mesh works? | aq works? |
+|--------------------------------+-------------+-----------|
+| No Python, no am, no radio     | no          | yes       |
+| Python + aq, no am             | no          | yes       |
+| Python + aq + am, no device    | MQTT only   | yes       |
+| Python + aq + am + device      | yes (both)  | yes       |
+| Go aq binary, no Python        | no          | yes       |
+| Go aq + malla binary + device  | yes (future)| yes       |
+
+aq always works. Mesh is additive.
+
+* 7. Relation to Existing Transports
+
+| Transport   | Tier | Scope          | Latency    | Requires     |
+|-------------+------+----------------+------------+--------------|
+| Filesystem  |    0 | local machine  | <1ms       | nothing      |
+| NATS        |    1 | LAN/WAN        | ~1ms       | daemon       |
+| Redis       |    1 | LAN/WAN        | ~1ms       | daemon       |
+| MQTT        |    3 | WAN/IOT        | ~100ms     | broker       |
+| Meshtastic  |    3 | physical range | 1--30s     | radio + PSK  |
+| IRC         |    4 | anywhere       | ~50ms      | server       |
+
+Meshtastic is unique: it's the only transport where *physical
+distance* determines message delivery. Every other transport is
+network-scoped (anyone with credentials can subscribe from anywhere).
+Mesh is physics-scoped.
+
+* 8. Future Work
+
+** 8.1 Receive-side bridge
+
+Parse incoming =aq:= prefixed mesh messages and inject into local
+=~/.aq/channels/mesh/requests/=. Enables true bidirectional gossip.
+
+** 8.2 Go bridge (malla)
+
+Mirror the Python bridge in the Go =malla= binary for environments
+without Python.
+
+** 8.3 Presence heartbeat
+
+Periodic beacon that says "I'm here, working on X" without waiting
+for an explicit =aq announce=. Leverages the existing =am beacon=
+command.
+
+** 8.4 Node-to-agent mapping
+
+Maintain a local map of Meshtastic node IDs to agent addresses:
+
+#+begin_src json
+{
+  "!8f95e196": "github.com/jwalsh/amigosmalla/main",
+  "!623e7321": "github.com/jwalsh/amigosmalla/main"
+}
+#+end_src
+
+This lets the receive bridge attribute incoming broadcasts to known
+collaborators.
+
+* 9. C4 Architecture Diagrams
+
+** 9.1 System Context (C4 Level 1)
+
+#+begin_example
+                         +------------------+
+                         |   Developer      |
+                         |   (laptop/mini)  |
+                         +--------+---------+
+                                  |
+                         aq announce --mesh
+                                  |
+                    +-------------+-------------+
+                    |                           |
+           +-------v--------+         +--------v--------+
+           |  aq (L1.5)     |         |  am (Meshtastic)|
+           |  filesystem    |         |  LoRa radio     |
+           |  gossip        |         |  gossip         |
+           +-------+--------+         +--------+--------+
+                   |                           |
+           local agents                  +-----v------+
+           read from                     |  Mesh      |
+           ~/.aq/                        |  Network   |
+                                         | (LoRa RF)  |
+                                         +-----+------+
+                                               |
+                                    +----------+----------+
+                                    |                     |
+                             +------v------+       +------v------+
+                             | mini (MAVK) |       | hydra       |
+                             | T1000-E     |       | Heltec V3   |
+                             | + Claude    |       | MQTT bridge |
+                             +-------------+       +-------------+
+#+end_example
+
+** 9.2 Container Diagram (C4 Level 2)
+
+#+begin_example
++------------------------------------------------------------------+
+|                        Developer Machine                          |
+|                                                                   |
+|  +----------+    +----------+    +---------+    +-------------+  |
+|  | Claude   |--->| aq CLI   |--->| mesh.py |--->| am CLI      |  |
+|  | (agent)  |    | announce |    | bridge  |    | send/mon    |  |
+|  +----------+    +-----+----+    +---------+    +------+------+  |
+|                        |                               |         |
+|                        v                               v         |
+|                  ~/.aq/channels/              /dev/cu.usbmodem   |
+|                  (filesystem)                 (serial to radio)  |
++------------------------------------------------------------------+
+                                                        |
+                                               906.875 MHz LoRa
+                                                        |
++----------------------------+    +----------------------------+
+|       mini (Mac Mini)      |    |     hydra (Heltec V3)      |
+|                            |    |                            |
+| +--------+   +-----------+|    | +----------+ +-----------+ |
+| | Claude |   | T1000-E   ||    | | WiFi     | | LoRa      | |
+| | agent  |   | (MAVK)    ||    | | + MQTT   | | radio     | |
+| +---+----+   +-----+-----+|    | +----+-----+ +-----+-----+ |
+|     |              |       |    |      |             |        |
+|     v              v       |    |      v             v        |
+| ~/.aq/         USB serial  |    | mqtt.meshtastic   RF mesh  |
+| (local gossip) (radio I/O) |    | .org (bridge)     (relay)  |
++----------------------------+    +----------------------------+
+#+end_example
+
+** 9.3 Component Diagram (C4 Level 3) — Bridge Detail
+
+#+begin_example
++-------------------------------------------------------------+
+|                     aq announce --mesh                       |
++-------------------------------------------------------------+
+                            |
+               +------------+------------+
+               |                         |
+      +--------v---------+     +--------v---------+
+      | protocol.py      |     | mesh.py          |
+      | write Broadcast  |     | compact()        |
+      | to filesystem    |     | ~200 byte text   |
+      +------------------+     +--------+---------+
+                                        |
+                               +--------v---------+
+                               | subprocess       |
+                               | am send <msg>    |
+                               +--------+---------+
+                                        |
+                          +-------------+-------------+
+                          |                           |
+                 +--------v--------+         +--------v--------+
+                 | --via serial    |         | --via mqtt      |
+                 | meshtastic CLI  |         | paho-mqtt       |
+                 | ch_index=1      |         | AES-256-CTR     |
+                 | USB → radio     |         | → MQTT broker   |
+                 +-----------------+         | → device uplink |
+                                             +-----------------+
+#+end_example
+
+* 10. Deployment / Hosting
+
+** 10.1 Target nodes
+
+| Node    | Host          | Device      | Role                        | Connection  |
+|---------+---------------+-------------+-----------------------------+-------------|
+| laptop  | MacBook Pro   | T1000-E     | primary dev, portable       | USB serial  |
+| mini    | Mac Mini      | T1000-E     | persistent agent host       | USB serial  |
+| hydra   | Heltec V3     | (self)      | MQTT bridge + LoRa relay    | WiFi + LoRa |
+
+** 10.2 mini (Mac Mini) — persistent aq-mesh node
+
+The mini runs Claude as a persistent agent with the T1000-E (MAVK)
+connected via USB. This is the always-on gossip node.
+
+Setup:
+#+begin_src bash
+# On mini
+cd ~/ghq/github.com/jwalsh/amigosmalla
+source .venv/bin/activate
+pip install -e .
+
+# Verify device
+am verify
+
+# Run persistent monitor (tmux or launchd)
+tmux new-session -d -s am-monitor 'am mon'
+
+# Enable mesh by default for all aq operations
+echo 'export AQ_MESH=1' >> ~/.zshrc
+
+# Test end-to-end
+aq announce -c C-1 -f test.py --mesh
+#+end_src
+
+For launchd persistence (survives reboot):
+
+#+begin_src xml
+<!-- ~/Library/LaunchAgents/com.amigosmalla.monitor.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.amigosmalla.monitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ~/ghq/github.com/jwalsh/amigosmalla && source .venv/bin/activate && am mon</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/am-monitor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/am-monitor.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+#+end_src
+
+** 10.3 hydra (Heltec V3) — MQTT bridge
+
+The Heltec V3 has WiFi. It connects to =mqtt.meshtastic.org= directly
+and relays encrypted payloads between the MQTT broker and the LoRa
+mesh. No software changes needed — this is standard Meshtastic MQTT
+bridge behavior.
+
+Hydra's role:
+- Receives LoRa packets from T1000-E devices
+- Forwards encrypted payloads to MQTT broker
+- Receives MQTT messages and rebroadcasts over LoRa
+- Extends mesh range (3-hop relay)
+
+No aq or am software runs on hydra — it's a dumb radio bridge.
+
+** 10.4 Network topology
+
+#+begin_example
+laptop (East Boston)          mini (East Boston)
+  T1000-E ←——LoRa——→ T1000-E (MAVK)
+     |                    |
+     |     ←——LoRa——→ Heltec V3 (hydra)
+     |                    |
+     |                    WiFi → mqtt.meshtastic.org
+     |                              ↑
+     +——USB serial——→ am send       |
+                         |          |
+                         +——MQTT——→-+
+#+end_example
+
+Tao (Alewife) and Kush (Quincy) are within LoRa range of the East
+Boston cluster. Their T1000-E devices receive aq mesh broadcasts if
+they're listening. Future: run =am mon= with receive-side bridge to
+inject remote broadcasts into their local =~/.aq/=.
+
+* 11. Collaborator Onboarding (Tao, Kush)
+
+** 11.1 Hardware setup
+
+Each collaborator needs a T1000-E (already provisioned) connected via
+USB to their dev machine. The devices are pre-configured with the
+amigosmalla channel and PSK.
+
+#+begin_src bash
+# 1. Plug in T1000-E via USB-C data cable
+ls /dev/cu.usbmodem*          # macOS
+ls /dev/ttyACM*               # Linux
+
+# 2. Clone the amigosmalla repo
+git clone git@github.com:jwalsh/amigosmalla.git
+cd amigosmalla
+
+# 3. Set up environment
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# 4. Configure PSK (get from Jason via Keybase/Signal)
+cp .env.example .env
+# Edit .env: paste MESH_PSK value
+
+# 5. Verify everything
+am verify
+# Should show 4/4 passed
+
+# 6. Test send/receive
+am send "hello from $(whoami)"
+#+end_src
+
+** 11.2 Clone and install aq
+
+#+begin_src bash
+git clone git@github.com:jwalsh/aq.git
+cd aq
+pip install -e .
+
+# Enable mesh broadcasting globally
+echo 'export AQ_MESH=1' >> ~/.zshrc
+source ~/.zshrc
+#+end_src
+
+** 11.3 Claude Code global hook for all projects
+
+To gossip on *any* work across *all* projects, add a PostToolUse hook
+to the global Claude Code settings. This fires after every file edit,
+broadcasting the change over mesh to nearby collaborators.
+
+Add to =~/.claude/settings.json=:
+
+#+begin_src json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILES=$(cd \"$CLAUDE_PROJECT_DIR\" && git diff --name-only 2>/dev/null | head -5 | tr \"\\n\" \",\" | sed \"s/,$//\"); BRANCH=$(cd \"$CLAUDE_PROJECT_DIR\" && git rev-parse --abbrev-ref HEAD 2>/dev/null); if [ -n \"$FILES\" ] && command -v aq >/dev/null 2>&1; then aq announce -c \"${BRANCH:-unknown}\" -f \"$FILES\" --claim \"editing $FILES\" --mesh --ttl 600 2>/dev/null; fi'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+#+end_src
+
+What this does:
+- Fires after every Edit/Write tool call in Claude Code
+- Detects which files changed (=git diff --name-only=)
+- Announces via =aq= (filesystem) + =--mesh= (radio)
+- TTL of 600s (10 min) — short-lived presence, not permanent record
+- Fails silently if =aq= or =am= aren't installed (the hook command
+  checks =command -v aq= before running)
+- Works in any project directory, not just amigosmalla
+
+** 11.4 What collaborators see
+
+When Tao is working in Alewife and Jason edits =api.py= in East Boston:
+
+1. Jason's Claude fires the PostToolUse hook
+2. =aq announce= writes to Jason's local =~/.aq/channels/broadcast/=
+3. =--mesh= triggers =am send= over the T1000-E radio
+4. The LoRa packet propagates through the mesh (via hydra if needed)
+5. Tao's T1000-E receives the encrypted packet
+6. If Tao has =am mon= running, they see:
+
+#+begin_example
+[14:23:07] <!8f95e196> aq:jwalsh/feat-auth feat-auth [proof] api.py,auth.py
+#+end_example
+
+7. Future (receive-side bridge): Tao's =am mon= parses the =aq:= prefix
+   and writes it to =~/.aq/channels/mesh/requests/=, making it visible
+   to =aq check= and =aq ls= on Tao's machine.
+
+** 11.5 Without Meshtastic hardware
+
+Collaborators without a radio can still participate in aq gossip via
+the filesystem transport (Tier 0). If they share a filesystem (NFS,
+syncthing, or git-synced =~/.aq/=), broadcasts propagate without
+radio. The =--mesh= flag is additive — it never replaces filesystem.
+
+For MQTT-only mesh (no USB device):
+
+#+begin_src bash
+# Use MQTT transport (needs network, not radio)
+aq announce -c C-42 -f api.py --mesh --mesh-via mqtt
+#+end_src
+
+This sends through =mqtt.meshtastic.org= which hydra (or any
+MQTT-bridged node) will rebroadcast over LoRa.
+
+* 12. References
+
+- =aq= spec v2: =spec-v2.org= in this repo
+- Transport catalog: =TRANSPORTS.org= in this repo
+- MQTT bridge: =contrib/mqtt/= in this repo
+- =am= CLI: =am/cli.py= in =github.com/jwalsh/amigosmalla=
+- Meshtastic protocol: https://meshtastic.org/docs/overview

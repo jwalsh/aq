@@ -4,6 +4,7 @@ import argparse, json, sys
 from .sb import Sandbox
 from .protocol import Broadcast, announce, read_active
 from .conflict import check_conflicts
+from .mesh import mesh_broadcast, is_enabled as mesh_is_enabled
 
 
 def cmd_announce(args: argparse.Namespace) -> int:
@@ -19,10 +20,18 @@ def cmd_announce(args: argparse.Namespace) -> int:
         ttl=args.ttl,
     )
     path = announce(broadcast, args.channel)
+
+    # Best-effort mesh broadcast (--mesh flag or AQ_MESH=1)
+    mesh_sent = False
+    if getattr(args, "mesh", False) or mesh_is_enabled():
+        via = getattr(args, "mesh_via", "serial")
+        mesh_sent = mesh_broadcast(broadcast, via=via)
+
     if args.json:
         print(broadcast.to_json())
     else:
-        print(f"announced: {broadcast.conjecture_id} \u2192 {path.name}")
+        suffix = " (+ mesh)" if mesh_sent else ""
+        print(f"announced: {broadcast.conjecture_id} \u2192 {path.name}{suffix}")
     return 0
 
 
@@ -72,6 +81,11 @@ def main() -> int:
     ann.add_argument("--status", default="prosecuting",
                      choices=["prosecuting", "done", "blocked"])
     ann.add_argument("--ttl", type=int, default=300)
+    ann.add_argument("--mesh", action="store_true",
+                     help="also broadcast via Meshtastic radio")
+    ann.add_argument("--mesh-via", default="serial",
+                     choices=["serial", "mqtt"],
+                     help="mesh transport (default: serial)")
 
     chk = sub.add_parser("check")
     chk.add_argument("--conjecture", "-c", default=None)
