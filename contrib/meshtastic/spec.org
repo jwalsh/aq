@@ -583,7 +583,102 @@ aq announce -c C-42 -f api.py --mesh --mesh-via mqtt
 This sends through =mqtt.meshtastic.org= which hydra (or any
 MQTT-bridged node) will rebroadcast over LoRa.
 
-* 12. References
+* 12. Contract, Invariants, and Safety Properties
+
+The mesh bridge touches a shared radio medium. Unlike filesystem or
+MQTT transports, a malformed broadcast is literally *on the air* and
+cannot be recalled. These invariants are non-negotiable.
+
+** 12.1 Pre-conditions (must hold before =mesh_broadcast()= sends)
+
+| ID   | Invariant                                    | Enforced by          |
+|------+----------------------------------------------+----------------------|
+| P-1  | =MESH_PSK= is set and decodes to >=16 bytes  | =am/config.py=       |
+| P-2  | PSK is not the default key (all same bytes)  | =am/config.py=       |
+| P-3  | =MESH_CH_INDEX= != 0                         | =am/config.py=       |
+| P-4  | Payload is <= 200 bytes after =compact()=    | =mesh.py=            |
+| P-5  | Payload starts with =aq:= prefix             | =mesh.py=            |
+| P-6  | Payload contains no secrets, keys, or tokens | =compact()= contract |
+| P-7  | Broadcast has a non-empty conjecture_id      | =cli.py= (required)  |
+
+** 12.2 Post-conditions (must hold after transmission)
+
+| ID   | Invariant                                     | Enforced by          |
+|------+-----------------------------------------------+----------------------|
+| Q-1  | Filesystem broadcast always written (Tier 0)  | =protocol.py=       |
+| Q-2  | Mesh failure never fails =aq announce=        | =mesh.py= try/catch |
+| Q-3  | =mesh_broadcast()= returns bool, never raises | =mesh.py=           |
+| Q-4  | No state mutation on mesh failure              | =mesh.py=            |
+
+** 12.3 Payload contract
+
+The =compact()= function is the serialization boundary. It defines
+what crosses the radio interface.
+
+#+begin_example
+MUST contain:  "aq:" prefix, agent address, conjecture_id, phase
+MAY contain:   file list (basenames only, comma-separated)
+MUST NOT contain: full file paths, file contents, diffs, secrets,
+                  PSK material, API keys, environment variables,
+                  IP addresses, hostnames, or user credentials
+#+end_example
+
+The =compact()= function strips paths to basenames. There is no
+mechanism to transmit file contents over the mesh — the wire format
+does not support it by design.
+
+** 12.4 Rate limiting
+
+Meshtastic enforces duty cycle limits (radio regulations). The bridge
+should not send faster than the radio can transmit.
+
+| Constraint            | Value                   | Source           |
+|-----------------------+-------------------------+------------------|
+| Min packet interval   | ~2 seconds              | Meshtastic FW    |
+| Duty cycle (US)       | no legal limit on 906MHz| FCC Part 15.247  |
+| Practical throughput  | ~80 bytes/sec sustained | LoRa SF11 BW250  |
+| Max payload           | 237 bytes (encrypted)   | Meshtastic proto |
+| aq compact target     | <=200 bytes             | spec convention  |
+
+The bridge does not implement rate limiting — it relies on the fact
+that =aq announce= is called infrequently (per-conjecture, not
+per-keystroke). The PostToolUse hook fires per Edit/Write, but the
+10-second timeout and subprocess overhead provide natural backpressure.
+
+** 12.5 Verification
+
+#+begin_src python
+def verify_payload(payload: str) -> bool:
+    """Check all pre-conditions on a mesh payload."""
+    assert payload.startswith("aq:"), "must start with aq: prefix"
+    assert len(payload.encode("utf-8")) <= 200, "exceeds 200 byte limit"
+    assert "/" not in payload.split()[-1] or "." in payload.split()[-1], \
+        "files must be basenames, not paths"
+    # No secrets patterns
+    for forbidden in ["BEGIN RSA", "BEGIN EC", "PRIVATE KEY", "password=",
+                      "token=", "secret=", "Bearer ", "sk-", "pk-"]:
+        assert forbidden not in payload, f"payload contains forbidden: {forbidden}"
+    return True
+#+end_src
+
+** 12.6 Failure taxonomy
+
+| Failure mode              | Severity | Recovery                    |
+|---------------------------+----------+-----------------------------|
+| am not installed          | none     | silent skip, aq works       |
+| Device not plugged in     | none     | silent skip                 |
+| PSK not configured        | none     | silent skip                 |
+| MQTT broker timeout       | none     | silent skip                 |
+| Radio busy (duty cycle)   | low      | meshtastic queues internally|
+| Payload too large         | medium   | truncate files, retry       |
+| Wrong channel index       | CRITICAL | am refuses (hard guard)     |
+| Default PSK               | CRITICAL | am refuses (hard guard)     |
+
+The bottom two are the only genuine safety hazards — sending
+unencrypted to the public mesh. Both are guarded by hard assertions
+in =am/config.py= that exit the process.
+
+* 13. References
 
 - =aq= spec v2: =spec-v2.org= in this repo
 - Transport catalog: =TRANSPORTS.org= in this repo
