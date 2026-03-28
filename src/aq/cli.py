@@ -73,7 +73,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("no active broadcasts")
         return 0
     for broadcast in active:
-        print(f"  {broadcast.agent:50s}  {broadcast.conjecture_id}  [{broadcast.phase}]  {', '.join(broadcast.files)}")
+        files = broadcast.files if isinstance(broadcast.files, list) else []
+        print(f"  {broadcast.agent:50s}  {broadcast.conjecture_id}  [{broadcast.phase}]  {', '.join(files)}")
     return 0
 
 
