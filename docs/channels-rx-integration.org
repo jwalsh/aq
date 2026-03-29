@@ -16,8 +16,8 @@ A channel is an MCP server subprocess that emits
 them as =<channel>= tags mid-conversation:
 
 #+begin_example
-<channel source="aq" sender="CORE" via="mqtt">
-aq:github.com/jwalsh/amigosmalla/main C-42 [proof] api.py,auth.py
+<channel source="aq" sender="peer-agent" via="mqtt">
+aq:github.com/user/project/main C-42 [proof] api.py,auth.py
 </channel>
 #+end_example
 

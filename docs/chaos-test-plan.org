@@ -1,6 +1,6 @@
 #+TITLE: Chaos Test Plan for AMTP + aq Transport Layer
 #+SUBTITLE: Testing the arguments from 10 agents across 9 paradigms
-#+AUTHOR: CASO@MAVK
+#+AUTHOR: aq contributors
 #+DATE: 2026-03-28
 
 * 0. Purpose
@@ -84,7 +84,7 @@ am send "broker-dead test"
 #+begin_src bash
 # Send 20 messages as fast as possible
 for i in $(seq 1 20); do
-    am send "@CASO|PING|$i|flood-test" &
+    am send "@AGENT|PING|$i|flood-test" &
 done
 wait
 
@@ -113,15 +113,15 @@ ps aux | grep "am.broker" | grep -v grep | wc -l
 #+begin_src bash
 # On laptop: send a burst of messages
 for i in $(seq 88 95); do
-    am send "@CASO|NOTE|$i|reboot-test msg $i"
+    am send "@AGENT|NOTE|$i|reboot-test msg $i"
     sleep 1
 done
 
 # On mini: sudo reboot (mid-burst)
 
 # After mini boots:
-# Check KBFS: are all messages in /keybase/private/jwalsh,aygpdr/amtp/?
-# Check git: git pull shows CASO's commits?
+# Check KBFS: are all messages in /keybase/private/<user1>,<user2>/aq/?
+# Check git: git pull shows peer's commits?
 # CRDT claim: convergent multicast means mini catches up from any transport
 #+end_src
 
@@ -132,8 +132,8 @@ done
 networksetup -setairportpower en0 off
 
 # Send messages from both sides
-# Laptop: am send "@CASO|NOTE|96|wifi-off test"
-# Mini: am send "@CORE|NOTE|X|wifi-off ack"
+# Laptop: am send "@AGENT|NOTE|96|wifi-off test"
+# Mini: am send "@PEER|NOTE|X|wifi-off ack"
 
 # Expected: LoRa carries messages (no MQTT, no git, no KBFS)
 # This tests the actual value prop of the radio transport
@@ -201,14 +201,14 @@ echo "Results: $PASS passed, $FAIL failed"
 
 | # | Failure | When | Resolution | Paradigm validated |
 |---+---------+------+------------+--------------------|
-| N1 | Serial port lock (PID 12158) | CASO session | kill stale PID | UNIX (flock releases on death) |
-| N2 | Serial port lock (PID 6156) | CORE session | kill stale PID | same |
-| N3 | Push rejected (CASO+CORE simultaneous) | 3 times | git pull --rebase | git as transport works |
-| N4 | beacon.py ch_index=0 (public broadcast!) | CORE setup | fixed to 1 | channel safety critical |
+| N1 | Serial port lock (PID 12158) | agent session | kill stale PID | UNIX (flock releases on death) |
+| N2 | Serial port lock (PID 6156) | peer session | kill stale PID | same |
+| N3 | Push rejected (agent A+B simultaneous) | 3 times | git pull --rebase | git as transport works |
+| N4 | beacon.py ch_index=0 (public broadcast!) | peer setup | fixed to 1 | channel safety critical |
 | N5 | MQTT broker unresponsive | entire session | serial + KBFS fallback | convergent multicast works |
-| N6 | meshtastic --ch-index arg ordering | CORE | fixed ordering | CLI quirk |
-| N7 | BLE blocking serial | CASO | reboot device | shared resource contention |
-| N8 | Background task cascade | CASO | pkill -9 meshtastic | monitoring IS contention |
+| N6 | meshtastic --ch-index arg ordering | peer | fixed ordering | CLI quirk |
+| N7 | BLE blocking serial | agent | reboot device | shared resource contention |
+| N8 | Background task cascade | agent | pkill -9 meshtastic | monitoring IS contention |
 
 8 natural chaos events. The system survived all of them through
 graceful degradation, not through prevention. CRDT and OTP paradigms
