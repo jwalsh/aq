@@ -8,6 +8,7 @@ from .mesh import mesh_broadcast, is_enabled as mesh_is_enabled
 from .mqtt import mqtt_publish, is_enabled as mqtt_is_enabled
 from .kbfs import kbfs_publish, is_enabled as kbfs_is_enabled
 from .ghissue import ghissue_publish, is_enabled as ghissue_is_enabled
+from .irc import irc_publish, is_enabled as irc_is_enabled
 
 
 def _fanout(broadcast: Broadcast, args: argparse.Namespace) -> list[str]:
@@ -30,6 +31,10 @@ def _fanout(broadcast: Broadcast, args: argparse.Namespace) -> list[str]:
     if getattr(args, "ghissue", False) or ghissue_is_enabled():
         if ghissue_publish(broadcast):
             sent.append("ghissue")
+
+    if getattr(args, "irc", False) or irc_is_enabled():
+        if irc_publish(broadcast):
+            sent.append("irc")
 
     return sent
 
@@ -115,6 +120,8 @@ def main() -> int:
                      help="also write to Keybase filesystem")
     ann.add_argument("--ghissue", action="store_true",
                      help="also comment on GH issue (noisy, POC only)")
+    ann.add_argument("--irc", action="store_true",
+                     help="also broadcast via IRC channel")
 
     chk = sub.add_parser("check")
     chk.add_argument("--conjecture", "-c", default=None)

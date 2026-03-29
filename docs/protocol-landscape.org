@@ -1,0 +1,389 @@
+#+TITLE: Agent Protocol Landscape
+#+SUBTITLE: Where aq sits relative to MCP, A2A, AMTP, ANP, and ACP
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* 0. Thesis
+
+aq occupies a niche that none of the enterprise agent protocols address.
+
+The protocols surveyed here --- MCP, A2A, AMTP, ANP, ACP --- all operate
+at the application layer (L7) or above. They assume network
+connectivity, DNS, HTTPS, JSON-RPC, API keys, service registries. They
+wire tools, orchestrate tasks, federate identities.
+
+aq operates at L1.5: ambient presence gossip with physical proximity
+scoping. It is closer to mDNS or ARP than to HTTP. It answers "who is
+working on what, right now, near me" --- not "call this tool" or
+"execute this task." The broadcast is the interface. There is no
+request, no response, no session, no handshake.
+
+The relationship to these protocols is almost always complementary,
+not competitive. aq provides the gossip substrate that lets agents
+discover conflicts *before* they need to invoke MCP tools or A2A tasks
+to resolve them.
+
+* 1. Protocol Comparison
+
+** 1.1 MCP --- Model Context Protocol (Anthropic)
+
+| Property       | Value                                              |
+|----------------+----------------------------------------------------|
+| Maintainer     | Anthropic                                          |
+| Spec           | https://modelcontextprotocol.io                    |
+| Layer          | L7 (application) --- client-server within a process |
+| Transport      | JSON-RPC 2.0 over stdio or HTTP+SSE                |
+| Discovery      | Static configuration (client knows server address) |
+| Direction      | Bidirectional (client calls server tools, server sends notifications) |
+| Auth           | OAuth 2.0 (HTTP), implicit trust (stdio)           |
+| Topology       | Star --- one LLM client, multiple tool servers     |
+| State          | Session-scoped (server holds context per client)   |
+
+*** What MCP does
+
+MCP wires tools *inside* an application. An LLM client (Claude Desktop,
+an IDE, a custom agent) connects to MCP servers that expose tools,
+resources, and prompts. The client invokes tools via JSON-RPC. The
+server returns results. The LLM uses the results in its context window.
+
+This is plumbing. MCP makes it possible for Claude to call =git log=,
+read a file, query a database --- by standardizing how tool servers
+expose capabilities and how clients discover and invoke them.
+
+*** Relationship to aq
+
+*Complementary.* MCP wires tools; aq gossips state. They do not
+overlap.
+
+Concrete integration: aq could be an MCP server. It would expose:
+- =read_active()= as a tool (client asks "who is working nearby?")
+- =announce()= as a tool (client broadcasts its intent)
+- Conflict signals as notifications (server pushes "agent X overlaps your files")
+
+This would let any MCP-compatible client participate in aq presence
+gossip without knowing the aq protocol directly. The MCP server wraps
+the filesystem transport and exposes it as JSON-RPC.
+
+*** Verdict
+
+aq is the gossip layer that MCP clients would *use* to detect
+conflicts. MCP is the tool protocol that agents would use to *act on*
+aq signals. Different layers, same stack.
+
+** 1.2 A2A --- Agent-to-Agent Protocol (Google)
+
+| Property       | Value                                              |
+|----------------+----------------------------------------------------|
+| Maintainer     | Google DeepMind                                    |
+| Spec           | https://google.github.io/A2A                       |
+| Layer          | L7 (application) --- RPC between agent services    |
+| Transport      | HTTPS + JSON (Agent Cards, task lifecycle)         |
+| Discovery      | Agent Cards at =/.well-known/agent.json=           |
+| Direction      | Client-server (one agent delegates to another)     |
+| Auth           | OAuth, API keys, enterprise IAM                    |
+| Topology       | Mesh (any agent can call any other)                |
+| State          | Task-scoped (create, execute, complete/fail)       |
+
+*** What A2A does
+
+A2A defines how agents discover each other (Agent Cards), negotiate
+capabilities, and delegate tasks. Agent A finds Agent B's card, sees it
+can do "code review," sends a task request, gets a result. Enterprise
+RPC with agent semantics.
+
+The key abstraction is the *task*: a structured unit of work with a
+lifecycle (submitted, working, input-required, completed, failed). The
+protocol handles streaming partial results, multi-turn interactions,
+and artifact exchange.
+
+*** Relationship to aq
+
+*Complementary, different paradigm.* A2A is RPC; aq is gossip.
+
+A2A assumes agents are services with stable endpoints, discoverable
+via HTTPS. aq assumes agents are processes on a machine, discoverable
+via filesystem presence or radio proximity. A2A delegates work; aq
+detects conflicts in work already happening.
+
+An A2A agent could subscribe to aq presence gossip to avoid delegating
+tasks that conflict with ongoing work. "Don't ask Agent B to refactor
+=cli.py= --- Agent C is already touching it."
+
+*** Verdict
+
+A2A is the enterprise coordination layer. aq is the ambient conflict
+signal. A2A asks "who can do this?"; aq says "who is already doing
+something."
+
+** 1.3 AMTP --- Agent Message Transfer Protocol
+
+| Property       | Value                                                     |
+|----------------+-----------------------------------------------------------|
+| Maintainer     | amtp-protocol (GitHub: github.com/amtp-protocol/amtp)     |
+| Spec           | Draft (2025)                                              |
+| Layer          | L7 (application) --- email-like message passing           |
+| Transport      | HTTPS (primary), extensible                               |
+| Discovery      | DNS SRV/TXT records (=_amtp._tcp.example.com=)            |
+| Direction      | Asynchronous, store-and-forward                           |
+| Auth           | DID-based identity, TLS mutual auth                       |
+| Topology       | Federated (like email: agent@domain routes via DNS)       |
+| State          | Message-scoped (envelope + payload, threading optional)   |
+
+*** What AMTP does
+
+AMTP applies the email model to agent communication. Agents have
+addresses (=agent@domain.com=), messages route via DNS, delivery is
+asynchronous and store-and-forward. Federation works like SMTP: your
+domain's AMTP server handles delivery.
+
+The design is explicitly inspired by email's success as a federated,
+decentralized, universally interoperable protocol. The bet: agent
+communication will follow the same pattern as human communication ---
+mostly async, mostly fire-and-forget, with threading for conversations.
+
+*** Relationship to aq
+
+*Complementary --- aq is the LAN layer, AMTP is the WAN layer.*
+
+This is the cleanest mapping in the landscape. aq handles local/LAN
+presence gossip (filesystem, mDNS, IRC, LoRa). AMTP handles
+cross-organization, cross-internet message delivery. They occupy
+different network scopes with no overlap.
+
+Concrete integration path: an aq node could run an AMTP gateway that
+federates local presence gossip to remote teams. Local agents broadcast
+via =~/.aq/=; the gateway aggregates and forwards a digest via AMTP to
+a remote team's AMTP server. The remote team's aq node materializes
+the digest as local presence entries.
+
+The compact wire format (=aq:agent C-id [phase] files=) would be the
+AMTP message payload. AMTP handles routing and delivery; aq handles
+the semantic content.
+
+*** Verdict
+
+aq is to AMTP as mDNS is to DNS. Local discovery vs. global routing.
+Natural layering, no conflict.
+
+** 1.4 ANP --- Agent Network Protocol
+
+| Property       | Value                                              |
+|----------------+----------------------------------------------------|
+| Maintainer     | Agent Network Protocol Foundation                  |
+| Spec           | https://www.agentnetworkprotocol.com               |
+| Layer          | L5-L7 (session through application)                |
+| Transport      | HTTPS, WebSocket, custom binary                    |
+| Discovery      | Decentralized identity (DID), capability negotiation |
+| Direction      | Peer-to-peer, bidirectional                        |
+| Auth           | DID + verifiable credentials                       |
+| Topology       | Decentralized mesh                                 |
+| State          | Session-scoped with capability negotiation         |
+
+*** What ANP does
+
+ANP bills itself as the "HTTP of the Agentic Web." The ambition is a
+universal agent interoperability layer: decentralized identity,
+capability negotiation, message exchange, all built on DIDs and
+verifiable credentials. Agents discover each other, negotiate what
+they can do, and communicate --- without a central registry.
+
+The protocol stack is heavy: DID resolution, credential exchange,
+capability matching, session establishment, message framing. It is
+designed for the open internet where agents are untrusted by default.
+
+*** Relationship to aq
+
+*Different scope, minimal overlap.* ANP solves the "how do untrusted
+agents on the internet find and talk to each other" problem. aq solves
+the "how do trusted agents on one machine avoid stepping on each
+other's files" problem.
+
+ANP's identity layer (DIDs) is irrelevant for aq --- agents on the
+same machine are implicitly trusted by virtue of sharing a filesystem.
+ANP's capability negotiation is irrelevant --- aq agents don't need to
+negotiate; they just broadcast state.
+
+ANP could serve as the identity layer if aq ever needs cross-org agent
+authentication. But that is several abstraction layers away from where
+aq operates today.
+
+*** Verdict
+
+ANP is solving internet-scale agent identity and negotiation. aq is
+solving local conflict detection. They coexist without interaction
+unless aq federates beyond the LAN.
+
+** 1.5 ACP --- Agent Connect Protocol (Cisco AGNTCY)
+
+| Property       | Value                                              |
+|----------------+----------------------------------------------------|
+| Maintainer     | Cisco AGNTCY                                       |
+| Spec           | https://agntcy.org                                 |
+| Layer          | L7 (application) --- REST/workflow orchestration   |
+| Transport      | HTTPS + JSON, OpenAPI-style                        |
+| Discovery      | Agent directories, capability registries           |
+| Direction      | Client-server (orchestrator to agent)              |
+| Auth           | OAuth, mTLS, API keys                              |
+| Topology       | Hub-and-spoke (directory-centric)                  |
+| State          | Workflow-scoped (multi-step task execution)        |
+
+*** What ACP does
+
+AGNTCY's ACP is a workflow-centric protocol. An orchestrator finds
+agents in a directory, composes them into workflows, and executes
+multi-step tasks. Think Apache Airflow but for agents: define a DAG
+of agent invocations, the platform handles execution, retries, and
+state management.
+
+The directory is central: agents register capabilities, the platform
+matches requests to agents. This is service discovery, not gossip.
+
+*** Relationship to aq
+
+*Different paradigm.* ACP has directories; aq has no directories.
+ACP orchestrates workflows; aq detects ambient state. ACP's discovery
+is explicit (register in a directory); aq's discovery is ambient
+(mDNS, filesystem presence, LoRa proximity).
+
+The philosophical gap is wide. ACP assumes someone designs the
+workflow. aq assumes conflicts emerge from uncoordinated work and must
+be detected, not prevented.
+
+If ACP workflows touch shared files, aq could serve as the conflict
+detection layer: "this workflow step is about to modify =cli.py=, but
+Agent X is already working on it." ACP handles the orchestration; aq
+handles the safety check.
+
+*** Verdict
+
+ACP is workflow orchestration with directories. aq is ambient gossip
+without directories. Complementary if you want conflict-aware
+workflows.
+
+** 1.6 ACP --- Agent Communication Protocol (IBM / Linux Foundation)
+
+| Property       | Value                                              |
+|----------------+----------------------------------------------------|
+| Maintainer     | IBM Research, Linux Foundation AI                  |
+| Spec           | Draft (2025), Linux Foundation governance          |
+| Layer          | L7 (application) --- peer-to-peer APIs             |
+| Transport      | HTTPS + JSON, gRPC                                 |
+| Discovery      | Service mesh, DNS                                  |
+| Direction      | Peer-to-peer, bidirectional                        |
+| Auth           | mTLS, service mesh identity                        |
+| Topology       | Mesh (peer-to-peer)                                |
+| State          | Conversation-scoped (multi-turn exchanges)         |
+
+*** What ACP does
+
+IBM's ACP (distinct from Cisco's ACP --- the namespace collision is
+telling) defines peer-to-peer APIs for agent communication. Agents
+expose APIs, discover each other via service mesh primitives, and
+exchange structured messages. The emphasis is on interoperability
+between agents built with different frameworks (LangChain, AutoGen,
+CrewAI, etc.).
+
+The protocol is lighter than A2A but heavier than AMTP. It occupies
+the "microservices for agents" niche: each agent is a service with a
+well-defined API, communicating via standard transport.
+
+*** Relationship to aq
+
+*Complementary at the transport level.* IBM's ACP could carry aq
+presence gossip as a message type. An ACP agent could expose an
+=aq.announce= endpoint that other agents call to share presence state.
+
+The more natural integration: aq runs *below* ACP. Agents communicate
+via ACP for structured interactions (task delegation, result sharing),
+while aq provides the ambient awareness layer that prevents them from
+duplicating work.
+
+*** Verdict
+
+ACP is structured agent APIs. aq is unstructured ambient state. aq
+could inform ACP interactions; ACP could act on aq signals.
+
+* 2. Summary Matrix
+
+| Protocol       | Layer   | Model               | Discovery         | aq relation       |
+|----------------+---------+---------------------+-------------------+-------------------|
+| *MCP*          | L7      | Client-server tools | Static config     | Complementary     |
+| *A2A*          | L7      | RPC task delegation | Agent Cards/HTTPS | Complementary     |
+| *AMTP*         | L7      | Federated messaging | DNS               | Complementary/WAN |
+| *ANP*          | L5-L7   | P2P with DIDs      | DID resolution    | Orthogonal        |
+| *ACP (Cisco)*  | L7      | Workflow/directory  | Agent directories | Complementary     |
+| *ACP (IBM/LF)* | L7      | P2P APIs            | Service mesh/DNS  | Complementary     |
+| *aq*           | L1.5    | Ambient gossip      | Filesystem/mDNS/radio | ---           |
+
+* 3. The L1.5 Gap
+
+Every protocol in this landscape operates at L7 or above. They all
+assume:
+
+- Network connectivity (HTTPS, WebSocket, gRPC)
+- Identity infrastructure (OAuth, DIDs, API keys, Agent Cards)
+- Service discovery (DNS, directories, registries, =.well-known=)
+- Request-response semantics (even async protocols have envelopes)
+
+aq assumes none of this. Its transport is a directory of JSON files.
+Its discovery is =ls ~/.aq/=. Its identity is a Unix username and a
+git branch. Its delivery guarantee is "the file exists or it doesn't."
+
+This is not a limitation --- it is the design. The L1.5 gap exists
+because the other protocols are solving different problems:
+
+| Problem                                          | Protocol     |
+|--------------------------------------------------+--------------|
+| "Call this tool"                                 | MCP          |
+| "Execute this task"                              | A2A          |
+| "Send this message across the internet"          | AMTP         |
+| "Authenticate this agent"                        | ANP          |
+| "Orchestrate this workflow"                      | ACP (Cisco)  |
+| "Connect these agent frameworks"                 | ACP (IBM/LF) |
+| "Who is touching my files right now?"            | aq           |
+
+None of the L7 protocols answer the last question. They cannot,
+because they operate above the layer where file-level conflict
+detection happens. By the time an A2A task completes or an MCP tool
+returns, the merge conflict already exists.
+
+aq catches conflicts *before* they become merge conflicts. That
+requires operating below the application layer, in the ambient
+presence substrate where agents broadcast intent before acting.
+
+* 4. Integration Architecture
+
+The natural stack, bottom to top:
+
+#+begin_example
+L0    Hardware        Meshtastic radio, USB serial
+L1    bd              Authoritative work state (git)
+L1.5  aq              Ambient presence gossip (filesystem, mDNS, IRC, LoRa, MQTT)
+L2    JITIR           Indexed memory, conjecture registry
+L7    MCP/A2A/AMTP    Tool access, task delegation, federated messaging
+#+end_example
+
+aq feeds signals upward. MCP/A2A/ACP act on those signals. AMTP
+federates them across organizational boundaries. ANP provides identity
+if the network grows beyond trusted boundaries.
+
+No protocol in this landscape replaces aq. No protocol in this
+landscape is replaced by aq. The stack is additive.
+
+* 5. One-Line Verdicts
+
+| Protocol       | Verdict                                                              |
+|----------------+----------------------------------------------------------------------|
+| *MCP*          | aq is what MCP clients gossip about; MCP is how they act on it      |
+| *A2A*          | A2A delegates tasks; aq detects when delegated tasks collide        |
+| *AMTP*         | AMTP is WAN email for agents; aq is LAN ARP for agents             |
+| *ANP*          | ANP solves internet identity; aq has no identity problem (yet)     |
+| *ACP (Cisco)*  | ACP orchestrates; aq provides the conflict-awareness ACP lacks     |
+| *ACP (IBM/LF)* | ACP connects frameworks; aq connects agents to the filesystem      |
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:

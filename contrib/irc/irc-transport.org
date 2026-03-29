@@ -1,0 +1,362 @@
+#+TITLE: aq-irc: IRC Transport Specification
+#+SUBTITLE: Human+agent hybrid monitoring over IRC
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* 0. Premise
+
+IRC was the first transport considered for aq. The argument for IRC
+over "real" message brokers is the hybrid monitoring use case: a human
+developer can =/join #aq-presence= in any IRC client and watch agents
+announce work intent in real time. No special tooling, no dashboard,
+no API --- just a channel you already know how to use.
+
+The protocol is RFC 1459 (1993). Telnet-able. Every language has a
+client library or can open a socket. miniircd is a single Python file
+with no dependencies. The operational cost is approximately zero.
+
+FIT score: 55 (see =TRANSPORTS.org=). The penalty is no persistence
+--- messages are lost if you are disconnected when they arrive. For
+presence gossip, this is acceptable. Presence is stateless by design;
+TTL handles expiry and re-announce handles recovery.
+
+* 1. Channel Naming Convention
+
+All aq IRC channels follow the pattern =#aq-{channel}= where
+={channel}= maps directly to the aq channel name from the filesystem
+transport.
+
+| aq channel    | IRC channel        | Purpose                          |
+|---------------+--------------------+----------------------------------|
+| =broadcast=   | =#aq-presence=     | Default presence announcements   |
+| =conflict=    | =#aq-conflict=     | Conflict detection signals       |
+| =session=     | =#aq-session=      | Session start/stop events        |
+| =heartbeat=   | =#aq-heartbeat=    | Periodic liveness (high volume)  |
+
+The default channel is =#aq-presence= (maps to the =broadcast= aq
+channel). This is what you join to watch agents work.
+
+Custom channels: any aq channel =foo= maps to =#aq-foo=. No
+registration required --- IRC channels are created on first join.
+
+* 2. Message Format
+
+** 2.1 TX: PRIVMSG with AMTP compact payload
+
+Outbound messages are =PRIVMSG= to the channel with the same compact
+wire format used by the Meshtastic transport:
+
+#+begin_example
+PRIVMSG #aq-presence :aq:jwalsh/main C-42 [proof] cli.py,protocol.py
+PRIVMSG #aq-presence :aq:blake/feat-irc C-6 [conjecture] irc.py
+PRIVMSG #aq-presence :session:startup jwalsh@nexus aq [01JABC12]
+#+end_example
+
+The compact format:
+
+#+begin_src
+aq:{agent} {conjecture_id} [{phase_or_status}] {files}
+#+end_src
+
+Fields:
+- =agent= --- agent address (user/branch or worktree path)
+- =conjecture_id= --- CPRR conjecture ID (e.g. C-42)
+- =phase_or_status= --- bracketed phase or status tag
+- =files= --- comma-separated basenames (optional)
+
+This is human-readable by design. An agent monitoring the channel can
+parse it; a human can eyeball it. The same payload works for
+Meshtastic, IRC, and any future text-based transport.
+
+** 2.2 RX: Persistent connection with PRIVMSG parsing
+
+The receive side maintains a persistent IRC connection (long-lived TCP
+socket or reconnecting client) that:
+
+1. Joins =#aq-presence= (and any other configured channels)
+2. Reads incoming =PRIVMSG= lines
+3. Parses the compact payload
+4. Writes parsed broadcasts to =~/.aq/channels/broadcast/requests/=
+
+This closes the loop: a broadcast from Agent A on machine X arrives
+via IRC and materializes as a file in Agent B's =~/.aq/= on machine Y.
+The filesystem transport's =read_active()= picks it up as if it were
+local.
+
+** 2.3 Wire protocol detail
+
+A complete TX session (connect, send, disconnect):
+
+#+begin_example
+> NICK aq-12345
+> USER aq-12345 0 * :aq presence bot
+> JOIN #aq-presence
+> PRIVMSG #aq-presence :aq:jwalsh/main C-42 [proof] cli.py
+> QUIT :aq broadcast complete
+#+end_example
+
+The TX side does not wait for server responses. This is fire-and-forget,
+matching aq's lossy-ok semantics. miniircd accepts this pattern. ngircd
+and InspIRCd require a brief delay (~100ms) after NICK/USER before the
+server sends the welcome, but PRIVMSG is queued and delivered regardless.
+
+For the persistent RX connection, the client must handle:
+
+#+begin_example
+< PING :server
+> PONG :server
+#+end_example
+
+This is the only server-initiated message that requires a response.
+Failure to PONG within the server's timeout window results in
+disconnect. The RX daemon should implement a PONG responder.
+
+* 3. RX Daemon
+
+The RX side is a persistent process that bridges IRC messages into
+the filesystem transport. It runs as a background daemon or systemd
+service.
+
+** 3.1 Behavior
+
+#+begin_src
+loop:
+  connect to IRC server
+  JOIN #aq-presence
+  for each PRIVMSG:
+    if payload starts with "aq:":
+      parse compact format
+      write to ~/.aq/channels/broadcast/requests/aq-{ts}-{ulid}.json
+    if message is PING:
+      send PONG
+  on disconnect:
+    wait 5 seconds
+    reconnect
+#+end_src
+
+** 3.2 File materialization
+
+When a PRIVMSG with an aq payload arrives, the daemon creates a
+broadcast file identical to what =aq announce= would write locally:
+
+#+begin_src json
+{
+  "agent": "jwalsh/main",
+  "worktree": "main",
+  "conjecture_id": "C-42",
+  "conjecture_claim": "(received via irc)",
+  "phase": "proof",
+  "status": "prosecuting",
+  "files": ["cli.py", "protocol.py"],
+  "ts": 1711612800.0,
+  "ttl": 300,
+  "id": "01jabc12defg"
+}
+#+end_src
+
+The =conjecture_claim= is set to a placeholder since the compact wire
+format omits it. The TTL defaults to 300 seconds (5 minutes). The
+filesystem transport's expiry logic handles cleanup.
+
+** 3.3 Deduplication
+
+If the same agent is broadcasting to both the filesystem and IRC (e.g.
+local agent with IRC fanout enabled), the RX daemon must not create
+duplicates. Dedup key: =agent + conjecture_id + phase=. If a file
+with matching fields exists in requests/ and is not expired, skip the
+write.
+
+* 4. IRC Server Options
+
+Three servers evaluated for the aq use case:
+
+** 4.1 miniircd
+
+- *Install*: =pip install miniircd= (single Python file, ~600 lines)
+- *Deps*: Python 3 only
+- *Config*: command-line flags, no config file
+- *Channels*: dynamic (created on join)
+- *Auth*: none (or simple password)
+- *TLS*: optional (=--ssl-pem-file=)
+- *Persistence*: none
+- *Resource usage*: negligible
+
+*Verdict*: The right choice for aq. Zero config, zero deps beyond
+Python, runs in a jail or container trivially. No channel registration,
+no services, no oper passwords. Channels exist when someone joins them.
+The lack of persistence is irrelevant --- aq presence is ephemeral.
+
+Start it:
+
+#+begin_example
+miniircd --listen 0.0.0.0 --ports 6999 --motd "aq presence gossip"
+#+end_example
+
+** 4.2 ngircd
+
+- *Install*: =pkg install ngircd= (FreeBSD) / =brew install ngircd= (macOS)
+- *Deps*: C binary, libssl
+- *Config*: =/usr/local/etc/ngircd.conf= (INI-style)
+- *Channels*: dynamic or pre-configured
+- *Auth*: server password, oper, NickServ (via Atheme/Anope)
+- *TLS*: yes
+- *Persistence*: no (standard IRC)
+- *Federation*: yes (server-to-server links)
+
+*Verdict*: Overkill for single-machine aq. Correct choice if you want
+to federate IRC across nexus and mini (server linking), or if you need
+proper TLS and authentication. The config file is small and
+well-documented. Would use this for a "production" deployment where
+multiple machines need to share an IRC namespace.
+
+** 4.3 InspIRCd
+
+- *Install*: =pkg install inspircd= / build from source
+- *Deps*: C++ binary, modular
+- *Config*: XML (verbose)
+- *Channels*: dynamic, rich mode support
+- *Auth*: full services ecosystem (Atheme, Anope)
+- *TLS*: yes, module-based
+- *Persistence*: no (standard IRC)
+- *Federation*: yes (spanning tree protocol)
+
+*Verdict*: Wrong for aq. InspIRCd is a "real" IRC network daemon ---
+channel modes, bans, flood protection, SASL, all the machinery.
+None of that matters for presence gossip. The XML config alone is a
+reason to avoid it. Use this if you are running an actual IRC network
+and want to add an =#aq-presence= channel to it.
+
+** 4.4 Recommendation
+
+Use miniircd for local/single-machine deployments. It is already a
+Python dependency (or a single file you can vendor). Start it on port
+6999 (non-standard, avoids conflicts with any existing IRC on 6667).
+
+Upgrade to ngircd if/when cross-machine federation matters.
+
+Never use InspIRCd for this.
+
+* 5. Integration with aq
+
+** 5.1 CLI flags
+
+The =aq announce= command gains an =--irc= flag:
+
+#+begin_example
+aq announce -c C-42 -f cli.py --irc
+#+end_example
+
+This sends the broadcast to the filesystem (always) and additionally
+to IRC (best-effort). Same pattern as =--mqtt=, =--mesh=, =--kbfs=.
+
+** 5.2 Environment activation
+
+Set =AQ_IRC=1= to enable IRC for all announces without the flag:
+
+#+begin_example
+export AQ_IRC=1
+export AQ_IRC_HOST=192.168.86.100
+export AQ_IRC_PORT=6999
+export AQ_IRC_CHANNEL="#aq-presence"
+#+end_example
+
+** 5.3 Config file
+
+Add to =~/.aq/config.json=:
+
+#+begin_src json
+{
+  "irc": {
+    "enabled": true,
+    "host": "192.168.86.100",
+    "port": 6999,
+    "channel": "#aq-presence",
+    "nick": "aq-nexus"
+  }
+}
+#+end_src
+
+** 5.4 Fanout integration
+
+The IRC transport plugs into =_fanout()= in =cli.py= alongside
+mesh, mqtt, kbfs, and ghissue:
+
+#+begin_src python
+if getattr(args, "irc", False) or irc_is_enabled():
+    if irc_publish(broadcast):
+        sent.append("irc")
+#+end_src
+
+** 5.5 Human-in-the-loop
+
+This is the killer feature of the IRC transport. A developer can:
+
+1. Open any IRC client (irssi, weechat, Textual, even telnet)
+2. Connect to the aq IRC server
+3. =/join #aq-presence=
+4. Watch agents announce conjectures, phases, file touches
+5. Optionally: type messages that the RX daemon could route back
+
+This provides a zero-cost observability layer. No dashboard to build,
+no web UI to deploy, no API to authenticate against. Just an IRC
+channel with agents talking.
+
+Example session from a human's perspective:
+
+#+begin_example
+--- Day changed Fri Mar 28 2026
+14:23 -!- aq-12345 [~aq@localhost] has joined #aq-presence
+14:23 < aq-12345> aq:jwalsh/main C-42 [proof] cli.py,protocol.py
+14:23 -!- aq-12345 [~aq@localhost] has quit [aq broadcast complete]
+14:25 -!- aq-67890 [~aq@localhost] has joined #aq-presence
+14:25 < aq-67890> aq:blake/feat-irc C-6 [conjecture] irc.py
+14:25 -!- aq-67890 [~aq@localhost] has quit [aq broadcast complete]
+14:30 -!- aq-11111 [~aq@localhost] has joined #aq-presence
+14:30 < aq-11111> aq:jwalsh/main C-42 [proof] cli.py,irc.py
+14:30 -!- aq-11111 [~aq@localhost] has quit [aq broadcast complete]
+#+end_example
+
+You can immediately see: two agents are touching =cli.py=. Conflict
+signal visible to the naked eye.
+
+* 6. Nexus Deployment
+
+The nexus server (FreeBSD, 192.168.86.100) should run miniircd on
+port 6999:
+
+#+begin_example
+# In a tmux session or as a daemon
+miniircd --listen 0.0.0.0 --ports 6999
+
+# Or via rc.d script:
+# /usr/local/etc/rc.d/miniircd
+#+end_example
+
+Agents on nexus connect to =localhost:6999=.
+Agents on mini (macOS) connect to =192.168.86.100:6999=.
+
+Firewall: ensure port 6999 is open on nexus for LAN traffic.
+
+* 7. Failure Modes
+
+| Condition                    | Behavior                          |
+|------------------------------+-----------------------------------|
+| IRC server not running       | skip, log debug, return False     |
+| Connection refused           | skip, log debug, return False     |
+| Socket timeout (>3s)         | skip, log debug, return False     |
+| Channel does not exist       | created on JOIN (IRC semantics)   |
+| Nick collision               | use PID-based nick, retry         |
+| Server full                  | skip, log debug, return False     |
+| ncat/nc not found            | fall back to raw socket           |
+| Everything works             | send PRIVMSG, log info            |
+
+All failures are silent from the caller's perspective. =irc_publish()=
+returns False and =aq announce= continues with the filesystem write
+and any other enabled transports.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
