@@ -1,0 +1,748 @@
+#+TITLE: BLE Advertisement Transport Specification
+#+SUBTITLE: Room-scale agent gossip over Bluetooth Low Energy broadcasts
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* 0. Premise
+
+BLE advertisements are gossip in the most literal sense. A device
+shouts a packet into the air. Anyone within range hears it. No
+pairing, no handshake, no acknowledgment, no connection. Fire and
+forget at the radio layer. This is the physical equivalent of UDP
+multicast but over 2.4 GHz radio, and every laptop, phone, and
+Raspberry Pi already has the hardware.
+
+=aq-ble= broadcasts agent presence as BLE manufacturer-specific
+advertisement data. Any scanner within Bluetooth range (~10--30m
+indoors, ~100m outdoors) receives the broadcast. Their agent can parse
+the AMTP payload and run =aq check= for conflicts. Walk into the room
+and you hear the gossip; walk out and you don't.
+
+This is a Tier 1 transport --- tighter proximity than mDNS (LAN
+segment) and much tighter than LoRa (city scale). It requires zero
+infrastructure: no broker, no server, no accounts, no WiFi, no
+internet. The radio is the network.
+
+* 1. Why BLE Advertisements for Gossip
+
+** 1.1 Broadcast without pairing is gossip by definition
+
+BLE advertisements are connectionless broadcasts. The advertiser does
+not know who is listening. The scanner does not announce its presence
+to the advertiser. This is exactly the aq gossip model: agents
+broadcast presence, nobody is required to listen, missed broadcasts
+are not failures.
+
+iBeacon and Eddystone are existing advertisement protocols used for
+proximity detection --- we are applying the same mechanism to agent
+presence instead of retail foot traffic.
+
+** 1.2 Universal hardware
+
+Every device that runs a Claude Code session already has a BLE radio:
+
+- MacBook (all models since 2012): Bluetooth 4.0+
+- Linux laptops: most have BLE since ~2014
+- Raspberry Pi 3/4/5: built-in BLE
+- Phones: all modern Android and iOS
+
+No dedicated hardware purchase. No USB dongle. No antenna installation.
+Compare to LoRa/Meshtastic, which requires a ~$30 radio per node.
+
+** 1.3 Room-scale proximity filter
+
+BLE range is 10--100 meters depending on environment. This is a
+natural proximity filter tighter than any network-based transport:
+
+- Same room: reliable
+- Same floor: likely
+- Same building: possible with BLE 5.x extended range
+- Different buildings: no
+
+Physics handles the subscription model. If you can hear the
+advertisement, the agent is physically near you. This is useful in a
+way that mDNS (LAN-scoped) and LoRa (city-scoped) are not: it tells
+you someone is /in the room/ working on the same repo.
+
+** 1.4 Zero infrastructure
+
+No broker (unlike MQTT). No daemon (unlike NATS). No multicast routing
+(unlike mDNS on segmented networks). No WiFi required. No internet
+required. The BLE radio is always available. This is the only aq
+transport that works on an airplane with WiFi off.
+
+* 2. Advertisement Payload Constraints
+
+** 2.1 BLE 4.x (legacy advertising)
+
+The BLE 4.x advertising PDU allows 31 bytes of advertising data. After
+AD structure overhead (length byte + AD type byte per structure), the
+usable payload in a single Manufacturer Specific Data structure is:
+
+#+begin_example
+31 bytes total
+ - 2 bytes (length + AD type 0xFF)
+ - 2 bytes (company ID)
+ = 27 bytes usable payload
+#+end_example
+
+In practice, if a device name or flags are also advertised, expect
+20--25 usable bytes. The scan response can carry another 31 bytes for
+a combined total of ~50 usable bytes.
+
+** 2.2 BLE 5.x (extended advertising)
+
+BLE 5.x Extended Advertisements support up to 255 bytes per
+advertising set. After overhead:
+
+#+begin_example
+255 bytes total
+ - 2 bytes (length + AD type 0xFF)
+ - 2 bytes (company ID)
+ = 251 bytes usable payload
+#+end_example
+
+This comfortably fits a full aq compact broadcast, a truncated JSON
+payload, or multiple chained AMTP messages.
+
+** 2.3 Fit with AMTP v0.2 compact format
+
+AMTP v0.2 compact messages are 8--26 bytes:
+
+#+begin_example
+HPo|enc:compact       =  14 bytes  (fits BLE 4.x)
+CH1|test              =   8 bytes  (fits BLE 4.x)
+CP42|auth.py,api.py   =  19 bytes  (fits BLE 4.x)
+#+end_example
+
+The aq mesh compact format also fits:
+
+#+begin_example
+aq:jwalsh/feat-auth C-42 [proof] api.py   =  40 bytes  (fits scan response or BLE 5.x)
+#+end_example
+
+Even truncated NDJSON fits in BLE 5.x:
+
+#+begin_example
+{"a":"CASO","c":"C-42","p":"proof"}       =  35 bytes  (fits BLE 5.x)
+#+end_example
+
+BLE 4.x is the constraint that matters. The AMTP v0.2 compact format
+was designed for LoRa's 200-byte limit; it fits BLE's 20-byte limit
+with room to spare in its shortest forms.
+
+* 3. Wire Format
+
+** 3.1 AD Structure: Manufacturer Specific Data
+
+All aq BLE advertisements use AD type =0xFF= (Manufacturer Specific
+Data) per Bluetooth Core Specification Vol 3, Part C, Section 11.
+
+#+begin_example
++--------+--------+--------+--------+---...---+
+| Length  | 0xFF   | Co. ID | Co. ID | Payload |
+| (1 B)  | (1 B)  | (LSB)  | (MSB)  | (N B)   |
++--------+--------+--------+--------+---...---+
+#+end_example
+
+** 3.2 Company ID
+
+Use =0xFFFF= for development and testing. This is the Bluetooth SIG
+reserved value for non-production use. A production deployment could
+register a company ID with the Bluetooth SIG ($7,500) or reuse an
+existing allocation if available through a member organization.
+
+For filtering: scanners match on company ID =0xFFFF= and then check
+the payload magic byte to distinguish aq advertisements from other
+test traffic.
+
+** 3.3 Payload format: Binary compact (BLE 4.x, 20 bytes)
+
+For BLE 4.x where every byte counts:
+
+#+begin_example
+Offset  Size  Field           Description
+------  ----  -----           -----------
+0       1     magic           0xAQ (0xA0) -- identifies aq payload
+1       4     agent_hash      FNV-1a 32-bit hash of agent string
+5       2     seq             Sequence number (uint16 BE)
+7       1     type_phase      High nibble: msg type, low nibble: CPRR phase
+8       12    payload         Free-form: file hashes, conjecture ID, etc.
+------
+Total: 20 bytes
+#+end_example
+
+Type nibble values:
+
+| Value | Type    | Meaning                    |
+|-------+---------+----------------------------|
+|     0 | HELO    | Presence announcement      |
+|     1 | ANN     | Conjecture announcement    |
+|     2 | DONE    | Work completed             |
+|     3 | PING    | Keepalive                  |
+
+Phase nibble values:
+
+| Value | Phase       |
+|-------+-------------|
+|     0 | conjecture  |
+|     1 | proof       |
+|     2 | refutation  |
+|     3 | refinement  |
+|     4 | done        |
+
+The =agent_hash= is not reversible but is sufficient for dedup and
+conflict detection: if two advertisements carry the same =agent_hash=
+and overlapping file hashes, there is a potential conflict. The full
+agent name can be resolved via other transports (filesystem, mDNS).
+
+** 3.4 Payload format: AMTP compact (BLE 4.x, text)
+
+For interoperability with the existing AMTP v0.2 compact format, the
+payload can be a raw AMTP string:
+
+#+begin_example
+CH1|test              (8 bytes)
+CP42|api.py           (12 bytes)
+#+end_example
+
+The scanner distinguishes binary vs. text by checking byte 0:
+=0xA0= means binary compact, anything else is AMTP text.
+
+** 3.5 Payload format: Extended (BLE 5.x, up to 251 bytes)
+
+On BLE 5.x, use the full aq mesh compact format:
+
+#+begin_example
+aq:jwalsh/feat-auth C-42 [proof] api.py,auth.py
+#+end_example
+
+Or truncated JSON for richer payloads:
+
+#+begin_example
+{"a":"jwalsh/feat-auth","c":"C-42","p":"proof","f":["api.py"]}
+#+end_example
+
+The scanner detects the format by inspecting the first bytes:
+- =0xA0=: binary compact
+- =aq:=: mesh compact text
+- ={=: JSON
+
+* 4. TX Path
+
+** 4.1 Conceptual flow
+
+#+begin_example
+aq announce -c C-42 -f api.py --ble
+    |
+    v
+Construct AMTP payload (compact or binary)
+    |
+    v
+Wrap in Manufacturer Specific Data (company ID 0xFFFF)
+    |
+    v
+Start BLE advertising (bleak or platform API)
+    |
+    v
+Advertise for duration_seconds (default: 30s)
+    |
+    v
+Stop advertising
+#+end_example
+
+** 4.2 Advertising parameters
+
+| Parameter           | Default   | Range         | Notes                             |
+|---------------------+-----------+---------------+-----------------------------------|
+| interval_ms         | 1000      | 100--10000    | Lower = faster discovery, more power |
+| duration_seconds    | 30        | 5--300        | How long to advertise             |
+| tx_power            | 0 dBm     | -20 to +8     | Lower = shorter range, less power |
+
+- =interval_ms=100=: aggressive, for interactive sessions where
+  latency matters. Battery impact is minimal on laptops (plugged in).
+- =interval_ms=1000=: default, good balance.
+- =interval_ms=10000=: battery-friendly for long-running sessions on
+  battery power.
+
+** 4.3 Conceptual API (Python / bleak)
+
+#+begin_src python
+# Pseudocode --- do not implement
+from bleak import BleakAdvertiser  # or platform equivalent
+
+def ble_broadcast(broadcast: AqBroadcast, duration: int = 30) -> bool:
+    """Advertise an aq broadcast over BLE for duration seconds."""
+    payload = encode_amtp_compact(broadcast)  # 8--20 bytes
+    manufacturer_data = {0xFFFF: payload}
+
+    advertiser = BleakAdvertiser()
+    advertiser.start(
+        manufacturer_data=manufacturer_data,
+        interval_ms=1000,
+    )
+    # Advertise for duration, then stop
+    time.sleep(duration)
+    advertiser.stop()
+    return True
+#+end_src
+
+** 4.4 Continuous presence mode
+
+For long-running sessions, re-advertise on a timer rather than
+blocking:
+
+#+begin_example
+Every 60 seconds:
+    1. Build current AMTP payload from active conjecture
+    2. Update advertisement data
+    3. Advertise for 10 seconds
+    4. Stop (silent for 50 seconds)
+
+Duty cycle: ~17% advertising time
+#+end_example
+
+This reduces radio congestion while maintaining periodic presence.
+Peers that scan at least once per minute will see the agent.
+
+* 5. RX Path
+
+** 5.1 Conceptual flow
+
+#+begin_example
+aq check --ble
+    |
+    v
+Start BLE scan (passive, no connections)
+    |
+    v
+Filter advertisements by company ID 0xFFFF
+    |
+    v
+For each matching advertisement:
+    |
+    +---> Parse payload (binary compact, AMTP text, or JSON)
+    +---> Dedup by (agent_hash, seq)
+    +---> Check for file overlap with local broadcasts
+    +---> Report conflicts
+    |
+    v
+Stop scan after timeout (default: 5s)
+#+end_example
+
+** 5.2 Conceptual API (Python / bleak)
+
+#+begin_src python
+# Pseudocode --- do not implement
+from bleak import BleakScanner
+
+def on_aq_advertisement(device, advertisement_data):
+    """Callback for each BLE advertisement seen."""
+    manufacturer_data = advertisement_data.manufacturer_data
+    if 0xFFFF not in manufacturer_data:
+        return  # not ours
+
+    payload = manufacturer_data[0xFFFF]
+    broadcast = decode_aq_payload(payload)
+
+    if is_duplicate(broadcast.agent_hash, broadcast.seq):
+        return  # already seen
+
+    conflicts = check_file_overlap(broadcast, local_broadcasts)
+    if conflicts:
+        report_conflict(broadcast, conflicts)
+
+async def ble_scan(timeout: float = 5.0) -> list[AqBroadcast]:
+    """Scan for aq BLE advertisements."""
+    scanner = BleakScanner(detection_callback=on_aq_advertisement)
+    await scanner.start()
+    await asyncio.sleep(timeout)
+    await scanner.stop()
+    return collected_broadcasts
+#+end_src
+
+** 5.3 Passive scanning
+
+BLE scanning is passive by default. The scanner never connects to the
+advertiser. The advertiser never knows it was scanned. This matches aq
+gossip semantics: broadcast without knowing who (if anyone) is
+listening.
+
+Power consumption of passive scanning is low --- the radio listens on
+three advertising channels (37, 38, 39) in rotation. On a laptop this
+is negligible. On a battery device, scan windows can be adjusted.
+
+** 5.4 Deduplication
+
+Same strategy as other aq transports: dedup by =(agent_hash, seq)=
+tuple. The binary compact format includes both fields. AMTP text
+format dedup uses a hash of the full payload string. Dedup window: 60
+seconds (matching the re-advertisement interval).
+
+* 6. Comparison to Other Proximity Transports
+
+| Property        | BLE Advert       | LoRa/Meshtastic   | UDP Multicast   | mDNS            |
+|-----------------+------------------+--------------------+-----------------+-----------------|
+| Range           | 10--100m         | 5--50km            | LAN segment     | LAN segment     |
+| Pairing         | none             | none (broadcast)   | none            | none            |
+| Payload         | 20--255 bytes    | ~200 bytes         | ~65KB           | ~255 bytes/TXT  |
+| Power           | very low         | low                | normal (WiFi)   | normal (WiFi)   |
+| Hardware        | built-in         | dedicated radio    | built-in (WiFi) | built-in (WiFi) |
+| Latency         | <100ms           | 1--30s             | <1ms            | ~3s (browse)    |
+| Infrastructure  | none             | none               | LAN + multicast | LAN + mDNS      |
+| WiFi required   | no               | no                 | yes             | yes             |
+| Works offline   | yes              | yes                | no (needs LAN)  | no (needs LAN)  |
+| Bidirectional   | no (broadcast)   | yes (mesh)         | yes             | yes (HTTP POST) |
+| Persistence     | none             | none               | none            | DNS TTL         |
+
+Key differentiator: BLE advertisements and LoRa are the only two aq
+transports that work without any network infrastructure. BLE is room
+scale; LoRa is city scale. Together they cover the full range of
+physical proximity without requiring a single server.
+
+* 7. Use Cases
+
+** 7.1 Room-scale agent discovery
+
+Multiple developers in the same room, each running Claude Code on
+different branches of the same repo. BLE advertisements let their
+agents discover each other without any shared network configuration:
+
+#+begin_example
+Alice's MacBook advertises:  aq:alice/feat-auth C-42 [proof] auth.py
+Bob's MacBook scans, sees:   aq:alice/feat-auth C-42 [proof] auth.py
+Bob's agent:                 CONFLICT: auth.py overlap with alice/feat-auth
+#+end_example
+
+No WiFi. No Slack. No "hey are you working on auth.py?" Physics
+delivers the conflict signal.
+
+** 7.2 Conference and meetup presence
+
+A T-Deck or Pi at a conference broadcasting agent state via BLE.
+Attendees' phones or laptops passively scan and discover what agents
+are active nearby. A form of ambient awareness without requiring
+everyone to join a channel or subscribe to a service.
+
+** 7.3 Offline gossip
+
+Works during internet outages, on airplanes, in basements with no
+WiFi. As long as two devices are within BLE range, gossip flows.
+This is the transport of last resort when everything else is down.
+
+** 7.4 Complementary to other transports
+
+BLE is not a replacement for any existing transport. It fills the
+tightest proximity band:
+
+#+begin_example
+aq announce -c C-42 -f auth.py --ble --mdns --mesh
+    |         |         |
+    v         v         v
+  room      LAN       city
+#+end_example
+
+Each flag enables a different radius. An agent can broadcast on all
+three simultaneously. The cost of BLE advertisement is negligible ---
+there is no reason not to enable it by default when BLE hardware is
+available.
+
+* 8. CLI Integration
+
+** 8.1 New flag on =aq announce=
+
+#+begin_example
+aq announce -c C-42 -f api.py --ble
+aq announce -c C-42 -f api.py --ble --ble-duration 60
+aq check --ble --ble-timeout 10
+#+end_example
+
+| Flag              | Default | Effect                                 |
+|-------------------+---------+----------------------------------------|
+| =--ble=           | off     | also broadcast/scan via BLE            |
+| =--ble-duration=  | 30      | seconds to advertise (TX)              |
+| =--ble-timeout=   | 5       | seconds to scan (RX)                   |
+| =--ble-interval=  | 1000    | advertisement interval in ms           |
+
+** 8.2 Environment variables
+
+| Variable           | Default | Purpose                                |
+|--------------------+---------+----------------------------------------|
+| =AQ_BLE=           | =0=     | set =1= to enable BLE by default      |
+| =AQ_BLE_DURATION=  | =30=    | default advertisement duration (s)     |
+| =AQ_BLE_TIMEOUT=   | =5=     | default scan timeout (s)               |
+| =AQ_BLE_INTERVAL=  | =1000=  | default advertisement interval (ms)    |
+
+When =AQ_BLE=1=, every =aq announce= also broadcasts via BLE without
+needing =--ble= each time.
+
+** 8.3 Fanout addition
+
+In =cli.py _fanout()=:
+
+#+begin_src python
+# Pseudocode
+from .ble import ble_broadcast, is_enabled as ble_is_enabled
+
+if getattr(args, "ble", False) or ble_is_enabled():
+    if ble_broadcast(broadcast):
+        sent.append("ble")
+#+end_src
+
+* 9. Libraries
+
+** 9.1 Python
+
+| Library  | Platform           | Notes                                       |
+|----------+--------------------+---------------------------------------------|
+| bleak    | macOS/Linux/Win    | Async, recommended. Scanning well-supported. |
+|          |                    | Advertising support varies by platform.     |
+| bluepy   | Linux only         | Synchronous, mature. No macOS.              |
+| pybluez  | Linux/Win          | Classic BT + BLE. Heavy dependency.         |
+
+=bleak= is the recommended choice. It is cross-platform, async-native,
+and actively maintained. Advertising support on macOS requires
+CoreBluetooth peripheral mode, which bleak wraps.
+
+Note: macOS CoreBluetooth has restrictions on advertisement content.
+Manufacturer Specific Data in advertisements may be filtered or
+modified by the system on macOS. Testing on macOS is essential.
+
+** 9.2 Go
+
+| Library            | Platform     | Notes                           |
+|--------------------+--------------+---------------------------------|
+| tinygo/bluetooth   | Linux/macOS  | TinyGo BLE package. Peripheral + Central. |
+| paypal/gatt        | Linux/macOS  | Pure Go, no CGo on Linux.       |
+| go-ble/ble         | Linux/macOS  | Fork of paypal/gatt, maintained.|
+
+For the =malla= Go CLI, =tinygo/bluetooth= or =go-ble/ble= would be
+the integration point.
+
+** 9.3 Platform native
+
+| Platform | Framework         | Notes                                  |
+|----------+-------------------+----------------------------------------|
+| macOS    | CoreBluetooth     | Full control. Used by bleak under hood.|
+| Linux    | BlueZ + D-Bus     | =bluetoothctl=, =hcitool=, =btmgmt=.  |
+| iOS      | CoreBluetooth     | Background advertising with limits.    |
+| Android  | android.bluetooth | BLE advertising since API 21.          |
+
+* 10. Security Considerations
+
+** 10.1 Advertisements are cleartext
+
+BLE advertisements are not encrypted at the link layer. Any scanner
+within range sees the full advertisement payload. This is by design ---
+the same property that makes advertisements useful for gossip (no
+pairing required) means there is no confidentiality.
+
+** 10.2 Threat model
+
+| Threat                   | Severity | Mitigation                         |
+|--------------------------+----------+------------------------------------|
+| Passive eavesdropping    | low      | Accept: room-scale = room trust    |
+| Spoofed advertisements   | low      | Dedup + cross-reference with fs    |
+| Replay attacks           | low      | Sequence numbers + 60s dedup window|
+| Payload injection        | very low | 20 bytes is too small for exploit  |
+| Tracking via MAC address | medium   | BLE MAC randomization (default on) |
+
+** 10.3 Encrypted payloads (optional)
+
+For environments where room-scale gossip should not be readable by
+non-participants, encrypt the AMTP payload before placing it in the
+advertisement:
+
+#+begin_example
+Plaintext:    CH1|test           (8 bytes)
+Key:          AES-128 PSK shared out-of-band
+Ciphertext:   <16 bytes>        (AES block size, fits BLE 4.x)
+#+end_example
+
+This mirrors the Meshtastic model: AES-encrypted payload in a
+cleartext radio frame. The PSK could be the same =MESH_PSK= or a
+separate =BLE_PSK= for finer-grained access control.
+
+Whether this is worth doing depends on context. A coworking space with
+unknown parties nearby: maybe. A home office: no. The default should
+be cleartext, with encryption as an opt-in.
+
+** 10.4 The 20-byte argument
+
+A 20-byte payload is too small to carry a meaningful prompt injection,
+a malicious URL, or any attack surface worth worrying about. The
+worst case is a spoofed presence announcement, which causes a false
+conflict detection --- easily resolved by checking the filesystem
+transport. This is a gossip protocol; incorrect gossip is handled by
+ignoring it.
+
+* 11. Failure Modes
+
+| Condition                     | Behavior                         |
+|-------------------------------+----------------------------------|
+| No BLE hardware               | skip, log debug, return success  |
+| BLE powered off               | skip, log debug, return success  |
+| bleak not installed            | skip, log debug, return success  |
+| macOS Bluetooth permission     | skip, log warning, return success|
+| Advertisement start fails      | skip, log warning, return success|
+| No peers scanning              | silent (fire-and-forget)         |
+| Scanner sees no advertisements | return empty list                |
+
+Same contract as aq-mesh: the BLE transport must never block or fail
+an =aq announce=. Every failure mode degrades silently.
+
+* 12. L1.5 Fit Score
+
+Proposed score: *60*.
+
+| Criterion       | Score | Rationale                                          |
+|-----------------+-------+----------------------------------------------------|
+| Lossy-ok        |   100 | Advertisements are fire-and-forget by definition   |
+| Multicast       |    90 | True broadcast --- all scanners hear it             |
+| Zero orchestrator |  100 | No server, no broker, no daemon                    |
+| TTL semantics   |    30 | No native TTL; must re-advertise or stop           |
+| Zero/low deps   |    70 | bleak is a pip install; hardware is built-in       |
+| Cross-platform  |    80 | macOS + Linux. Windows possible but untested.      |
+| Latency <500ms  |    90 | Advertisement-to-scan latency is <100ms            |
+| Persistence     |    10 | None. Advertisements are ephemeral.                |
+| Cross-machine   |    40 | Only within BLE range (~10-100m)                   |
+
+The score reflects perfect gossip semantics (broadcast, no ack,
+fire-and-forget) and room-scale proximity filtering, but weak
+persistence and the inherent range limitation. It scores lower than
+filesystem (95) because it cannot replace it --- no persistence, no
+cross-room reach. It scores higher than ggwave (10) because it
+actually carries enough payload to be useful.
+
+BLE advertisements are a gossip supplement, not a gossip backbone.
+
+Compared to the existing transport table in TRANSPORTS.org:
+
+| Transport          | L1.5 fit |
+|--------------------+----------|
+| Filesystem         |       95 |
+| NATS               |       88 |
+| MQTT               |       65 |
+| *BLE Advertisement* |       60 |
+| IRC                |       55 |
+| Meshtastic/LoRa    |       55 |
+| BBS                |       45 |
+| Named FIFO         |       40 |
+| /tmp/ shared file  |       35 |
+
+It slots between MQTT and IRC: better gossip semantics than IRC
+(true broadcast vs. channel subscription) but less capable as a
+general transport (no persistence, no cross-network, tiny payload).
+
+* 13. The Proximity Hierarchy
+
+#+begin_example
+Layer 0:  BLE advertisements     10--100m     room / building
+Layer 1:  mDNS / UDP multicast   LAN          office / home network
+Layer 2:  LoRa / Meshtastic      5--50km      city / metro area
+Layer 3:  Keybase / MQTT / git   WAN          global
+#+end_example
+
+Each layer is a different proximity filter. aq's transport registry
+should let agents enable or disable transports by scope:
+
+#+begin_src toml
+# contrib/transports.sample.toml (proposed additions)
+[ble]
+enabled = false
+interval_ms = 1000
+duration_seconds = 30
+tx_power = 0
+#+end_src
+
+The natural default is to enable filesystem always, and let users opt
+into progressively wider scopes as needed. A solo developer at home
+needs only filesystem. A team in an office adds mDNS. A distributed
+team across a metro area adds LoRa. A globally distributed team adds
+MQTT or Keybase. BLE fills the tightest scope: "is someone in this
+room working on the same file?"
+
+The full gossip stack, enabled simultaneously:
+
+#+begin_example
+aq announce -c C-42 -f auth.py --ble --mdns --mesh --mqtt
+    |         |         |         |
+    v         v         v         v
+  room      LAN       city     global
+  10m       subnet    15km      WAN
+  <100ms    ~3s       1-30s     ~200ms
+  0 deps    0 deps    radio     broker
+#+end_example
+
+Each transport independently carries the same broadcast at its
+natural scope. Wider transports are not relays for narrower ones ---
+they are parallel fanout paths. A missed BLE advertisement does not
+matter if the mDNS broadcast succeeds, and vice versa. This is
+convergent multicast: multiple independent paths increase the
+probability that at least one delivers the gossip.
+
+* 14. Open Questions
+
+** 14.1 macOS CoreBluetooth restrictions
+
+macOS limits what user-space applications can put in BLE
+advertisements. CoreBluetooth may silently drop or rewrite
+Manufacturer Specific Data. Needs empirical testing with bleak on
+macOS to determine whether the payload survives round-trip.
+
+Fallback: use a GATT characteristic instead of advertisement data.
+This requires a brief connection (not pure fire-and-forget) but is
+fully supported on macOS. This would change the gossip model from
+"shout into the air" to "bulletin board anyone can read."
+
+** 14.2 Company ID registration
+
+=0xFFFF= is fine for development and local use. A production
+deployment visible to the public (conference demos, etc.) should
+ideally use a registered company ID to avoid collisions with other
+test traffic. The Bluetooth SIG charges $7,500 for a company ID
+registration.
+
+Alternative: use the Local Name AD type (0x09) instead of
+Manufacturer Specific Data, encoding the AMTP payload as a fake
+device name. Scanners already display device names; this is
+technically an abuse of the field but avoids the company ID question.
+
+** 14.3 Android and iOS background scanning
+
+Mobile platforms restrict background BLE scanning to conserve battery.
+This limits the usefulness of BLE gossip on phones unless the aq
+companion app is in the foreground. Not a concern for laptop-based
+agents (the primary use case) but relevant for the conference/meetup
+scenario.
+
+** 14.4 Scan response chaining
+
+BLE 4.x allows a scan response packet (31 bytes) in addition to the
+advertisement packet (31 bytes). By splitting the payload across both,
+we could carry ~50 usable bytes on BLE 4.x. This requires the scanner
+to send a =SCAN_REQ= (active scan), which is slightly less passive but
+still connectionless.
+
+* 15. References
+
+- Bluetooth Core Specification v5.3: https://www.bluetooth.com/specifications/specs/core-specification-5-3/
+- BLE Advertising Data Format: Core Spec Vol 3, Part C, Section 11
+- Manufacturer Specific Data: AD type 0xFF, Core Spec Vol 3, Part C, Section 11.1.4
+- bleak (Python BLE library): https://github.com/hbldh/bleak
+- tinygo bluetooth: https://github.com/tinygo-org/bluetooth
+- go-ble/ble: https://github.com/go-ble/ble
+- iBeacon: https://developer.apple.com/ibeacon/
+- Eddystone: https://github.com/google/eddystone
+- aq spec: =spec.org=, =spec-v2.org=
+- aq transports: =TRANSPORTS.org=
+- Meshtastic bridge: =contrib/meshtastic/spec.org=
+- mDNS transport: =contrib/mdns/mdns-transport.org=
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
