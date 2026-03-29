@@ -1,0 +1,474 @@
+#+TITLE: mDNS/DNS-SD Transport Specification
+#+SUBTITLE: Tier 1.5 -- Zero-Config LAN Discovery and Broadcast for aq
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* Abstract
+
+This document specifies the mDNS/DNS-SD transport for =aq=, the ambient
+agent queue. The transport advertises agent presence as =_aq._tcp= services
+on the local network and delivers broadcast payloads via HTTP POST to
+discovered peers.
+
+Tier classification: 1.5 (between filesystem and broker-based transports).
+Zero infrastructure. Zero configuration. Works on any LAN where mDNS
+multicast is permitted.
+
+* Service Record Format
+
+** Service Type
+
+All aq broadcasts use the DNS-SD service type:
+
+#+begin_example
+_aq._tcp
+#+end_example
+
+This follows RFC 6763 naming: =_<application>._<transport>=. The =_tcp=
+suffix is required by DNS-SD even when the application does not use
+persistent TCP connections. The HTTP listener for broadcast delivery
+justifies the =_tcp= designation.
+
+** Instance Name
+
+The instance name is the agent's address, identical to the =agent= field
+in the Broadcast payload:
+
+#+begin_example
+github.com/jwalsh/aq/feat-auth
+#+end_example
+
+One service instance per agent. Multiple conjectures from the same agent
+update the TXT records on the existing instance (re-register).
+
+** Port
+
+The advertised port is the HTTP listener port for broadcast delivery.
+Port 0 means the agent is in passive mode (TXT-only, no HTTP receiver).
+Port values >0 indicate the agent accepts POST requests.
+
+** Domain
+
+Always =local= for mDNS.
+
+** Registration Example (macOS)
+
+#+begin_src bash
+dns-sd -R \
+  "github.com/jwalsh/aq/feat-auth" \
+  "_aq._tcp" \
+  "local" \
+  5309 \
+  conjecture=C-1 \
+  phase=proof \
+  status=prosecuting \
+  files=auth.py,session.py \
+  worktree=feat-auth \
+  claim=filesystem-transport-is-sufficient \
+  id=018f3a0000abcdef01 \
+  ts=1711612800 \
+  ttl=300
+#+end_src
+
+** Registration Example (Linux)
+
+#+begin_src bash
+avahi-publish-service \
+  "github.com/jwalsh/aq/feat-auth" \
+  "_aq._tcp" \
+  5309 \
+  "conjecture=C-1" \
+  "phase=proof" \
+  "status=prosecuting" \
+  "files=auth.py,session.py" \
+  "worktree=feat-auth" \
+  "claim=filesystem-transport-is-sufficient" \
+  "id=018f3a0000abcdef01" \
+  "ts=1711612800" \
+  "ttl=300"
+#+end_src
+
+* TXT Record Fields
+
+DNS TXT records carry the broadcast metadata. Each key=value pair is a
+separate TXT string per RFC 6763 Section 6. Limit: 255 bytes per string,
+~1300 bytes aggregate.
+
+| Key          | Required | Max Length | Description                          | Example                  |
+|--------------+----------+------------+--------------------------------------+--------------------------|
+| conjecture   | yes      | 32         | Conjecture ID                        | =C-1=                    |
+| phase        | yes      | 16         | CPRR phase                           | =proof=                  |
+| status       | yes      | 16         | Agent status                         | =prosecuting=            |
+| files        | yes      | 200        | Comma-separated file basenames       | =auth.py,session.py=     |
+| worktree     | yes      | 64         | Branch or worktree name              | =feat-auth=              |
+| claim        | no       | 200        | Human-readable conjecture claim      | =filesystem-is-enough=   |
+| id           | no       | 32         | Broadcast ULID                       | =018f3a0000abcdef01=     |
+| ts           | no       | 12         | Unix timestamp (seconds)             | =1711612800=             |
+| ttl          | no       | 6          | TTL in seconds                       | =300=                    |
+
+** Encoding Rules
+
+- Values MUST NOT contain newlines or null bytes.
+- The =files= field uses comma separation, not JSON arrays.
+- The =claim= field replaces spaces with hyphens in dns-sd mode (dns-sd
+  does not quote TXT values). In avahi mode, the value is quoted and
+  spaces are preserved.
+- Long =files= values are truncated at the last complete comma-separated
+  entry before the 200-byte limit.
+- Fields not present in TXT are treated as empty strings by consumers.
+
+** Conflict Detection from TXT Only
+
+A peer that only browses (does not connect via HTTP) can still perform
+conflict detection using TXT fields alone:
+
+#+begin_src python
+# Pseudo-code for TXT-only conflict detection
+for peer in mdns_browse():
+    their_files = set(peer["txt"]["files"].split(","))
+    my_files = set(my_broadcast.files)
+    overlap = their_files & my_files
+    if overlap:
+        severity = cprr_severity(my_broadcast.phase, peer["txt"]["phase"])
+        print(f"CONFLICT [{severity}]: {overlap}")
+#+end_src
+
+This is the "passive mode" contract: TXT records carry enough information
+for conflict detection without any network connection beyond mDNS multicast.
+
+* HTTP Endpoint Specification
+
+** POST /aq/broadcast
+
+Delivers a full Broadcast payload to a peer.
+
+*** Request
+
+| Field        | Value                        |
+|--------------+------------------------------|
+| Method       | POST                         |
+| Path         | /aq/broadcast                |
+| Content-Type | application/json             |
+| Body         | Broadcast JSON (see below)   |
+| Max Size     | 8192 bytes                   |
+
+*** Request Body
+
+The body is a JSON-serialized Broadcast object, identical to the
+filesystem format:
+
+#+begin_src json
+{
+  "agent": "github.com/jwalsh/aq/feat-auth",
+  "worktree": "feat-auth",
+  "conjecture_id": "C-1",
+  "conjecture_claim": "filesystem transport is sufficient",
+  "phase": "proof",
+  "status": "prosecuting",
+  "files": ["auth.py", "session.py"],
+  "ts": 1711612800.0,
+  "ttl": 300,
+  "id": "018f3a0000abcdef01"
+}
+#+end_src
+
+*** Response
+
+| Status | Meaning                                    |
+|--------+--------------------------------------------|
+| 202    | Accepted. Broadcast received and queued.   |
+| 400    | Bad request (empty body, invalid JSON, >8KB). |
+| 404    | Wrong path.                                |
+
+Response body on 202:
+
+#+begin_src json
+{"status": "accepted"}
+#+end_src
+
+** GET /aq/health
+
+Health check endpoint for monitoring and peer validation.
+
+*** Response
+
+| Status | Body                                    |
+|--------+-----------------------------------------|
+| 200    | ={"status":"ok","transport":"mdns"}=    |
+
+* Discovery Flow
+
+** Registration Phase
+
+#+begin_example
+Agent starts working
+    |
+    v
+Start HTTP receiver on port P (or 0 for auto-assign)
+    |
+    v
+Register _aq._tcp service via dns-sd -R / avahi-publish-service
+    Instance: agent_address
+    Port: P (the HTTP receiver port)
+    TXT: broadcast metadata
+    |
+    v
+Background process holds registration alive
+(exit = automatic deregistration)
+#+end_example
+
+** Discovery Phase
+
+#+begin_example
+Agent wants to check for peers / publish broadcast
+    |
+    v
+Browse for _aq._tcp services
+    macOS: dns-sd -B _aq._tcp local (3s timeout)
+    Linux: avahi-browse -rpt _aq._tcp (3s timeout)
+    |
+    v
+For each discovered instance:
+    |
+    +---> Extract TXT records (passive conflict detection)
+    |
+    +---> If port > 0: POST /aq/broadcast (active delivery)
+    |
+    v
+Return results
+#+end_example
+
+** Full Sequence Diagram
+
+#+begin_example
+Machine A (Agent: origin/feat-auth)     LAN (224.0.0.251:5353)     Machine B (Agent: origin/feat-session)
+
+1. aq announce --mdns
+   |
+   +-> Start HTTP on :5309
+   +-> dns-sd -R "origin/feat-auth"
+       _aq._tcp local 5309
+       conjecture=C-1 phase=proof
+       files=auth.py,session.py
+                    |
+                    +---> mDNS multicast ANNOUNCE
+                                   |
+                                   +---> 2. Agent B browses _aq._tcp
+                                         dns-sd -B _aq._tcp local
+                                         |
+                                         +-> Discovers "origin/feat-auth"
+                                         +-> dns-sd -L to get TXT + port
+                                         |
+                                         +-> 3. Conflict check (TXT):
+                                             files overlap on auth.py
+                                             both phase=proof
+                                             SEVERITY: HIGH
+                                         |
+                                         +-> 4. (Optional) POST to :5309
+                                             Agent B's own broadcast
+                                             for active sync
+
+5. Agent A finishes, kills dns-sd
+   |
+   +-> mDNS GOODBYE
+                    |
+                    +---> 6. Agent B sees removal
+                          Conflict cleared.
+#+end_example
+
+* Integration with aq Transport Layer
+
+** Module Interface
+
+The mDNS module implements the standard aq transport interface:
+
+#+begin_src python
+# Detection
+from aq.mdns import is_enabled, mdns_publish
+
+# is_enabled() checks AQ_MDNS=1 or config.json
+if is_enabled():
+    mdns_publish(broadcast)
+#+end_src
+
+** CLI Integration
+
+The =aq announce= command gains an =--mdns= flag:
+
+#+begin_example
+aq announce -c C-1 -f auth.py --mdns
+#+end_example
+
+This triggers =mdns_publish(broadcast)= in the fanout, same as =--mqtt=,
+=--mesh=, =--kbfs=.
+
+** Fanout Addition
+
+In =cli.py _fanout()=:
+
+#+begin_src python
+from .mdns import mdns_publish, is_enabled as mdns_is_enabled
+
+if getattr(args, "mdns", False) or mdns_is_enabled():
+    if mdns_publish(broadcast):
+        sent.append("mdns")
+#+end_src
+
+** Long-Running Mode
+
+For agents that maintain presence for a session (not one-shot announce):
+
+#+begin_src python
+from aq.mdns import mdns_announce, mdns_deregister
+
+# Start of session: register and listen
+mdns_announce(broadcast, on_receive=handle_peer_broadcast)
+
+# ... agent works ...
+
+# End of session: deregister
+mdns_deregister()
+#+end_src
+
+** Configuration
+
+#+begin_src json
+{
+  "mdns": {
+    "enabled": true,
+    "port": 5309,
+    "interface": "en0"
+  }
+}
+#+end_src
+
+Environment variables take precedence:
+
+| Variable       | Default | Description                       |
+|----------------+---------+-----------------------------------|
+| AQ_MDNS        | 0       | Enable mDNS transport (0 or 1)   |
+| AQ_MDNS_PORT   | 0       | HTTP listener port (0 = auto)    |
+| AQ_MDNS_IFACE  | (all)   | Network interface                 |
+
+* Failure Modes
+
+** No mDNS Tool Available
+
+Symptom: =is_enabled()= returns True but =mdns_publish()= returns False.
+
+Cause: Neither =dns-sd= nor =avahi-publish-service= found in PATH.
+
+Behavior: Silent fallback. Log at DEBUG level. =aq announce= proceeds
+with other transports. This is the expected state in containers, jails
+without multicast, or minimal installs.
+
+** Multicast Blocked
+
+Symptom: Registration succeeds (dns-sd process starts) but no peers
+discover the service.
+
+Cause: Corporate firewall, VPN, or network configuration blocks multicast
+to =224.0.0.251:5353=.
+
+Behavior: No error visible to the agent. Browse returns empty list.
+Publish delivers to zero peers and returns False. The agent does not know
+whether there are no peers or multicast is blocked -- and does not need to.
+
+** Port Conflict
+
+Symptom: HTTP receiver fails to bind.
+
+Cause: Configured port already in use.
+
+Behavior: =mdns_register()= returns False. Use port 0 (default) for
+OS-assigned port to avoid this entirely.
+
+** Peer Unreachable
+
+Symptom: Browse discovers peer but POST fails.
+
+Cause: Peer crashed between registration and POST. Stale mDNS cache.
+Network partition.
+
+Behavior: POST times out after 5 seconds. That peer is skipped. Other
+peers still receive the broadcast. The browse result includes stale
+entries until the DNS TTL expires.
+
+** dns-sd Process Dies
+
+Symptom: Service disappears from the network.
+
+Cause: dns-sd/avahi-publish-service process killed or crashed.
+
+Behavior: mDNS GOODBYE packet sent (if clean shutdown) or record expires
+at DNS TTL (if crash). Peer agents see the service disappear. This is
+correct behavior -- the agent is no longer present.
+
+** Subnet Isolation
+
+Symptom: Agents on different subnets cannot discover each other.
+
+Cause: mDNS multicast does not cross routers by default.
+
+Behavior: Each subnet forms its own discovery domain. Agents on different
+subnets need a Tier 2+ transport (MQTT, NATS) for cross-subnet discovery.
+This is a fundamental property of mDNS, not a bug.
+
+** Self-Delivery
+
+Symptom: Agent receives its own broadcast via HTTP POST.
+
+Cause: Browse discovers the agent's own registration.
+
+Behavior: =_is_self()= performs best-effort hostname + port matching to
+filter self-delivery. Not guaranteed in all network configurations (e.g.,
+multiple interfaces). Consumers should be idempotent.
+
+* Tier Classification
+
+| Property          | mDNS Value                                    |
+|-------------------+-----------------------------------------------|
+| Tier              | 1.5                                           |
+| Dependencies      | dns-sd (macOS built-in) or avahi-utils        |
+| Infrastructure    | None (zero-config)                            |
+| Scope             | LAN / subnet                                  |
+| Latency           | ~3s browse + <100ms POST                      |
+| Persistence       | DNS TTL (no durable store)                    |
+| Multicast         | Yes (mDNS multicast + HTTP unicast)           |
+| Cross-machine     | Yes (same subnet)                             |
+| Cross-network     | No (mDNS is subnet-scoped)                    |
+
+Position in the transport hierarchy:
+
+#+begin_example
+Tier 0:   Filesystem (~/.aq/)       -- single machine, zero deps
+Tier 1.5: mDNS (_aq._tcp)          -- LAN, zero infrastructure
+Tier 2:   KBFS                      -- cross-network, Keybase account
+Tier 3:   MQTT                      -- broker-based, cross-network
+Tier 3.5: Meshtastic/LoRa           -- radio, proximity-scoped
+Tier 4:   GH Issues                 -- cloud, audit trail
+#+end_example
+
+mDNS fills the gap between "filesystem on one machine" and "broker on the
+network." It is the natural first upgrade when agents span multiple
+machines on the same LAN -- which is the common case for a developer with
+a laptop and a mini (or a workstation and a build server).
+
+* References
+
+- RFC 6762: Multicast DNS -- https://www.rfc-editor.org/rfc/rfc6762
+- RFC 6763: DNS-Based Service Discovery -- https://www.rfc-editor.org/rfc/rfc6763
+- Apple Bonjour -- https://developer.apple.com/bonjour/
+- Avahi -- https://avahi.org/
+- aq spec -- =spec.org=
+- aq transports -- =TRANSPORTS.org=
+- mDNS Go stub -- =contrib/mdns/mdns.go=
+- mDNS shell demo -- =contrib/mdns/demo.sh=
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
