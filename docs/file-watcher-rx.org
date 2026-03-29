@@ -1,0 +1,645 @@
+#+TITLE: aq File-Watcher RX Adapter
+#+SUBTITLE: Closing the Loop on "Disk is the Universal Bus"
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* Abstract
+
+This document specifies the file-watcher RX adapter for the =aq= ambient
+agent queue. The TX side has six transports that fan out from filesystem.
+The RX side barely exists -- only =read_active()= which polls the directory
+synchronously. This spec defines a reactive watcher that detects new
+broadcast files and delivers them to callbacks, webhooks, or both.
+
+The central insight: *if =~/.aq/= sits on a shared or synced filesystem
+(NFS, SMB, KBFS, syncthing, WebDAV), writes from remote agents appear as
+new local files.* The filesystem itself is the transport. No protocol
+needed. Just a file watcher.
+
+Implementation: =src/aq/filewatcher.py=.
+
+* Architecture
+
+** Data flow
+
+#+begin_example
+Remote agent                         Local machine
+  |                                      |
+  v                                      |
+announce() --> write JSON                |
+  |                                      |
+  v                                      |
+~/.aq/channels/broadcast/requests/       |
+  |                                      |
+  +-- [syncthing/NFS/KBFS sync] -------> ~/.aq/channels/broadcast/requests/
+                                          |
+                                     kqueue/inotify/poll detects new file
+                                          |
+                                          v
+                                     validate JSON
+                                          |
+                                          v
+                                     dedup by broadcast.id
+                                          |
+                                     +----+----+
+                                     |         |
+                                     v         v
+                                  callback   webhook POST
+                                     |         |
+                                     v         v
+                                  (in-proc)  Claude Code channel endpoint
+                                     |         |
+                                     +----+----+
+                                          |
+                                          v
+                                     rx-journal.jsonl (audit)
+                                          |
+                                          v
+                                     update checkpoint
+#+end_example
+
+** Sequence diagram
+
+#+begin_example
+    Remote Agent        Sync Layer           File Watcher         Webhook/Callback
+         |                  |                     |                      |
+         |  write JSON      |                     |                      |
+         |----------------->|                     |                      |
+         |                  |  sync to local disk |                      |
+         |                  |-------------------->|                      |
+         |                  |                     | detect new file      |
+         |                  |                     |---+                  |
+         |                  |                     |   | validate JSON    |
+         |                  |                     |<--+                  |
+         |                  |                     |---+                  |
+         |                  |                     |   | dedup check      |
+         |                  |                     |<--+                  |
+         |                  |                     |                      |
+         |                  |                     |  POST broadcast      |
+         |                  |                     |--------------------->|
+         |                  |                     |                      |
+         |                  |                     |  202 accepted        |
+         |                  |                     |<---------------------|
+         |                  |                     |                      |
+         |                  |                     |---+                  |
+         |                  |                     |   | journal + ckpt   |
+         |                  |                     |<--+                  |
+#+end_example
+
+** Component diagram
+
+#+begin_example
+~/.aq/
+  channels/
+    broadcast/
+      requests/              <--- watched directory
+        aq-00000176...-xxx.json   <--- detected by watcher
+      archive/               <--- expired files moved here by read_active()
+  state/
+    rx-checkpoint-broadcast.json  <--- last-processed watermark + seen IDs
+    rx-journal.jsonl              <--- append-only audit log of all RX events
+#+end_example
+
+* Watcher Backends
+
+Three backends, selected automatically by platform:
+
+| Backend  | Platform        | Mechanism            | Latency      | Polling |
+|----------+-----------------+----------------------+--------------+---------|
+| kqueue   | macOS, FreeBSD  | Kernel event queue   | ~50ms        | No      |
+| inotify  | Linux           | Kernel notification  | ~50ms        | No      |
+| polling  | All platforms   | =os.scandir= on timer | configurable | Yes     |
+
+** kqueue (macOS / FreeBSD)
+
+Preferred backend. Uses =select.kqueue()= from the stdlib. Watches the
+directory file descriptor for =KQ_NOTE_WRITE= events. When the directory
+inode is modified (file created, renamed into), the watcher diffs the
+current listing against the known set to find new files.
+
+Advantages:
+- No polling. Zero CPU when idle.
+- Built into macOS and FreeBSD kernels. No dependencies.
+- Works on ZFS, HFS+, APFS, NFS (with caveats).
+
+Caveats:
+- NFS: kqueue watches the /local cache/, not the remote server. If the
+  NFS client caches directory listings (=actimeo=), new files may not
+  trigger an event until the cache expires. For NFS mounts, consider
+  setting =actimeo=1= or falling back to polling.
+
+** inotify (Linux)
+
+Uses =inotify_simple= (pip package) for clean API over =inotify(7)=.
+Watches for =IN_CREATE=, =IN_MOVED_TO=, and =IN_CLOSE_WRITE= events.
+
+The distinction matters: =IN_CREATE= fires when a file appears but the
+write may not be complete. We wait for =IN_CLOSE_WRITE= before reading.
+=IN_MOVED_TO= handles atomic rename patterns (=write to tmp, rename=).
+
+If =inotify_simple= is not installed, falls back to polling automatically.
+
+Caveats:
+- inotify does not work on NFS, CIFS, or FUSE filesystems. The kernel
+  only generates events for local filesystem operations. For network
+  mounts on Linux, polling is required.
+- inotify watch limits (=/proc/sys/fs/inotify/max_user_watches=) can be
+  exhausted on systems with many watchers. Each channel consumes one watch.
+
+** polling (fallback)
+
+=os.scandir()= on an interval. Default 2 seconds, configurable via
+=AQ_RX_POLL_SEC= environment variable.
+
+Detects new files by comparing the current directory listing against a
+known set. This is the only backend that works reliably on /all/
+filesystem types, including NFS, SMB, FUSE, and syncthing.
+
+The tradeoff: latency. A 2-second poll interval means up to 2 seconds
+before a new file is detected. For presence gossip with TTL > 60s, this
+is acceptable. For interactive use (Claude Code channel), set
+=AQ_RX_POLL_SEC=0.5=.
+
+* The NFS/SMB/syncthing Use Case
+
+This is the use case that motivates the entire module.
+
+** Topology
+
+#+begin_example
+Machine A (nexus.lan)             Machine B (mini.local)
+  ~/.aq/  <--- NFS export           ~/.aq/  <--- NFS mount of A
+  |                                   |
+  v                                   v
+  aq announce --> write JSON          file watcher detects new file
+  |                                   |
+  v                                   v
+  channels/broadcast/requests/        channels/broadcast/requests/
+    aq-...-abc.json                     aq-...-abc.json (via NFS)
+                                        |
+                                        v
+                                      callback / webhook
+#+end_example
+
+** Why this works
+
+When Machine A writes a broadcast JSON file to =~/.aq/channels/broadcast/requests/=,
+and Machine B mounts that directory via NFS/SMB/syncthing:
+
+1. The file appears on Machine B's filesystem as if written locally.
+2. Machine B's file watcher detects the new file.
+3. Machine B parses, deduplicates, and delivers the broadcast.
+
+No transport protocol was needed. No broker. No service discovery. The
+filesystem mount /is/ the transport. The file watcher /is/ the subscriber.
+
+This is the Plan 9 insight from =transport-mounts.org=, made concrete:
+"every write goes to disk first. Other transports sync from disk."
+Here, the sync layer is NFS/SMB/syncthing/KBFS itself.
+
+** Sync layer options
+
+| Sync Layer  | Direction        | Latency     | Setup               |
+|-------------+------------------+-------------+---------------------|
+| NFS         | Bidirectional    | ~100ms      | =mount -t nfs=      |
+| SMB/CIFS    | Bidirectional    | ~200ms      | =mount -t cifs=     |
+| syncthing   | Bidirectional    | 1-30s       | syncthing daemon    |
+| KBFS        | Bidirectional    | 1-10s       | Keybase daemon      |
+| WebDAV      | Bidirectional    | ~500ms      | =mount -t davfs=    |
+| SSHFS       | Bidirectional    | ~100ms      | =sshfs user@host:=  |
+| rsync (cron)| Unidirectional   | cron period | =rsync -a= in cron  |
+
+Any sync layer that makes remote writes appear as local files works.
+The file watcher does not care /how/ the file got there.
+
+** Watcher backend selection for network filesystems
+
+| Sync Layer | kqueue (macOS) | inotify (Linux) | polling |
+|------------+----------------+-----------------+---------|
+| NFS        | Partial*       | No              | Yes     |
+| SMB/CIFS   | Partial*       | No              | Yes     |
+| syncthing  | Yes            | Yes             | Yes     |
+| KBFS       | Yes            | Yes**           | Yes     |
+| WebDAV     | Partial*       | No              | Yes     |
+| SSHFS      | No             | No              | Yes     |
+
+=*= kqueue works if the NFS client invalidates its cache, which depends
+on mount options (=actimeo=, =noac=). Not reliable for low-latency detection.
+
+=**= KBFS uses FUSE on Linux. Whether inotify works depends on the FUSE
+implementation. Keybase's FUSE does generate inotify events.
+
+Recommendation: for network mounts, use polling. Set =AQ_RX_POLL_SEC=1=
+for reasonable latency. Reserve kqueue/inotify for local filesystems
+and syncthing (which writes locally and syncs in the background).
+
+* Checkpoint / Resume Semantics
+
+** The problem
+
+The watcher process may die (crash, restart, OOM). While it is down, new
+broadcast files accumulate in the requests directory. On restart, the
+watcher must process these backlog files without re-processing files it
+already handled.
+
+** The solution: mtime watermark + seen-ID set
+
+State is persisted in =~/.aq/state/rx-checkpoint-{channel}.json=:
+
+#+begin_src json
+{
+  "last_mtime": 1743120000.123,
+  "seen_ids": ["01abc...", "01def...", "..."],
+  "updated_at": 1743120005.0
+}
+#+end_src
+
+On restart:
+
+1. Load the checkpoint.
+2. Scan the requests directory for files with =mtime > last_mtime=.
+3. For each such file, parse and check =broadcast.id= against =seen_ids=.
+4. Process any file that passes both checks.
+5. Resume normal watching.
+
+** Edge cases
+
+| Scenario                          | Behavior                                           |
+|-----------------------------------+----------------------------------------------------|
+| First run (no checkpoint)         | =last_mtime = 0=, process all non-expired files    |
+| Corrupt checkpoint                | Reset to epoch, log warning, process all            |
+| Clock skew (NFS server vs local)  | =seen_ids= set prevents reprocessing even if mtime is wrong |
+| =seen_ids= grows unbounded        | Truncated to most recent 10000 IDs on checkpoint save |
+| Two watchers on same directory    | =seen_ids= prevents double-processing; only one journal entry |
+
+** Atomicity of checkpoint writes
+
+The checkpoint is written atomically via rename:
+
+#+begin_src python
+tmp_path.write_text(payload)
+tmp_path.rename(checkpoint_path)
+#+end_src
+
+This prevents partial reads of the checkpoint file after a crash during write.
+
+* Deduplication
+
+** Why dedup is necessary
+
+The same broadcast can arrive via multiple paths:
+
+1. Local =announce()= writes the file directly.
+2. NFS/syncthing sync from a remote machine writes the same file.
+3. Two sync layers (e.g., KBFS + syncthing) both deliver the file.
+4. The watcher restarts and re-scans backlog.
+
+All of these must result in exactly one delivery to the callback/webhook.
+
+** Dedup mechanism
+
+Dedup is by =broadcast.id= (ULID). The ULID is generated at creation
+time and is globally unique. The =seen_ids= set in the checkpoint
+tracks all IDs the watcher has processed.
+
+The flow:
+
+1. Parse the file as a Broadcast.
+2. Check =broadcast.id in seen_ids=.
+3. If seen: skip, increment dedup counter.
+4. If new: process, add to =seen_ids=, save checkpoint.
+
+** TTL interaction
+
+Expired broadcasts are detected and skipped during both backlog scan and
+live watching. An expired broadcast is added to =seen_ids= (to prevent
+re-processing if the file lingers) but is not delivered to callbacks
+or webhooks.
+
+* How This Replaces Per-Transport RX
+
+** The current problem
+
+Each transport in =aq= is TX-only:
+
+| Transport | TX (publish)          | RX (subscribe)   |
+|-----------+-----------------------+-------------------|
+| filesystem | =announce()=         | =read_active()= (polling) |
+| mqtt      | =mqtt_publish()=      | (none)            |
+| mesh      | =mesh_broadcast()=    | (none)            |
+| kbfs      | =kbfs_publish()=      | (none)            |
+| ghissue   | =ghissue_publish()=   | (none)            |
+| mdns      | =mdns_publish()=      | =MdnsReceiver= (HTTP POST) |
+
+To receive broadcasts from remote agents, you would need to implement
+=subscribe()= for each transport: =mosquitto_sub= for MQTT, =am mon=
+for mesh, Keybase watch for KBFS, etc. Six implementations of "wait
+for incoming data and do something with it."
+
+** The file-watcher alternative
+
+If every transport syncs TO disk (which is what =transport-mounts.org=
+specifies), then you only need one RX implementation: the file watcher.
+
+#+begin_example
+                       TX (current)                    RX (new)
+                       ============                    ========
+announce() --> disk                                    disk --> file watcher
+                |                                       ^
+                +-- mqtt sync --> broker                |
+                |                   |                   |
+                |                   +-- mqtt sub -------+--- write to disk
+                |                                       |
+                +-- mesh sync --> radio                 |
+                |                   |                   |
+                |                   +-- am mon ---------+--- write to disk
+                |                                       |
+                +-- kbfs sync --> keybase               |
+                                    |                   |
+                                    +-- kbfs fuse ------+--- write to disk
+#+end_example
+
+Each transport's RX path writes to =~/.aq/channels/= (or a mount that
+syncs to it). The file watcher detects the write and delivers it.
+
+This means:
+- *One* watcher implementation handles all transports.
+- Adding a transport requires only TX (=publish()=) + sync-to-disk.
+- The watcher does not know or care which transport delivered the file.
+- Dedup, validation, checkpoint, and journaling are implemented once.
+
+** Relation to =transport-mounts.org=
+
+=transport-mounts.org= specifies that each mount syncs TO disk and
+optionally FROM disk. The "FROM disk" direction is the file watcher.
+
+The mount table declares:
+- Which transports are enabled.
+- Which channels they sync.
+- Backend-specific options.
+
+The file watcher watches the result of those syncs. It does not need
+the mount table -- it watches =~/.aq/channels/*/requests/= regardless
+of how files arrive there.
+
+This is the Plan 9 completion: =announce()= writes to disk. Mounts
+propagate disk to remote backends (TX). Remote backends propagate to
+disk via their sync layers. The file watcher reads from disk (RX).
+
+The filesystem is both the write-ahead log (TX) and the materialized
+view (RX). Disk is the bus.
+
+* Security: Validating Broadcast Files
+
+** Threat model
+
+The =~/.aq/channels/*/requests/= directory is a trust boundary. Files
+that appear there are treated as broadcast payloads. If an attacker can
+write to this directory (via a shared filesystem, compromised sync, or
+local privilege), they can inject:
+
+1. Malformed JSON (DoS via parse errors)
+2. Valid JSON that is not a Broadcast (field injection)
+3. Valid Broadcast with spoofed agent identity
+4. Oversized files (memory exhaustion)
+5. Symlinks to sensitive files (read via parse path)
+
+** Mitigations
+
+| Threat                    | Mitigation                                      |
+|---------------------------+-------------------------------------------------|
+| Malformed JSON            | =json.loads()= in try/except, skip on error     |
+| Not a Broadcast           | Require all mandatory fields, reject unknown fields |
+| Spoofed agent identity    | (Out of scope for file watcher -- requires signing) |
+| Oversized files           | Reject files > 64KB before reading              |
+| Symlinks                  | =file_path.stat()= resolves symlinks; size check applies to target |
+| Partial writes            | Short settle delay; retry on parse error is NOT done (log and skip) |
+| Rapid file creation (DoS) | Bounded =seen_ids= set; journal is append-only  |
+
+** Field validation
+
+The file watcher validates strictly:
+
+1. File size < 64KB.
+2. Content is valid UTF-8 JSON.
+3. Top-level value is a JSON object.
+4. All required Broadcast fields are present: =agent=, =worktree=,
+   =conjecture_id=, =conjecture_claim=, =phase=, =status=, =files=.
+5. No unknown fields (only the 10 Broadcast fields are allowed).
+6. =files= is a list, =agent= is a string.
+7. =Broadcast.from_json()= succeeds (dataclass construction).
+8. =broadcast.id= is non-empty.
+
+Files that fail any check are logged at debug level and skipped. The
+watcher never crashes on a bad file.
+
+** What validation does NOT cover
+
+- *Agent identity verification.* The =agent= field is self-reported. A
+  malicious file can claim to be any agent. Verifying identity requires
+  cryptographic signing (out of scope for the file watcher, but a natural
+  extension: sign the broadcast JSON with the agent's key, verify on RX).
+
+- *Replay attacks.* An old broadcast file can be re-placed in the
+  directory. Dedup by ID prevents re-delivery, but a new ID with old
+  content would be delivered. TTL expiration mitigates this for stale
+  replays.
+
+- *Directory permissions.* The watcher trusts that the requests directory
+  is writable only by authorized agents. On shared filesystems, this
+  depends on the mount's permission model (NFS uid mapping, KBFS team
+  membership, syncthing folder sharing).
+
+* Configuration
+
+** Environment variables
+
+| Variable          | Default        | Description                             |
+|-------------------+----------------+-----------------------------------------|
+| =AQ_HOME=        | =~/.aq=        | Root directory for aq state             |
+| =AQ_RX_WEBHOOK=  | (none)         | Default webhook URL for all watchers    |
+| =AQ_RX_POLL_SEC= | =2=            | Polling interval (fallback watcher)     |
+| =AQ_RX_CHANNELS= | =broadcast=    | Comma-separated channels (daemon mode)  |
+
+** CLI usage
+
+#+begin_src bash
+# Watch broadcast channel, print to stdout
+python -m aq.filewatcher
+
+# Watch and POST to webhook
+python -m aq.filewatcher --webhook http://localhost:8080/aq/rx
+
+# Daemon mode, multiple channels
+python -m aq.filewatcher --daemon --channels broadcast,private --webhook http://localhost:8080/aq/rx
+
+# Verbose logging, custom poll interval
+python -m aq.filewatcher -v --poll-interval 0.5
+
+# Watch a specific channel
+python -m aq.filewatcher --channel my-team
+#+end_src
+
+** Programmatic API
+
+#+begin_src python
+from aq.filewatcher import watch, watch_and_post, watch_daemon
+
+# In-process, blocking
+def on_broadcast(broadcast, source_path):
+    print(f"received: {broadcast.conjecture_id} from {broadcast.agent}")
+
+watch("broadcast", callback=on_broadcast)
+
+# Webhook delivery, blocking
+watch_and_post("broadcast", "http://localhost:8080/aq/rx")
+
+# Daemon mode, multiple channels
+watch_daemon(
+    channels=["broadcast", "private"],
+    webhook_url="http://localhost:8080/aq/rx",
+    callback=on_broadcast,
+)
+#+end_src
+
+* Integration with Claude Code
+
+The webhook delivery mode enables integration with Claude Code's
+channel system. A Claude Code instance runs the file watcher with a
+webhook URL pointing to its local HTTP server. New broadcasts appear
+as channel events.
+
+#+begin_example
+                    aq agent                 file watcher          Claude Code
+                       |                         |                     |
+                       | announce()              |                     |
+                       |---> write JSON          |                     |
+                       |     to disk             |                     |
+                       |                         |                     |
+                       |                    detect new file            |
+                       |                         |                     |
+                       |                    POST /aq/rx                |
+                       |                         |-------------------->|
+                       |                         |                     |
+                       |                         |     202 accepted    |
+                       |                         |<--------------------|
+                       |                         |                     |
+                       |                         |              display in channel
+                       |                         |                     |
+#+end_example
+
+The webhook POST body is the broadcast JSON, identical to what
+=broadcast.to_json()= produces. Custom headers:
+
+| Header               | Value                            |
+|----------------------+----------------------------------|
+| =Content-Type=       | =application/json=               |
+| =User-Agent=         | =aq-filewatcher/0.1=             |
+| =X-AQ-Source-File=   | Filename (not full path)         |
+| =X-AQ-Broadcast-ID=  | Broadcast ULID                   |
+
+* Edge Cases
+
+** File appears partially written
+
+On local filesystems, =announce()= uses =path.write_text()= which is
+a single =write(2)= call for small payloads. This is atomic on most
+local filesystems (guaranteed by POSIX for writes < =PIPE_BUF=).
+
+On NFS, atomicity is not guaranteed. A file may be visible before the
+write completes. The file watcher handles this:
+
+1. A short settle delay (50ms) after file detection.
+2. If =json.loads()= fails, the file is logged and skipped.
+3. No retry -- if the write completes later, a new kqueue/inotify event
+   will fire (on local FS) or the next poll will re-check (polling mode).
+   But the file name is already in the known set, so it won't be
+   re-processed. This is acceptable -- the TX side should use
+   atomic rename for network filesystems.
+
+Recommendation for NFS writers: write to a =.tmp= file, then rename.
+The file watcher only processes =*.json= files, so the =.tmp= file
+is ignored during the write phase.
+
+** File disappears before read
+
+The =read_active()= function in =protocol.py= moves expired files to
+=archive/=. If the watcher detects a file and =read_active()= archives
+it before the watcher reads it, =FileNotFoundError= is caught and the
+file is silently skipped.
+
+This is correct behavior. The file was processed by the system (archived),
+even if the watcher did not deliver it. If the watcher /should/ have
+delivered it, the checkpoint prevents re-delivery even if the file is
+later restored from the archive.
+
+** Same file arrives via two mounts
+
+Example: Machine A writes a broadcast. NFS and syncthing both propagate
+it to Machine B. The file arrives twice with the same name and same
+=broadcast.id=.
+
+- The file watcher uses the file /name/ for new-file detection (set of
+  known filenames). The second arrival of the same filename is not
+  "new" and is ignored.
+- Even if the filenames differ (different sync layers use different
+  naming), dedup by =broadcast.id= prevents double delivery.
+
+** Watcher process dies and restarts
+
+On restart:
+
+1. Load checkpoint (=last_mtime=, =seen_ids=).
+2. Scan for files with =mtime > last_mtime=.
+3. Dedup each against =seen_ids=.
+4. Process any genuinely new files.
+5. Resume watching.
+
+Gap: if the watcher was down for longer than the TTL and files were
+archived during that time, those broadcasts are lost to the watcher.
+This is acceptable for a gossip protocol where missed messages are
+tolerated by design (TTL semantics from =spec.org=).
+
+** Rapid writes (burst of N files)
+
+The kqueue backend receives one =KQ_NOTE_WRITE= event per directory
+modification. If N files are written simultaneously, only one event
+fires. The watcher responds by diffing the entire directory, catching
+all N new files in one pass. This is correct and efficient.
+
+The polling backend catches all N files on the next poll cycle.
+
+* Future Work
+
+** Signing and verification
+
+Add =broadcast.signature= field containing an Ed25519 signature over
+the broadcast JSON (excluding the signature field itself). The file
+watcher verifies the signature against a known-agents keyring before
+delivery. This closes the "spoofed agent identity" hole.
+
+** Bidirectional transport sync
+
+The file watcher is the RX half. The TX half (transport mounts syncing
+FROM disk to remote backends) is specified in =transport-mounts.org=
+Phase 3. Together, they complete the Plan 9 model: disk is the bus,
+mounts are the bridges, the watcher is the subscriber.
+
+** Webhook batching
+
+For high-throughput channels, batch N broadcasts into a single webhook
+POST rather than one POST per broadcast. This reduces HTTP overhead.
+
+** systemd / launchd integration
+
+Package the daemon mode as a systemd unit (Linux) or launchd plist
+(macOS) for automatic startup. The checkpoint/resume design already
+supports this -- the watcher recovers cleanly after any restart.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
