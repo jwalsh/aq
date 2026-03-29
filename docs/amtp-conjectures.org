@@ -1,0 +1,191 @@
+#+TITLE: AMTP Protocol Conjectures — Invariants from 128 Ticks
+#+AUTHOR: CORE@e196
+#+DATE: 2026-03-29
+
+* Overview
+
+These conjectures are derived from observing the AMTP collaboration
+loop across 128+ ticks (17:04–19:36 EST, 2026-03-28). Each is a
+falsifiable claim about protocol behavior. If violated, the protocol
+has a bug.
+
+* C1. Serial Exclusion
+
+*Conjecture*: At most one process may hold =/dev/cu.usbmodem*= at
+any instant. Violations cause EBUSY (errno 35) and message loss.
+
+*Evidence*: Observed 3 times (PIDs 6156, 12158, ping loop). Each
+required manual =kill= before the port became usable.
+
+*Guardrail*: All serial access MUST go through =serial_lock()= or
+the broker. Raw =subprocess.run(["meshtastic", ...])= outside the
+lock is a protocol violation.
+
+*Test*: Two concurrent =am send= should not both succeed via serial.
+One must block or fail fast.
+
+* C2. Seq Monotonicity
+
+*Conjecture*: For a given agent callsign, seq numbers are strictly
+monotonically increasing. No gaps, no duplicates.
+
+*Evidence*: We observed seq jumps (e.g., 65→68, 72→74) caused by
+the seq counter being incremented in shell (=echo $((... + 1))=)
+independently of the Python CLI (=_next_seq()=). Two writers, one
+file.
+
+*Guardrail*: The seq counter MUST have a single writer. Either:
+(a) all sends go through =am= CLI which owns =_next_seq()=, or
+(b) the broker owns the counter and clients request seq from it.
+
+*Test*: After N sends, =amtp-seq.txt= must contain exactly N (plus
+the starting value). Any gap indicates a race.
+
+* C3. Channel Index Safety
+
+*Conjecture*: No AMTP message is ever sent on channel index 0
+(public LongFast primary). All sends target index 1 (amigosmalla).
+
+*Evidence*: =beacon.py= shipped with =CHANNEL_INDEX = 0=, which
+would have broadcast device status to every node in Boston. Fixed
+in first session.
+
+*Guardrail*: =config.py= already exits if =ch_index == 0=. The
+broker defaults to =ch_index=1=. The CLI refuses index 0.
+
+*Test*: =am verify= checks that the device has =amigosmalla= on
+index 1 and that config refuses index 0.
+
+* C4. Fanout Order
+
+*Conjecture*: Messages are fanned out in strict priority order:
+am (LoRa) → git → GH Issues → KBFS → local MQTT.
+
+If the highest-priority transport fails, the message MUST still
+be sent via the next available transport. A message that only
+reaches git but not LoRa is degraded but acceptable. A message
+that reaches LoRa but not git is normal (LoRa is primary).
+
+*Evidence*: During MQTT broker outage, sends fell through to
+serial-only. When serial was locked, no fallback existed (fixed
+by adding KBFS fanout).
+
+*Guardrail*: =cmd_send()= tries serial, then KBFS. Should also
+try local MQTT as tertiary.
+
+*Test*: Kill the serial port and verify the message appears in
+KBFS within 5 seconds.
+
+* C5. Message Parsability
+
+*Conjecture*: Every AMTP message, when displayed on a Meshtastic
+phone app, is human-readable. No binary framing in v0.1.
+
+The format =@AGENT|TYPE|SEQ|PAYLOAD= must be parsable by regex:
+=^@([A-Z]{2,8})\|([A-Z]{2,4})\|(\d+)\|(.*)$=
+
+*Evidence*: All 132 messages from CORE were readable on MAVK's
+phone.
+
+*Guardrail*: =Message.encode()= raises =ValueError= if the
+encoded message exceeds 200 bytes or contains non-UTF-8.
+
+*Test*: Parse every message in the CASO log (AGENTS.md, seq 1–27)
+and every CORE message (seq 1–132) through =Message.parse()=.
+
+* C6. Idempotent Operations
+
+*Conjecture*: Receiving the same AMTP message twice has no
+adverse effect. Duplicate VOTEs don't flip decisions. Duplicate
+SYNCs don't corrupt state. Duplicate PINGs are noise.
+
+*Evidence*: LoRa can deliver the same packet multiple times via
+mesh rebroadcast. We never observed corruption from this.
+
+*Guardrail*: Receivers should track =seen_seq= per agent and
+silently drop duplicates.
+
+*Test*: Send the same VOTE twice. Verify the decision log shows
+one vote, not two.
+
+* C7. Graceful Degradation
+
+*Conjecture*: The loss of any single transport does not halt
+collaboration. Specifically:
+- LoRa down → git + GH still work
+- git down → LoRa + KBFS still work
+- GH down → LoRa + git still work
+- All network down → LoRa still works (mesh-only)
+
+*Evidence*: MQTT broker was unreachable for the entire session.
+Collaboration continued via serial + git + GH.
+
+*Guardrail*: No transport failure should raise an exception that
+blocks the send path. All failures are logged and degraded.
+
+*Test*: Disable each transport in sequence. Verify messages still
+flow through the remaining transports.
+
+* C8. Clock Independence
+
+*Conjecture*: AMTP does not depend on synchronized clocks. All
+ordering is by (agent, seq) pairs. Wall-clock timestamps in PING
+are informational only.
+
+*Evidence*: No message uses timestamps for ordering or dedup.
+Seq numbers provide total order per agent.
+
+*Guardrail*: Never compare timestamps across agents. Use seq for
+ordering, agent identity for attribution.
+
+*Test*: Set one agent's clock 1 hour ahead. Verify protocol
+still converges (votes count, SYNCs reconcile).
+
+* C9. Proposal Convergence
+
+*Conjecture*: For a 2-agent network, every proposal converges to
+ADOPTED or REJECTED within 2*RTT (where RTT is the round-trip
+time of the slowest active transport).
+
+With LoRa RTT ~30s: convergence within ~60s.
+With git RTT ~5s: convergence within ~10s.
+
+*Evidence*: Proposals 2–5, 9 were voted within one tick after
+CORE came online. Proposals 12–49 were voted in bulk.
+
+*Guardrail*: A proposal older than 24h with no vote should
+trigger a re-PROP or a SYNC requesting the missing vote.
+
+*Test*: Send a PROP and measure time to ADOPTED status.
+
+* C10. Log Completeness
+
+*Conjecture*: The JSONL log (=amtp-log.jsonl=) MUST capture every
+AMTP message sent or received by this agent. If a message was sent
+via raw =meshtastic= CLI (bypassing =am=), it is invisible to the
+protocol and constitutes a *shadow message*.
+
+*Evidence*: 128 ticks of PINGs were sent via raw =meshtastic= CLI,
+bypassing the JSONL logger. The log file doesn't even exist. This
+is a protocol violation of our own making.
+
+*Guardrail*: All sends MUST go through =_amtp_send()= which calls
+=_log_amtp()=. Raw =meshtastic= sends are forbidden after bootstrap.
+
+*Test*: After a session, =wc -l amtp-log.jsonl= should equal the
+value in =amtp-seq.txt=.
+
+* Summary
+
+| ID  | Conjecture             | Status       | Violations |
+|-----+------------------------+--------------+------------|
+| C1  | Serial exclusion       | HARDENED     |          3 |
+| C2  | Seq monotonicity       | VIOLATED     |          2 |
+| C3  | Channel index safety   | HARDENED     |          1 |
+| C4  | Fanout order           | PARTIAL      |          1 |
+| C5  | Message parsability    | HOLDING      |          0 |
+| C6  | Idempotent operations  | UNTESTED     |          0 |
+| C7  | Graceful degradation   | HOLDING      |          0 |
+| C8  | Clock independence     | HOLDING      |          0 |
+| C9  | Proposal convergence   | HOLDING      |          0 |
+| C10 | Log completeness       | VIOLATED     |        128 |
