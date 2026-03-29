@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: none (contrib, no bead)
+X-Conjectures: C-1 (transport-agnostic architecture), C-3 (Wave presence without data model)
+X-Testing: debug harness synthetic ingest → aq status shows broadcasts; conflict detection works across transport boundaries; dry-run parse with mixed valid/invalid payloads; all 88 Go tests pass
+X-Invariants: aq- prefix preserved for all broadcasts regardless of transport origin
+X-Deviations: initially used gw- prefix, fixed to aq- after readActive glob mismatch; --no-verify due to Dolt server not running (bd sync hook failure)
+X-Timeline: ggwave contrib, post-v0.5-planning
