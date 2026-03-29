@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "ggwave",
+#     "sounddevice",
+#     "numpy",
+# ]
+# ///
 """aq-ggwave RX adapter — decode audio broadcasts, ingest to filesystem.
 
 Listens on the system microphone for ggwave-encoded AMTP compact payloads.
