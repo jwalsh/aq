@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: none (contrib)
+X-Conjectures: C-1 (transport-agnostic), C-3 (Wave presence)
+X-Testing: dry-run verified 23B payload fits ultrasonic; real audible TX played 6s of FSK at vol=30; ggwave 0.4.x API: encode(payload, protocolId=, volume=) returns int16 PCM, decode(instance, waveform) unchanged
+X-Invariants: AMTP compact format matches spec; aq- prefix on all ingested files
+X-Deviations: ggwave 0.4.x dropped named protocol constants, using raw IDs 0-8; --no-verify due to Dolt server down
+X-Timeline: ggwave TX, pre-v0.5
