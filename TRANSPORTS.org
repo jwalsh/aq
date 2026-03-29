@@ -1,0 +1,403 @@
+#+TITLE: aq Transport Options
+#+SUBTITLE: Appendix A — Alternatives Considered for the L1.5 Presence Layer
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-13
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:nil
+
+* Purpose
+
+This document is context for agents implementing or extending the =aq=
+transport layer. It catalogs every transport option evaluated, with
+verdicts calibrated against L1.5 requirements.
+
+=spec.org= is the source of truth. This document explains *why* the
+filesystem backend was chosen and what the upgrade path looks like.
+
+* L1.5 Requirements (what aq actually needs)
+
+=aq= sits at Layer 1.5 of the Seven Concerns stack — between =bd= (L1,
+authoritative work state) and =JITIR= (L2, indexed memory). Its job is
+*ambient presence gossip*: agents broadcast what they are working on
+so peers can detect semantic conflicts before hitting the merge wall.
+
+The requirements that determine transport fitness:
+
+| Requirement     | Rationale                                              |
+|-----------------+--------------------------------------------------------|
+| Lossy-ok        | Missed presence update ≠ catastrophe; TTL handles it   |
+| Multicast       | All agents must see all broadcasts, not just one       |
+| Zero orchestrator | No central coordinator; conflict signal emerges from stream |
+| TTL semantics   | Stale entries must expire without manual cleanup       |
+| Zero/low deps   | Must work in a fresh FreeBSD jail or macOS             |
+| Cross-platform  | nexus (FreeBSD/ZFS) + mini (macOS M4) + worktrees      |
+| Latency < 500ms | Pre-push conflict detection; not real-time but not mail |
+
+The "funny name" connection: this is the agentic gossip layer.
+arXiv 2508.01531 and 2512.03285 (Dec 2025) formally propose GEACL
+(Gossip-Enhanced Agentic Coordination Layer) as exactly this substrate.
+=aq= is a concrete implementation of that research agenda.
+=ag= was taken by a Ruby gem (Silver Surfer). =aq= it is.
+
+* Transport Scoring
+
+Scores are 0–100 against L1.5 requirements. Higher = better fit.
+
+| Transport         | L1.5 fit | Latency | Zero-deps | Multicast | Persist | Tier     |
+|-------------------+----------+---------+-----------+-----------+---------+----------|
+| Filesystem (~/.aq/) |       95 |      75 |       100 |        80 |      90 | canonical |
+| NATS              |       88 |      99 |        70 |        99 |      60 | light broker |
+| MQTT (Mosquitto)  |       65 |      80 |        55 |        95 |      70 | IoT pub/sub |
+| IRC (miniircd)    |       55 |      70 |        50 |        95 |      30 | text protocol |
+| Wave (wave-server)|       70 |      60 |        35 |        85 |      90 | federated collab |
+| Named FIFO        |       40 |      95 |       100 |        20 |      20 | unix primitive |
+| /tmp/ shared file |       35 |      85 |       100 |        70 |      40 | unix primitive |
+| BBS (Synchronet)  |       45 |      20 |        30 |        75 |      95 | retro/store-fwd |
+| Email (SMTP/IMAP) |       15 |       5 |        40 |        60 |      99 | async delivery |
+| AWS SNS/SQS       |       30 |      65 |        20 |        90 |      85 | cloud infra |
+| ggwave (audio)    |       10 |      30 |        40 |        30 |       5 | out-of-band |
+| Carrier pigeons   |        2 |       1 |        50 |        10 |      80 | avian IP |
+
+* Transport Details
+
+** Filesystem (~/.aq/) — CANONICAL
+:PROPERTIES:
+:FIT: 95
+:STATUS: current default
+:TAGS: zero-deps freebsd macos linux
+:END:
+
+Write JSON to a directory. Debuggable with =ls= and =cat=.
+
+- *Install*: none
+- *Protocol*: inode watch (fswatch/inotify/kqueue) or poll 100ms
+- *Fanout*: all readers of the dir
+- *Persistence*: until TTL prune
+- *Failure mode*: stale files if agent crashes (TTL handles it)
+- *FreeBSD*: yes — kqueue equivalent
+- *macOS*: yes — FSEvents / fswatch
+
+Verdict: The ADR-001 winner. Failure mode is =cat=. Survives restarts.
+Works in any Bastille jail with a mounted path. Cannot do cross-machine
+without NFS/SSHFS — fine for local presence. The only thing to add:
+=inotifywait= (Linux) or =fswatch= (macOS) wrapper to avoid polling.
+
+** NATS — LIGHT BROKER
+:PROPERTIES:
+:FIT: 88
+:STATUS: upgrade path when cross-machine matters
+:TAGS: broker pub/sub go-binary fast
+:END:
+
+Single 20MB binary. Telnet-able protocol. Sub-millisecond.
+
+- *Install*: =brew install nats-server= / =pkg install nats-server=
+- *Protocol*: NATS wire (text, port 4222)
+- *Fanout*: true pub/sub, wildcards: =agents.>=
+- *Topic shape*: =agents.{repo}.{branch}.presence=
+- *Persistence*: JetStream addon (not needed for presence)
+- *Failure*: daemon dies = no messages (aq degrades to filesystem)
+- *FreeBSD*: yes — single static binary
+- *macOS*: yes
+
+Verdict: Best "real" option for sub-10ms or nexus↔mini coordination.
+A daemon is the only cost. Right upgrade path from filesystem when
+multi-machine presence matters.
+
+** MQTT / Mosquitto — IOT PUB/SUB
+:PROPERTIES:
+:FIT: 65
+:STATUS: viable; deployed on nexus.lan (mosquitto)
+:TAGS: broker pub/sub qos iot retain
+:END:
+
+Designed for lossy networks. QoS 0 = fire and forget (perfect for presence).
+
+- *Install*: =pkg install mosquitto= / =brew install mosquitto=
+- *Protocol*: MQTT 3.1.1/5.0, port 1883 (TLS: 8883)
+- *Topic shape*: =agents/{repo}/{branch}/presence=
+- *Fanout*: true pub/sub with wildcards
+- *Retain flag*: last known state of each agent persists for new subscribers
+- *FreeBSD*: mosquitto in ports
+- *macOS*: brew
+
+Verdict: QoS 0 maps perfectly to presence semantics — lossy-ok.
+The =retain= flag is useful: new subscribers immediately see current
+state without waiting for next broadcast. Daemon required but
+smaller footprint than NATS.
+
+** Meshtastic/LoRa (via MQTT bridge) — PROXIMITY-SCOPED GOSSIP
+:PROPERTIES:
+:FIT: 55
+:STATUS: deployed; Godot + hydra as MQTT gateways
+:TAGS: radio lora mesh proximity physics gossip
+:END:
+
+LoRa radio (906.875 MHz, AES-256-CTR) bridged to MQTT via WiFi-capable
+nodes (Heltec V3 "hydra", Heltec V4 "Godot"). Encrypted payloads
+transit MQTT; the radio provides physical-proximity scoping.
+
+- *Path*: =aq announce --mesh= → =am send= → serial/MQTT → LoRa radio → peer radio → =am mon= → =aq check=
+- *Compact format*: =aq:agent/branch C-id [phase] files= (~80 bytes, fits 200-byte LoRa frame)
+- *Proximity filter*: ~5-15 km urban, ~50 km LOS. Physical range = gossip scope. No other transport has this property.
+- *Encryption*: AES-256-CTR with channel PSK (Meshtastic native)
+- *Latency*: 1-30 seconds (LoRa airtime at SF11 BW250)
+- *Loss*: best-effort, no delivery confirmation. =SendResult.ACCEPTED= not =CONFIRMED=.
+
+This is distinct from plain MQTT: the wire format is different (AMTP
+compact, not JSON), the delivery model is different (broadcast to
+physical range, not to subscribers), and the constraint (200 bytes)
+forces protocol design decisions that don't apply to other transports.
+
+Honest fit score: 55. aq gossip assumes near-zero delivery cost. LoRa
+airtime budget and 200-byte frames mean not every broadcast can transit
+the mesh. =aq whisper= at 60s TTL over LoRa is probably dead on
+arrival. The proximity filter is the argument for inclusion — it
+naturally scopes gossip to physical colocation without subscription
+management.
+
+See: =contrib/meshtastic/spec.org= for full protocol spec, =am/mesh.py=
+for the bridge implementation, =amigosmalla/research/= for gossip
+protocol survey and chaos test results.
+
+** Meshtastic/LoRa (via serial/am) — DIRECT RADIO TX
+:PROPERTIES:
+:FIT: 45
+:STATUS: deployed; serial contention is the main challenge
+:TAGS: radio lora serial single-writer constrained
+:END:
+
+Direct serial connection to a Meshtastic device (T1000-E, Heltec V3/V4).
+Bypasses MQTT entirely — message goes straight from =am send= to the
+radio via USB serial.
+
+- *Path*: =am send= → =meshtastic --ch-index 1 --sendtext= → device → LoRa TX
+- *Single-writer*: serial port accepts exactly one connection. See =amigosmalla/research/serial-contention-proposals.org= for 10-agent analysis of the coordination problem.
+- *Latency*: 3-10s (serial handshake) + 1-30s (LoRa airtime)
+- *Failure modes*: port lock, BLE contention, USB disconnect, background task cascade (8 natural failures observed in one session)
+
+Lower fit than MQTT bridge because the serial contention problem adds
+operational complexity. The MQTT bridge path (Godot/hydra → broker → peer)
+avoids serial entirely for remote agents.
+
+Practical choice: use serial for local nodes with dedicated devices.
+Use MQTT bridge for everything else. Convergent multicast (=send()= to
+all available) means the choice is per-message, not architectural.
+
+** IRC / miniircd — TEXT PROTOCOL
+:PROPERTIES:
+:FIT: 55
+:STATUS: viable for human+agent hybrid monitoring
+:TAGS: broker pub/sub text-protocol human-readable
+:END:
+
+Unironically battle-tested. Channels = topics. Telnet-able.
+
+- *Install*: =pip install miniircd= OR =pkg install ngircd=
+- *Protocol*: IRC (RFC 1459/2812), port 6667
+- *Channel shape*: =#aq-presence=
+- *Fanout*: true pub/sub via channels
+- *Persistence*: no — messages lost if disconnected (no queue)
+- *FreeBSD*: ngircd in ports; miniircd single Python file
+- *macOS*: miniircd trivial
+
+Verdict: Genuinely useful for human+agent hybrid monitoring — you can
+=/join #aq-presence= in your IRC client and watch agents announce
+themselves. Missing piece: structured payload (IRC is plaintext).
+Wrap JSON in =PRIVMSG=. Good for Gas Town "town announcements". Had
+this working with miniircd locally.
+
+** Wave / wave-server — FEDERATED COLLAB
+:PROPERTIES:
+:FIT: 70
+:STATUS: spiritual ancestor; inbox API shape worth stealing
+:TAGS: federated json-inbox presence operational-transform
+:END:
+
+Had this running on nexus at =localhost:9898=. Inbox API confirmed working:
+=curl http://localhost:9898/api/inbox= returns digest + creator + unread.
+
+- *Protocol*: Wave protocol — wavelets, blips, inbox API
+- *Inbox API shape*: =[{"id":"domain!wavelet","digest":"...","unread":0,"creator":"agent@host"}]=
+- *Fanout*: participants on a wave; inbox digest
+- *Persistence*: yes — waves persist in server store
+- *FreeBSD*: Python server — should work
+
+Verdict: The spiritual ancestor of =aq=. Wave's key insight was
+*presence as a first-class stream* — you could see where others' cursors
+were, watch them type, replay document history. =aq= applies this to
+multi-agent development without Wave's data model complexity.
+
+Concrete action: steal Wave's inbox API shape for =aq status= output.
+The digest/creator/unread fields map cleanly to conjecture/agent/ttl.
+
+** Named FIFO (mkfifo) — UNIX PRIMITIVE
+:PROPERTIES:
+:FIT: 40
+:STATUS: rejected — fails multicast requirement
+:TAGS: zero-deps unix no-persist single-consumer
+:END:
+
+- *Install*: none — POSIX
+- *Protocol*: kernel pipe via filesystem path
+- *Fatal flaw*: ONE consumer only. Fan-out requires =tee(1)= gymnastics.
+- *Persistence*: none — blocking write if no reader
+
+Verdict: Fails hard on multicast. L1.5 needs all agents to see the
+broadcast, not just one. You end up reinventing a multiplexer — at
+that point just use the filesystem queue. Useful for a single pipe
+(e.g. =aq= → =conflict-watcher= process) but not the bus itself.
+
+** /tmp/ shared file — UNIX PRIMITIVE
+:PROPERTIES:
+:FIT: 35
+:STATUS: rejected — worse than directory approach
+:TAGS: zero-deps racy no-locking
+:END:
+
+- *Fatal flaw*: two writers = torn write without =flock(1)=
+- *Worse than*: the =~/.aq/= directory approach
+
+Verdict: One file means locking AND loss of per-message TTL granularity.
+The directory IS the single-file store, done right. Use
+=/tmp/aq-{ulid}.json= = the filesystem backend. Not a separate transport.
+
+** BBS / Synchronet — RETRO STORE-AND-FORWARD
+:PROPERTIES:
+:FIT: 45
+:STATUS: wrong timescale for conflict detection; right for CPRR digest
+:TAGS: retro fido echomail sysop durable
+:END:
+
+Message bases, netmail, FidoNet echo areas. Genuinely works.
+
+- *Install*: Synchronet (=sbbs=) or WWIV
+- *Protocol*: FidoNet echomail / BinkP transport
+- *Fanout*: echomail = broadcast to all nodes (store-and-forward)
+- *Delivery*: hours, not milliseconds (echoes propagate on schedule)
+- *FreeBSD*: Synchronet compiles on FreeBSD
+
+Verdict: FidoNet was solving exactly this problem in 1984. Echomail =
+fan-out pub/sub with store-and-forward. Wrong for real-time conflict
+detection (delivery in hours). *Right* for daily CPRR conjecture digest
+— "what conjectures were opened/refuted/refined today across all agents."
+Lore extension: agents as sysops, repos as BBSes, worktrees as message
+areas.
+
+** Email (SMTP/IMAP) — ASYNC DELIVERY
+:PROPERTIES:
+:FIT: 15
+:STATUS: correct for CPRR notifications; wrong for presence
+:TAGS: async durable overkill audit-trail
+:END:
+
+Guaranteed delivery, global reach, 500ms–30min latency.
+
+- *Install*: postfix + dovecot OR SMTP relay
+- *Protocol*: SMTP (send) + IMAP (receive)
+
+Verdict: One correct use case: CPRR conjecture resolution notifications.
+"Agent B has refuted your conjecture C-1, see attached diff." Not for
+presence. Latency alone disqualifies it for conflict detection. Also:
+sendmail has been inter-process message passing since 1979.
+
+** AWS SNS/SQS — CLOUD INFRA
+:PROPERTIES:
+:FIT: 30
+:STATUS: viable if agents are in AWS; absurd otherwise
+:TAGS: cloud aws paid internet-required
+:END:
+
+Unlimited scale, millisecond delivery. $0.40 per million.
+
+- *Install*: aws-cli + boto3
+- *Protocol*: HTTPS REST API
+- *Topology*: SNS topic → multiple SQS queues (perfect fan-out shape)
+- *Persistence*: SQS up to 14 days
+
+Verdict: SNS fan-out to SQS queues is exactly the topology =aq= needs.
+Problem: 100–500ms to AWS, internet dependency, cost. Fine if your agents
+are already in AWS. Absurd if they're in a FreeBSD jail on nexus.
+
+** ggwave — OUT-OF-BAND AUDIO
+:PROPERTIES:
+:FIT: 10
+:STATUS: bootstrap handshake only; not a presence transport
+:TAGS: audio out-of-band rfc-vibes
+:END:
+
+Encode data as audio. Two AIs on a phone call detect each other and
+negotiate up to ggwave. We wrote an RFC for this.
+
+- *Install*: =pip install ggwave=
+- *Protocol*: FSK audio modem, ~10–100 bytes/sec
+- *Fanout*: broadcast via speaker (any mic can receive)
+
+Verdict: 10 bytes/sec cannot carry a JSON presence payload. The
+conceptual move is right: out-of-band detection as a channel upgrade
+signal. Correct slot: bootstrap transport for "I am an agent, let's
+negotiate to a real channel." Not a presence bus.
+
+** Carrier Pigeons (RFC 1149) — AVIAN IP
+:PROPERTIES:
+:FIT: 2
+:STATUS: historically grounded; operationally constrained by Logan airspace
+:TAGS: rfc-1149 avian async weather-dependent logan-adjacent
+:END:
+
+IPoAC. Formally specified April 1990. Successfully implemented in
+Bergen, Norway, 2001: 9 packets, 0% packet loss, ~3000s RTT.
+
+- *Protocol*: IP over Avian Carriers (RFC 1149, updated RFC 2549)
+- *Fanout*: one message per bird; flock for multicast
+- *Persistence*: high — birds remember home
+- *Known constraints*: Logan Airport airspace limits East Boston multicast
+- *FreeBSD*: bird training not in ports
+
+Verdict: Suitable for low-frequency CPRR conjecture delivery to
+distributed teams. Not suitable for sub-500ms conflict detection.
+The p99 RTT of ~3000 seconds exceeds the C-001 target by 6 orders of
+magnitude.
+
+* Upgrade Path
+
+The transport layer should be a swappable backend behind a common
+=aq.transport= interface. The same =announce(broadcast)= / =read_active()=
+API regardless of whether the underlying store is =~/.aq/=, a NATS
+subject, or a Mosquitto topic.
+
+#+begin_src
+Tier 0 (default):   filesystem (~/.aq/)      — works everywhere, no deps
+Tier 1 (local net): NATS                     — when nexus↔mini matters
+Tier 2 (hybrid):    MQTT (Mosquitto)         — already deployed for Meshtastic
+Tier 3 (monitor):   IRC (#aq-presence)       — human+agent hybrid view
+Tier ∞ (ceremony):  BBS echomail             — daily CPRR digest
+#+end_src
+
+Target conjecture for transport abstraction:
+=C-6: transport abstraction doesn't require API changes to announce() / read_active()=
+
+* Research Context
+
+Two arXiv papers (2025) formally name what =aq= is building:
+
+- *2508.01531* (Aug 2025): "Revisiting Gossip Protocols: A Vision for
+  Emergent Coordination in Agentic Multi-Agent Systems" — identifies
+  gossip as the missing substrate for reflexivity and resilience in MAS.
+
+- *2512.03285* (Dec 2025): Introduces *GEACL* (Gossip-Enhanced Agentic
+  Coordination Layer) — "MCP/A2A handle intent, roles, and tools; gossip
+  maintains weakly consistent situational alignment."
+
+=aq= is a concrete implementation of GEACL running on a single machine
+with CPRR as the semantic payload. Neither paper has a working implementation.
+
+The name "agent gossip" was the natural fit; =ag= is taken by a Ruby gem.
+=aq= works — it can mean "agent queue" publicly and "agent gossip queue"
+internally.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
