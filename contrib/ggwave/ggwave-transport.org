@@ -1,0 +1,800 @@
+#+TITLE: aq-ggwave: Audio/Ultrasonic Gossip Transport
+#+SUBTITLE: Data Over Sound -- The Tightest Proximity Ring
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* 0. Premise
+
+Your laptop chirps. Your mini's microphone hears it. An agent broadcast
+crosses the room via sound waves. No WiFi, no Bluetooth, no radio, no
+cable. Just physics.
+
+=ggwave= (https://github.com/ggerganov/ggwave) encodes arbitrary data
+into audio frequency-shift keying tones. Georgi Gerganov --- the same
+person behind =llama.cpp= and =whisper.cpp= --- built it as a portable
+C/C++ library with bindings for Python, JavaScript, iOS, and Android.
+It works. It is absurd. It belongs in the transport registry.
+
+The TRANSPORTS.org evaluation table lists ggwave at FIT 10 with the tag
+"out-of-band" and the verdict: "bootstrap handshake only; not a presence
+transport." This document argues that verdict is wrong --- or at least,
+incomplete. ggwave is a legitimate gossip transport for =aq= at the
+tightest possible proximity scope: earshot. It is not a high-throughput
+bus. It is not a replacement for the filesystem. It is the transport
+that proves the architecture works with /any/ broadcast medium,
+including vibrating air molecules between a speaker cone and a MEMS
+microphone.
+
+The homelab that chirps when agents disagree on a protocol proposal is
+the homelab everyone wants.
+
+* 1. Why ggwave for gossip
+
+** 1.1 Architectural argument
+
+aq's transport layer is designed as a mount table of swappable backends
+behind a common =announce()= / =read_active()= interface. The
+filesystem is canonical. Everything else is fanout. The claim embedded
+in this architecture is that gossip semantics are transport-agnostic ---
+any medium that can broadcast a payload to nearby peers, without
+acknowledgment, without guaranteed delivery, fits the model.
+
+ggwave is the limit case. If the architecture accommodates data-over-
+sound, it accommodates anything. Including it in the transport registry
+is not about practical daily use; it is a proof of generality. (That
+said, it is also about practical daily use if your desk has a mini and
+a laptop within arm's reach and you want them gossiping without a
+network stack.)
+
+** 1.2 Properties that align with L1.5
+
+| aq requirement    | ggwave property                                      |
+|-------------------+------------------------------------------------------|
+| Lossy-ok          | Inherently lossy --- ambient noise, distance, etc.   |
+| Multicast         | Speaker radiates to all microphones in range          |
+| Zero orchestrator | No pairing, no handshake, no coordinator             |
+| TTL semantics     | Payloads are ephemeral by nature (sound dissipates)   |
+| Zero/low deps     | =pip install ggwave= + system audio (PyAudio)        |
+| Cross-platform    | C library; Python, JS, iOS, Android bindings          |
+
+** 1.3 Properties unique to ggwave
+
+- *Tightest proximity filter*: earshot. 1--10 meters. You literally
+  have to be in the same room. No other transport has this property
+  except perhaps NFC, and NFC requires contact.
+- *Air-gapped*: no network interface of any kind. No IP, no MAC, no
+  radio license, no spectrum allocation. Sound waves through air.
+- *Human-observable*: in audible mode, you can hear when a broadcast
+  goes out. This is not a bug --- it is a debuggability feature that
+  no other transport provides. Your ears become a packet sniffer.
+- *Zero configuration*: no pairing, no key exchange, no service
+  discovery. If the speaker is loud enough and the microphone is
+  sensitive enough, it works.
+
+** 1.4 Gerganov pedigree
+
+Georgi Gerganov also built =llama.cpp= (the C/C++ LLM inference
+runtime that launched the local-model movement) and =whisper.cpp= (the
+C/C++ port of OpenAI's Whisper speech recognition model). The man has a
+demonstrated talent for building portable, dependency-minimal C/C++
+libraries that do one thing well. =ggwave= is in that tradition.
+
+* 2. Payload constraints
+
+** 2.1 Capacity by protocol mode
+
+ggwave supports multiple encoding protocols at different frequency
+ranges and data rates:
+
+| Protocol              | Freq range     | Max payload | Audible | Notes                    |
+|-----------------------+----------------+-------------+---------+--------------------------|
+| GGWAVE_PROTOCOL_AUDIBLE_NORMAL   | 1--8 kHz  | ~140 bytes  | Yes     | Clearly audible tones    |
+| GGWAVE_PROTOCOL_AUDIBLE_FAST     | 1--8 kHz  | ~140 bytes  | Yes     | Faster, more bandwidth   |
+| GGWAVE_PROTOCOL_AUDIBLE_FASTEST  | 1--8 kHz  | ~140 bytes  | Yes     | Fastest audible          |
+| GGWAVE_PROTOCOL_ULTRASOUND_NORMAL | 15--20 kHz | ~25 bytes  | No*     | Inaudible to most adults |
+| GGWAVE_PROTOCOL_ULTRASOUND_FAST  | 15--20 kHz | ~25 bytes   | No*     | Faster ultrasonic        |
+| GGWAVE_PROTOCOL_DT_NORMAL        | 1--8 kHz  | ~140 bytes  | Yes     | Dual-tone (DTMF-like)    |
+
+*Ultrasonic protocols operate at 15--20 kHz. Most adults cannot hear
+above 15 kHz. Children and dogs can. This is documented.
+
+** 2.2 AMTP compact format fits
+
+The aq compact wire format (same as Meshtastic/IRC) is well within
+payload limits:
+
+| Example payload                              | Bytes | Ultrasonic? | Audible? |
+|----------------------------------------------+-------+-------------+----------|
+| =CH1\vert{}test=                             |     8 | Yes         | Yes      |
+| =aq:CASO C-42 [proof]=                       |    22 | Yes         | Yes      |
+| =aq:jw/main C-1 [prf] a.py=                 |    27 | Tight       | Yes      |
+| =aq:jwalsh/feat-auth C-42 [proof] api.py=   |    41 | No          | Yes      |
+| =aq:jwalsh/main C-7 [refutation] spec.org=  |    42 | No          | Yes      |
+
+For ultrasonic mode, payloads must be aggressively truncated:
+
+#+begin_example
+aq:jw/m C-1 [p] a.py         (24 bytes -- fits ultrasonic)
+aq:CASO C-42 [proof]          (22 bytes -- fits ultrasonic)
+aq:dt/m C-7 [r]               (15 bytes -- fits ultrasonic)
+#+end_example
+
+Agent addresses and file lists get abbreviated. Phase tags compress:
+=[c]= conjecture, =[p]= proof, =[r]= refutation, =[n]= refinement,
+=[d]= done. This is not lossy in the information-theoretic sense ---
+the receiving agent can still detect file overlap and phase conflicts.
+
+For audible mode, the full AMTP compact format fits with room to spare.
+Even a modest broadcast with three files is comfortably under 140 bytes.
+
+** 2.3 Binary payload option
+
+ggwave payloads are raw bytes, not necessarily UTF-8. A more
+space-efficient encoding could use a binary compact format:
+
+#+begin_example
+[1 byte: version + flags]
+[1 byte: phase enum (0-4)]
+[2 bytes: conjecture ID]
+[N bytes: agent hash or truncated name]
+[remaining: file list, null-separated]
+#+end_example
+
+This could fit a meaningful broadcast into 15--20 bytes, well within
+ultrasonic limits. But the AMTP text format is debuggable with ears
+(in audible mode, the duration and pattern of tones loosely correlate
+with payload content). Binary encoding sacrifices that property.
+
+Recommendation: use text AMTP for audible mode, consider binary for
+ultrasonic-only deployments where payload density matters.
+
+* 3. TX/RX model
+
+** 3.1 Transmit path
+
+#+begin_example
+aq announce -c C-42 --ggwave
+    |
+    v
+Serialize broadcast to AMTP compact format
+    |
+    v
+ggwave.encode(payload, protocol=ULTRASOUND_NORMAL)
+    -> returns PCM audio samples (float32 array)
+    |
+    v
+Play audio via system output
+    - PyAudio / sounddevice / SDL
+    - or write to WAV file for manual playback
+    - or route to specific audio output device
+    |
+    v
+Sound waves propagate through air at ~343 m/s
+    |
+    v
+Done. No ACK. Fire-and-forget.
+#+end_example
+
+** 3.2 Receive path
+
+#+begin_example
+aq ggwave-listen (daemon or foreground process)
+    |
+    v
+Open system microphone (PyAudio / sounddevice)
+    |
+    v
+Capture audio in rolling buffer (e.g. 5s window)
+    |
+    v
+ggwave.decode(audio_samples)
+    -> returns decoded payload string (or None)
+    |
+    v
+If payload starts with "aq:":
+    Parse AMTP compact format
+    Write to ~/.aq/channels/broadcast/gw-{ts}-{rand}.json
+    |
+    v
+Filesystem transport picks it up as if it were local.
+#+end_example
+
+** 3.3 Timing characteristics
+
+| Property                    | Value                           |
+|-----------------------------+---------------------------------|
+| Encoding latency            | 50--200ms (CPU-bound)           |
+| Transmission duration       | 1--5 seconds (payload-dependent)|
+| Propagation delay           | ~3ms at 1 meter (negligible)    |
+| Decoding latency            | 50--200ms (CPU-bound)           |
+| Total one-way latency       | 1--6 seconds                    |
+| Duplex                      | Half-duplex on same device      |
+| Simultaneous transmitters   | One (collision otherwise)       |
+
+The 1--6 second one-way latency exceeds the L1.5 target of <500ms.
+This is known and accepted. ggwave is not a real-time transport. It
+is a slow, ambient, proximity-scoped broadcast medium. The latency is
+comparable to LoRa/Meshtastic (1--30 seconds) and better than email,
+BBS, or carrier pigeons.
+
+** 3.4 Half-duplex constraint
+
+A device cannot transmit and receive simultaneously through the same
+speaker/microphone pair. The microphone picks up the speaker output
+and decodes its own transmission (or worse, the speaker output
+interferes with incoming reception).
+
+Mitigations:
+
+- *Time-division*: transmit at fixed intervals, listen between them.
+  A 30-second interval with a 3-second transmission window leaves 27
+  seconds of listen time.
+- *Separate devices*: TX on the laptop speaker, RX on the mini's
+  microphone (or vice versa). Different physical devices avoid the
+  self-interference problem.
+- *Do nothing*: in practice, aq broadcasts are infrequent (once per
+  announce, not continuous). The probability of two agents transmitting
+  simultaneously in a 3-person homelab is low.
+
+* 4. The proximity hierarchy (updated)
+
+#+begin_example
+ggwave (audio)      ->  1-10m    (same room, same desk)
+BLE advertisements  ->  10-100m  (room/building)
+mDNS/UDP multicast  ->  LAN     (office/home network)
+LoRa/Meshtastic     ->  5-50km  (city/metro area)
+Keybase/MQTT/git    ->  WAN     (global)
+#+end_example
+
+ggwave occupies the innermost proximity ring. Each transport in the
+hierarchy extends the gossip radius at the cost of infrastructure:
+
+| Transport  | Range     | Infrastructure needed                     |
+|------------+-----------+-------------------------------------------|
+| ggwave     | 1--10m    | Speaker + microphone (already present)    |
+| BLE        | 10--100m  | BLE radio (most laptops have one)         |
+| mDNS       | LAN       | Network interface + multicast routing     |
+| LoRa       | 5--50km   | Dedicated radio hardware + antenna        |
+| MQTT/WAN   | Global    | Internet connection + broker              |
+
+The pattern: the closer the proximity, the less infrastructure.
+ggwave requires the /least/ infrastructure of any transport in the
+registry --- literally just the audio hardware built into every laptop,
+phone, and Raspberry Pi manufactured in the last 20 years.
+
+The proximity property is not just a gimmick. It is a natural access
+control mechanism. You cannot eavesdrop on ultrasonic ggwave from the
+parking lot. You have to be in the room. For a homelab environment
+where the threat model is "the machines on my desk should know about
+each other," earshot is the right scope.
+
+* 5. Use cases
+
+** 5.1 Homelab flex
+
+Three machines on a desk: a MacBook Pro, a Mac Mini, and a Raspberry
+Pi. Each runs an aq agent. They gossip via ggwave in ultrasonic mode.
+No network configuration. No cables. No pairing. The Pi's speaker
+chirps (inaudibly) and the Mini's microphone hears it. The MacBook
+announces a new conjecture and the other two know about it 3 seconds
+later.
+
+The operational cost is zero. The aesthetic value is immeasurable.
+
+** 5.2 Air-gapped transfer
+
+A machine with no network interface (air-gapped workstation, secure
+enclave, offline build server) can still participate in aq gossip.
+Place a laptop with a speaker next to it. The air-gapped machine's
+microphone receives the broadcast. Presence information crosses the
+air gap via sound.
+
+This is not hypothetical. ggwave was designed for exactly this kind
+of near-field data transfer. The =ggwave-cli= tool demonstrates it
+working between any two devices with audio I/O.
+
+** 5.3 Conference demo
+
+A presenter runs three Claude Code instances on a single laptop with
+external speakers. The audience hears the agents negotiating: chirps
+when one announces a conjecture, a different tone pattern when
+another detects a conflict. The sound of distributed consensus,
+literally audible.
+
+This is the demo that makes people understand what gossip protocols
+are. Not a diagram. Not a log file. Sound.
+
+** 5.4 Debugging via ears
+
+In audible mode, you develop an intuition for what ggwave
+transmissions sound like. Short chirp = small payload (conflict
+check). Long warble = full broadcast with file list. Silence = no
+gossip activity. Your ears become a monitoring dashboard.
+
+This is not a joke. Sonification of system state is a legitimate
+observability technique. Network engineers have been listening to
+packet traffic (via tools like =tcpdump | aplay=) for decades.
+
+** 5.5 Art installation: the sound of distributed consensus
+
+A gallery installation: five Raspberry Pis in a room, each running
+an aq agent with audible ggwave. Agents propose conjectures, detect
+conflicts, refine ideas. The room fills with chirps, warbles, and
+silence --- the emergent soundscape of multi-agent coordination.
+
+Wall text: "You are listening to five artificial agents argue about
+software architecture."
+
+This is not a use case for production systems. It is a use case for
+understanding what it means for machines to gossip.
+
+* 6. Libraries and platforms
+
+** 6.1 Core library
+
+| Component    | Location                                       |
+|--------------+------------------------------------------------|
+| C/C++ source | https://github.com/ggerganov/ggwave            |
+| License      | MIT                                            |
+| Dependencies | None (optional SDL2 for audio I/O examples)    |
+| Build        | cmake                                          |
+
+** 6.2 Language bindings
+
+| Language   | Package          | Install                     | Notes              |
+|------------+------------------+-----------------------------+--------------------|
+| Python     | ggwave           | =pip install ggwave=        | ctypes wrapper     |
+| JavaScript | ggwave.js        | npm / CDN                   | WebAssembly build  |
+| iOS        | ggwave (Swift)   | CocoaPods / SPM             | Native framework   |
+| Android    | ggwave (Kotlin)  | Maven Central               | JNI wrapper        |
+
+** 6.3 CLI tool
+
+=ggwave-cli= provides command-line encoding and decoding:
+
+#+begin_src bash
+# Encode a message and play it
+echo "aq:jw/main C-1 [p]" | ggwave-cli -t
+
+# Listen and decode
+ggwave-cli -l
+#+end_src
+
+** 6.4 Audio I/O dependencies
+
+The ggwave library itself handles encoding/decoding (PCM samples in,
+bytes out; bytes in, PCM samples out). Audio I/O --- playing and
+recording --- is the caller's responsibility. Options:
+
+| Library     | Platform       | Notes                               |
+|-------------+----------------+-------------------------------------|
+| PyAudio     | Cross-platform | =pip install pyaudio=; PortAudio    |
+| sounddevice | Cross-platform | =pip install sounddevice=; PortAudio|
+| SDL2        | Cross-platform | Lower-level, used in ggwave examples|
+| CoreAudio   | macOS          | Native; no additional deps          |
+| ALSA        | Linux          | System library; no additional deps  |
+
+For the aq integration, =sounddevice= is the pragmatic choice: it is
+pure Python (wraps PortAudio via ctypes), supports both playback and
+recording, and works on macOS, Linux, and Windows.
+
+* 7. Conceptual TX/RX
+
+Included here for protocol comprehension. Do NOT implement.
+
+** 7.1 TX (conceptual)
+
+#+begin_src python
+# TX: Encode an aq broadcast as audio and play it
+# Do NOT implement. This is spec, not code.
+
+import ggwave
+import sounddevice as sd
+
+SAMPLE_RATE = 48000
+PROTOCOL = ggwave.GGWAVE_PROTOCOL_ULTRASOUND_NORMAL
+
+def aq_ggwave_tx(payload: str) -> None:
+    """Encode an aq payload as audio and play through speakers."""
+    instance = ggwave.init()
+    waveform = ggwave.encode(
+        instance,
+        payload,
+        protocolId=PROTOCOL,
+        volume=50,
+    )
+    # waveform is a bytes object containing PCM float32 samples
+    samples = np.frombuffer(waveform, dtype=np.float32)
+    sd.play(samples, samplerate=SAMPLE_RATE)
+    sd.wait()  # block until playback completes
+    ggwave.free(instance)
+
+# Usage:
+# aq_ggwave_tx("aq:jw/main C-1 [p] a.py")
+#+end_src
+
+** 7.2 RX (conceptual)
+
+#+begin_src python
+# RX: Listen on microphone, decode ggwave payloads, ingest to aq
+# Do NOT implement. This is spec, not code.
+
+import ggwave
+import sounddevice as sd
+
+SAMPLE_RATE = 48000
+
+def aq_ggwave_rx(duration: float = 5.0) -> str | None:
+    """Record audio and attempt to decode a ggwave payload."""
+    instance = ggwave.init()
+    recording = sd.rec(
+        int(duration * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+    )
+    sd.wait()
+    result = ggwave.decode(instance, recording.tobytes())
+    ggwave.free(instance)
+    if result and result.startswith(b"aq:"):
+        return result.decode("utf-8")
+    return None
+
+def aq_ggwave_listen():
+    """Continuous listener: decode and ingest aq broadcasts."""
+    while True:
+        payload = aq_ggwave_rx(duration=5.0)
+        if payload:
+            # Parse AMTP compact format
+            # Write to ~/.aq/channels/broadcast/gw-{ts}-{rand}.json
+            ingest_broadcast(payload)
+#+end_src
+
+** 7.3 Integration sketch (conceptual)
+
+#+begin_src python
+# In cli.py _fanout(), alongside mesh, mqtt, kbfs, irc, mdns:
+# Do NOT implement. This is spec, not code.
+
+from .ggwave_transport import ggwave_publish, is_enabled as ggwave_is_enabled
+
+if getattr(args, "ggwave", False) or ggwave_is_enabled():
+    if ggwave_publish(broadcast):
+        sent.append("ggwave")
+#+end_src
+
+* 8. L1.5 fit score
+
+** 8.1 Scoring against requirements
+
+| Requirement       | Score | Rationale                                                  |
+|-------------------+-------+------------------------------------------------------------|
+| Lossy-ok          |    95 | Inherently lossy. Ambient noise = natural packet loss.     |
+| Multicast         |    70 | Speaker broadcasts to all mics in range. No subscription.  |
+| Zero orchestrator |   100 | Nothing to configure. No pairing. No handshake.            |
+| TTL semantics     |    60 | Sound dissipates, but no explicit TTL in the medium.       |
+| Zero/low deps     |    55 | =pip install ggwave= + audio I/O library.                  |
+| Cross-platform    |    75 | C library with bindings everywhere. Audio I/O varies.      |
+| Latency < 500ms   |    10 | 1--6 seconds per message. Fails hard on latency target.    |
+
+** 8.2 Additional dimensions
+
+| Dimension              | Score | Notes                                           |
+|------------------------+-------+-------------------------------------------------|
+| Bandwidth              |     5 | ~10--100 bytes/sec. Cannot carry JSON blobs.     |
+| Reliability            |    15 | Ambient noise, speaker quality, distance.        |
+| Proximity filtering    |   100 | Earshot. The tightest possible scope.            |
+| Air-gapped capability  |   100 | No network interface required. Period.            |
+| Human observability    |    95 | In audible mode, you can hear the gossip.        |
+| Style points           |   100 | Unmatched.                                       |
+
+** 8.3 Composite assessment
+
+The TRANSPORTS.org FIT score of 10 is scored against the same rubric
+used for NATS (88) and filesystem (95). Against that rubric, 10 is
+defensible --- ggwave fails hard on latency and bandwidth, the two
+most heavily weighted practical dimensions.
+
+But the rubric underweights the properties that make ggwave
+architecturally interesting: zero-infrastructure multicast,
+air-gapped operation, proximity as access control, and human
+observability. No other transport in the registry scores above 50 on
+any of those dimensions.
+
+Proposed revision:
+
+| Context                   | FIT score | Rationale                           |
+|---------------------------+-----------+-------------------------------------|
+| General L1.5 transport    |        15 | Latency and bandwidth kill it.      |
+| Air-gapped environments   |        80 | Only option that works at all.      |
+| Proximity-scoped gossip   |        45 | Tightest ring, but slow.            |
+| Architecture proof        |        95 | Proves transport-agnostic design.   |
+| Homelab aesthetic         |       100 | No contest.                         |
+
+Leave the TRANSPORTS.org score at 10 for the general-purpose table.
+Add a footnote: "FIT 10 general; FIT 100 for proving the architecture
+works with vibrating air molecules."
+
+* 9. Failure modes
+
+** 9.1 Ambient noise
+
+*Symptom*: decode returns None despite a valid transmission nearby.
+
+*Cause*: background noise (music, conversation, HVAC, other machines)
+drowns out the ggwave signal. Particularly problematic for audible
+mode in a shared office.
+
+*Mitigation*: increase volume on TX side, use ultrasonic mode
+(higher frequency = less ambient competition), reduce TX-RX distance.
+Ultrasonic mode is more robust in noisy environments because most
+ambient noise is concentrated below 10 kHz.
+
+*aq behavior*: silent failure. =ggwave_publish()= on the TX side
+succeeds (the speaker played the sound). The RX side simply never
+decodes it. The broadcast expires via TTL on the sender and is
+re-announced on the next interval. No different from a dropped UDP
+packet.
+
+** 9.2 Simultaneous transmission (collision)
+
+*Symptom*: two devices transmit at overlapping times; both
+transmissions are garbled.
+
+*Cause*: no collision avoidance protocol. ggwave is raw broadcast ---
+multiple simultaneous transmitters produce interference.
+
+*Mitigation*: stagger transmission intervals. With a 30-second
+interval and 3-second transmission windows, the collision probability
+for 3 devices is ~10% per round (3 * 3/30). Acceptable for gossip.
+For lower collision rates, use randomized jitter (transmit at
+interval +/- random offset).
+
+*aq behavior*: both transmissions are lost. Same as any other
+transport collision (LoRa has the same problem). TTL + re-announce
+handles recovery.
+
+** 9.3 Speaker/microphone quality variance
+
+*Symptom*: works between MacBook and HomePod but not between
+Raspberry Pi and Mac Mini.
+
+*Cause*: cheap speakers may not reproduce the required frequencies
+accurately. Cheap microphones may not have sufficient sensitivity or
+frequency response. Ultrasonic mode is especially sensitive to
+hardware quality --- many laptop speakers roll off above 16 kHz.
+
+*Mitigation*: test with =ggwave-cli= before deploying. Use audible
+mode if ultrasonic fails. External speakers/microphones may be needed
+for some hardware combinations.
+
+** 9.4 Ultrasonic attenuation through walls
+
+*Symptom*: ultrasonic mode works on the same desk but not through a
+closed door.
+
+*Cause*: high-frequency sound attenuates rapidly through solid
+materials. Ultrasonic (15--20 kHz) does not penetrate walls, doors,
+or heavy furniture effectively. Audible mode (1--8 kHz) penetrates
+somewhat better.
+
+*aq behavior*: this is a feature, not a bug. The proximity filter is
+the point. If you need cross-room or cross-wall gossip, use mDNS or
+BLE. ggwave is for same-desk, same-room only.
+
+** 9.5 Canine interference
+
+*Symptom*: your dog reacts to ultrasonic transmissions.
+
+*Cause*: dogs can hear frequencies up to ~45 kHz. ggwave ultrasonic
+mode at 15--20 kHz is well within canine hearing range. This is a
+documented ggwave issue (https://github.com/ggerganov/ggwave/issues).
+
+*Mitigation*: use audible mode (the dog already ignores your typing).
+Or negotiate with the dog. The dog may have legitimate concerns about
+the protocol.
+
+** 9.6 Echo and feedback loops
+
+*Symptom*: a device decodes its own transmission and re-broadcasts it.
+
+*Cause*: the microphone picks up the speaker output on the same
+device. The decoded payload is treated as an incoming broadcast and
+re-announced.
+
+*Mitigation*: mute the microphone during TX (the half-duplex
+constraint). Or filter self-originated payloads by agent address.
+The =_is_self()= pattern from the mDNS transport applies here.
+
+** 9.7 Sample rate mismatch
+
+*Symptom*: decode always returns None even in ideal conditions.
+
+*Cause*: TX and RX are using different sample rates. ggwave requires
+matched sample rates (typically 48000 Hz) on both sides.
+
+*Mitigation*: hardcode sample rate to 48000 in the transport config.
+All modern audio hardware supports 48000 Hz.
+
+* 10. The honest assessment
+
+Is this practical? Barely. The latency alone disqualifies it from
+real-time conflict detection. The bandwidth eliminates structured
+payloads. The hardware variance makes deployment unpredictable. The
+half-duplex constraint limits throughput. Ambient noise is an
+uncontrolled variable.
+
+Is this cool? Extremely. It is the transport that makes people stop
+and think about what "broadcast" actually means. It forces the
+question: if your gossip protocol cannot accommodate a speaker and a
+microphone, is it really transport-agnostic? If presence information
+can cross an air gap via sound waves, what exactly is the minimum
+substrate for coordination?
+
+Should it be in the transport registry? Yes, for three reasons:
+
+1. *Proof of generality*. The =aq.transport= interface claims to be
+   backend-agnostic. ggwave is the most extreme test of that claim.
+   If ggwave fits the interface, every other transport fits trivially.
+
+2. *Air-gapped operation*. There exists no other transport in the
+   registry that works with zero network interfaces. For specific
+   environments (secure facilities, offline builds, hardware with no
+   WiFi/BLE), ggwave is the only option.
+
+3. *The aesthetic*. A homelab where agents announce their intent via
+   sound waves, where you can hear the rhythm of work and conflict
+   and resolution, where the physical medium of communication is
+   literally the air in the room --- that is a homelab with soul.
+
+What this transport should never be: the default. The filesystem is
+the default. ggwave is opt-in, experimental, and frankly silly. But
+it works. And "it works" is sufficient for inclusion in a transport
+registry that already contains carrier pigeons (RFC 1149, FIT 2).
+
+* 11. Integration with the transport mount table
+
+** 11.1 Mount configuration
+
+#+begin_src toml
+# In ~/.aq/transports.toml
+
+[mounts.ggwave]
+type = "ggwave"
+channels = ["broadcast"]   # gossip only; no heavy data
+protocol = "ultrasonic"    # "ultrasonic" or "audible"
+interval = 30              # seconds between transmissions
+volume = 50                # 0-100, TX volume
+sample_rate = 48000        # Hz, must match TX and RX
+enabled = false            # opt-in only (this is not a default transport)
+#+end_src
+
+** 11.2 Environment variables
+
+| Variable              | Default       | Description                     |
+|-----------------------+---------------+---------------------------------|
+| AQ_GGWAVE             | 0             | Enable ggwave transport (0/1)  |
+| AQ_GGWAVE_PROTOCOL    | ultrasonic    | Protocol mode                   |
+| AQ_GGWAVE_INTERVAL    | 30            | Seconds between TX              |
+| AQ_GGWAVE_VOLUME      | 50            | TX volume (0-100)               |
+
+** 11.3 CLI integration
+
+#+begin_example
+# One-shot broadcast via ggwave
+aq announce -c C-42 -f api.py --ggwave
+
+# Start ggwave listener daemon
+aq ggwave-listen
+
+# Specify audible mode for the demo
+aq announce -c C-42 --ggwave --ggwave-protocol audible
+#+end_example
+
+** 11.4 Tier classification
+
+#+begin_example
+Tier 0:     Filesystem (~/.aq/)       -- single machine, zero deps
+Tier 1.5:   mDNS (_aq._tcp)          -- LAN, zero infrastructure
+Tier 2:     KBFS / Keybase Chat       -- cross-network, encrypted
+Tier 3:     MQTT                      -- broker-based, cross-network
+Tier 3.5:   Meshtastic/LoRa           -- radio, proximity-scoped
+Tier 4:     GH Issues                 -- cloud, audit trail
+Tier omega: ggwave (audio)            -- earshot, air-gapped
+Tier omega+1: Carrier pigeons          -- avian, weather-dependent
+#+end_example
+
+ggwave does not fit neatly into the linear tier hierarchy. It is
+simultaneously the lowest-infrastructure transport (below Tier 0 in
+setup cost) and the most constrained (below Tier omega in practical
+utility). It exists in a category of its own: transports that work
+without any digital infrastructure whatsoever.
+
+* 12. Compact encoding for ultrasonic mode
+
+Ultrasonic mode's 25-byte limit demands a compression scheme for
+meaningful broadcasts. Proposed encoding:
+
+** 12.1 Abbreviated AMTP
+
+#+begin_example
+aq:XX/Y C-NN [Z] file
+#+end_example
+
+Where:
+- =XX= = 2-character agent abbreviation (=jw=, =dt=, =kk=)
+- =Y= = single-character branch (=m= for main, first letter otherwise)
+- =NN= = conjecture number (1--99)
+- =Z= = single-character phase (=c=, =p=, =r=, =n=, =d=)
+- =file= = single filename, truncated to fit
+
+Lookup table for the amigosmalla network:
+
+| Agent          | Abbreviation | Branch =main= |
+|----------------+--------------+----------------|
+| jwalsh         | jw           | jw/m           |
+| daidaitaotao   | dt           | dt/m           |
+| kkumar30       | kk           | kk/m           |
+
+** 12.2 Examples at the limit
+
+#+begin_example
+aq:jw/m C-1 [p] cli.py       (23 bytes -- ultrasonic OK)
+aq:dt/m C-7 [r]               (15 bytes -- ultrasonic OK)
+aq:kk/m C-42 [c] send.py     (24 bytes -- ultrasonic OK)
+aq:jw/f C-6 [p] a.py,b.py    (25 bytes -- ultrasonic limit)
+#+end_example
+
+* 13. Open questions
+
+1. *Volume calibration*: what is the minimum TX volume for reliable
+   decode at 1 meter? At 3 meters? At 10 meters? This is hardware-
+   dependent and needs empirical testing.
+
+2. *Continuous vs. interval listening*: should the RX daemon record
+   continuously and run decode on a sliding window, or record in
+   discrete 5-second chunks? Continuous is more responsive but uses
+   more CPU. Chunk-based may miss transmissions that span chunk
+   boundaries.
+
+3. *Multi-protocol listening*: can the RX daemon listen for both
+   ultrasonic and audible simultaneously? The ggwave library may
+   support this (decode all protocols from a single audio stream).
+
+4. *Collision avoidance*: should ggwave adopt a simple CSMA-like
+   scheme (listen before transmit, back off if signal detected)?
+   This adds complexity but reduces collision rate. Probably not
+   worth it for 3 devices at 30-second intervals.
+
+5. *WebRTC/browser integration*: ggwave.js works in browsers via
+   WebAudio API. Could a browser-based aq dashboard both display
+   broadcasts and participate in ggwave gossip? The browser becomes
+   a full node in the proximity mesh.
+
+6. *ggwave protocol versioning*: ggwave protocol IDs are not stable
+   across library versions. The transport config should store the
+   protocol name (=ultrasonic=, =audible=) and resolve to the
+   correct ID at runtime.
+
+* 14. References
+
+- ggwave: https://github.com/ggerganov/ggwave
+- ggwave Python bindings: https://pypi.org/project/ggwave/
+- ggwave.js (browser): https://ggwave-js.ggerganov.com/
+- Georgi Gerganov: https://github.com/ggerganov
+- aq spec: =spec.org=
+- aq transports: =TRANSPORTS.org=
+- AMTP compact wire format: =contrib/meshtastic/spec.org= section 1.3
+- Meshtastic transport: =contrib/meshtastic/spec.org=
+- mDNS transport: =contrib/mdns/mdns-transport.org=
+- IRC transport: =contrib/irc/irc-transport.org=
+- Keybase transport: =contrib/keybase/keybase-transport.org=
+- RFC 1149: IP over Avian Carriers (for tonal calibration)
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
