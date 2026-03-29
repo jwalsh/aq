@@ -1,0 +1,954 @@
+#+TITLE: UDP Multicast Transport Specification
+#+SUBTITLE: Tier 0.5 -- Raw Gossip Substrate for aq
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* Abstract
+
+This document specifies a UDP multicast transport for =aq=, the ambient
+agent queue. The transport sends and receives aq broadcast payloads as
+UDP datagrams on a link-local multicast group. No broker, no discovery
+protocol, no accounts, no files. =sendto(sock, payload, (group, port))=
+is the entire TX path.
+
+Tier classification: 0.5 (between filesystem and mDNS). Lower overhead
+than any network transport in the current stack. Higher capability than
+filesystem alone (cross-machine without NFS). The substrate that mDNS,
+SWIM, Serf memberlist, and Consul LAN gossip are all built on top of.
+
+* 1. Why This Should Be Transport #1
+
+** 1.1 UDP multicast IS gossip
+
+The aq presence bus is a gossip protocol. Gossip protocols propagate
+information by broadcasting to all reachable peers without coordination.
+UDP multicast is exactly this operation at the network layer: send a
+datagram to a group address, every process joined to that group receives
+it. There is no closer mapping between an abstract protocol and a
+concrete network primitive.
+
+Consider what the other transports are doing:
+
+- *Filesystem*: simulate multicast via a shared directory. Readers
+  poll or watch for new files. The "group address" is the directory
+  path. Works, but requires shared filesystem access (same machine or
+  NFS).
+- *mDNS*: UDP multicast (224.0.0.251:5353) with DNS record formatting
+  layered on top. aq's use of mDNS discards most of the DNS-SD
+  machinery (service types, TXT record encoding, browse/resolve phases)
+  and uses it as a broadcast channel with structured metadata. The DNS
+  formatting is overhead, not value.
+- *MQTT*: TCP connection to a broker. The broker fans out messages to
+  subscribers. The broker IS the multicast --- and it requires a
+  running daemon, network configuration, and accounts.
+- *SWIM/memberlist* (used by Serf, Consul): UDP for protocol messages ---
+  ping, indirect-ping, suspect, alive. Serf's =memberlist= library defaults
+  to UDP multicast for LAN node discovery and suspicion dissemination.
+  Consul uses Serf internally for LAN gossip. The entire HashiCorp gossip
+  stack bottoms out at UDP multicast.
+
+We built eight transports and missed the one that most perfectly models
+the problem.
+
+** 1.2 Zero everything
+
+| Property         | UDP Multicast | mDNS     | MQTT      | Filesystem |
+|------------------+---------------+----------+-----------+------------|
+| Broker needed    | no            | no       | yes       | no         |
+| Discovery needed | no            | yes      | yes       | no         |
+| Accounts needed  | no            | no       | optional  | no         |
+| Files needed     | no            | no       | no        | yes        |
+| External binary  | no            | dns-sd   | mosquitto | no         |
+| Config needed    | group + port  | service type | host + port | directory |
+
+The TX path is four lines of Python. The RX path is six. No daemon, no
+CLI tool, no package to install. The =socket= module is in the standard
+library of every language that has sockets.
+
+** 1.3 Payload fit
+
+An aq broadcast in JSON is 300--500 bytes. The AMTP compact format is
+40--200 bytes. A UDP datagram can carry up to 65,535 bytes (practical
+limit on Ethernet: ~1472 bytes without fragmentation, ~8KB with
+reassembly). The entire aq payload --- JSON, compact, or binary --- fits
+in a single unfragmented datagram with room to spare.
+
+No framing. No chunking. No reassembly. One =sendto()= = one broadcast.
+
+* 2. Multicast Group Design
+
+** 2.1 IPv4 Group Address
+
+Three options, in order of recommendation:
+
+| Address       | Range           | Notes                                   |
+|---------------+-----------------+-----------------------------------------|
+| =239.42.0.1=  | Administratively Scoped | RFC 2365. Private use, no IANA conflict. The =42= is arbitrary and memorable. |
+| =239.255.0.1= | Site-Local      | RFC 2365 Section 6. Broader convention for site-scoped groups. |
+| =224.0.0.251= | Local Network Control | mDNS uses this. Sharing it risks interference. Don't. |
+
+*Recommendation*: =239.42.0.1=. Administratively scoped (will not be
+routed beyond the site). No collision risk with well-known protocols.
+The =239.0.0.0/8= range is explicitly allocated for private use by
+RFC 2365 --- it is the multicast equivalent of =10.0.0.0/8=.
+
+** 2.2 IPv6 Group Address
+
+| Address        | Scope     | Notes                                   |
+|----------------+-----------+-----------------------------------------|
+| =ff02::42:1=   | Link-local | Custom group in the =ff02::= range. Recommended. |
+| =ff02::1=      | Link-local | All-nodes. Every IPv6 host is already a member. Works but noisy --- every process on the host sees every datagram. |
+| =ff02::fb=     | Link-local | mDNS. Same collision concern as =224.0.0.251=. |
+
+*Recommendation*: =ff02::42:1=. Link-local scope (=ff02::=) ensures
+the datagram cannot escape the LAN segment. The =42:1= suffix mirrors
+the IPv4 choice.
+
+** 2.3 Port
+
+| Port  | Notes                                                         |
+|-------+---------------------------------------------------------------|
+| 42710 | =aq= on a phone keypad: A=2, Q=7 -> 27. Append =10= for a five-digit port in the dynamic range (49152--65535 is IANA dynamic, but 42710 is in the registered range and unassigned as of 2026). |
+| 4271  | Shorter. In the user/registered range (1024--49151). No IANA assignment. |
+| 5353  | mDNS. Do not reuse.                                          |
+
+*Recommendation*: =4271=. Short, unambiguous, unassigned. Mnemonic:
+"aq" = 27, prefix a 4 (for IPv4), suffix a 1 (for version 1). Or just
+remember 4271. The number does not matter much; consistency matters.
+
+** 2.4 TTL (Time to Live / Hop Limit)
+
+| TTL | Scope                                                          |
+|-----+----------------------------------------------------------------|
+|   1 | Link-local only. Datagram cannot cross a router. Default.     |
+|   2 | One router hop. Reaches directly connected subnets.            |
+|  32 | Site-scoped (conventional limit for campus/enterprise).        |
+
+*Recommendation*: TTL=1 as default. Agent gossip is a LAN concern. If
+routed multicast is needed (e.g., nexus and mini are on different
+subnets connected by a router), make it configurable via
+=AQ_MCAST_TTL=. But the default should be link-local.
+
+Rationale from a formal perspective: the TTL parameter defines the
+scope of the gossip neighborhood. A TTL of 1 constrains the
+communication topology to a single broadcast domain --- a clique in
+graph-theoretic terms. Every participant can hear every other
+participant. This is the simplest possible gossip topology: no
+forwarding, no rumor-mongering, no epidemic spread required. The
+multicast group IS the gossip neighborhood, and the TTL defines its
+boundary.
+
+* 3. Wire Format
+
+** 3.1 Option A: Raw AMTP Compact (recommended for constrained peers)
+
+The AMTP compact format, UTF-8 encoded, as the entire UDP payload:
+
+#+begin_example
+aq:jwalsh/feat-auth C-42 [proof] api.py,auth.py
+#+end_example
+
+Advantages: identical to the Meshtastic wire format. Any parser that
+handles LoRa payloads handles this. Minimal overhead. Human-readable
+in =tcpdump=.
+
+Disadvantages: no version field, no dedup metadata beyond what the
+compact format carries, no way to distinguish aq datagrams from
+arbitrary UDP traffic on the same port.
+
+** 3.2 Option B: Framed JSON (recommended for LAN peers)
+
+A 4-byte magic header followed by a JSON payload:
+
+#+begin_example
+Offset  Length  Field       Value
+0       2       Magic       0x41 0x51 ("AQ")
+2       1       Version     0x01
+3       1       Format      0x01 (JSON) | 0x02 (compact AMTP) | 0x03 (CBOR)
+4       ...     Payload     JSON-encoded Broadcast object
+#+end_example
+
+Example (hex + ASCII):
+
+#+begin_example
+41 51 01 01 { "agent": "github.com/jwalsh/aq/feat-auth", ... }
+#+end_example
+
+Advantages: magic bytes allow filtering in packet capture. Version
+field enables future evolution. Format byte allows JSON and compact
+payloads on the same group. Dedup uses the existing =(agent, id)= pair
+in the JSON payload.
+
+Disadvantages: 4 bytes of overhead. Requires parsing the header before
+the payload. Not human-readable without stripping the header.
+
+** 3.3 Recommendation
+
+Use Option B (framed) as the canonical format. The 4-byte header is
+negligible overhead and provides forward compatibility.
+
+Implementations SHOULD also accept Option A (raw compact) for
+interoperability with constrained peers (Meshtastic bridge nodes,
+embedded agents). Detection is trivial: if the first two bytes are
+=0x41 0x51= ("AQ"), parse as framed; if the first three bytes are
+=aq:= (0x61 0x71 0x3A), parse as raw compact; otherwise discard.
+
+** 3.4 Deduplication
+
+The =(agent, id)= tuple in the Broadcast payload is the dedup key,
+identical to every other transport. Receivers maintain a bounded
+dedup window (e.g., last 256 message IDs per agent, or last 60
+seconds of IDs). Duplicates are silently dropped.
+
+Why duplicates occur: a sender may emit the same broadcast on multiple
+transports (filesystem + multicast + mDNS). A receiver joined to all
+three should not process the broadcast three times. The dedup key is
+transport-agnostic by design.
+
+* 4. TX Path
+
+** 4.1 Python
+
+#+begin_src python
+import socket
+import struct
+
+MCAST_GROUP = "239.42.0.1"
+MCAST_PORT = 4271
+MCAST_TTL = 1
+
+def multicast_send(payload: bytes) -> None:
+    """Send a single aq broadcast datagram to the multicast group."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MCAST_TTL)
+    sock.sendto(payload, (MCAST_GROUP, MCAST_PORT))
+    sock.close()
+#+end_src
+
+That is the entire TX implementation. =socket.socket=, =setsockopt=,
+=sendto=, =close=. Four statements. No connection, no handshake, no
+acknowledgment.
+
+** 4.2 Framed payload construction
+
+#+begin_src python
+MAGIC = b"AQ"
+VERSION = 0x01
+FORMAT_JSON = 0x01
+FORMAT_COMPACT = 0x02
+
+def frame(payload: bytes, fmt: int = FORMAT_JSON) -> bytes:
+    """Wrap an aq payload in the 4-byte multicast frame header."""
+    return MAGIC + bytes([VERSION, fmt]) + payload
+#+end_src
+
+** 4.3 Integration with aq announce
+
+#+begin_src python
+# In cli.py _fanout():
+from .multicast import multicast_send, frame, is_enabled
+
+if getattr(args, "multicast", False) or is_enabled():
+    datagram = frame(broadcast.to_json().encode("utf-8"))
+    multicast_send(datagram)
+    sent.append("multicast")
+#+end_src
+
+** 4.4 Go
+
+#+begin_src go
+func multicastSend(payload []byte) error {
+    addr, err := net.ResolveUDPAddr("udp4", "239.42.0.1:4271")
+    if err != nil {
+        return err
+    }
+    conn, err := net.DialUDP("udp4", nil, addr)
+    if err != nil {
+        return err
+    }
+    defer conn.Close()
+    _, err = conn.Write(payload)
+    return err
+}
+#+end_src
+
+* 5. RX Path
+
+** 5.1 Python
+
+#+begin_src python
+import socket
+import struct
+
+MCAST_GROUP = "239.42.0.1"
+MCAST_PORT = 4271
+
+def multicast_listen(callback):
+    """Join the multicast group and invoke callback(data, addr) for each datagram."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("", MCAST_PORT))
+
+    # Join the multicast group on all interfaces
+    mreq = struct.pack("4sl", socket.inet_aton(MCAST_GROUP), socket.INADDR_ANY)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+    while True:
+        data, addr = sock.recvfrom(65536)
+        callback(data, addr)
+#+end_src
+
+The socket IS the subscription. =IP_ADD_MEMBERSHIP= tells the kernel
+to deliver datagrams for =239.42.0.1= to this socket. No broker, no
+topic, no channel --- the multicast group address is the topic.
+
+** 5.2 Frame parsing
+
+#+begin_src python
+def parse_datagram(data: bytes) -> dict | None:
+    """Parse a received datagram, handling both framed and raw compact formats."""
+    if len(data) < 4:
+        return None
+
+    # Framed: starts with "AQ" (0x41 0x51)
+    if data[0:2] == b"AQ":
+        version = data[2]
+        fmt = data[3]
+        payload = data[4:]
+        if version != 0x01:
+            return None  # unknown version, discard
+        if fmt == 0x01:  # JSON
+            return json.loads(payload)
+        elif fmt == 0x02:  # compact AMTP
+            return parse_compact(payload.decode("utf-8"))
+        return None
+
+    # Raw compact: starts with "aq:" (0x61 0x71 0x3A)
+    if data[0:3] == b"aq:":
+        return parse_compact(data.decode("utf-8"))
+
+    return None  # unrecognized, discard
+#+end_src
+
+** 5.3 Go
+
+#+begin_src go
+func multicastListen(handler func(data []byte, src *net.UDPAddr)) error {
+    addr, err := net.ResolveUDPAddr("udp4", "239.42.0.1:4271")
+    if err != nil {
+        return err
+    }
+    conn, err := net.ListenMulticastUDP("udp4", nil, addr)
+    if err != nil {
+        return err
+    }
+    defer conn.Close()
+    conn.SetReadBuffer(65536)
+    buf := make([]byte, 65536)
+    for {
+        n, src, err := conn.ReadFromUDP(buf)
+        if err != nil {
+            continue
+        }
+        handler(buf[:n], src)
+    }
+}
+#+end_src
+
+** 5.4 Self-delivery filtering
+
+On most platforms, a multicast sender on the same host also receives its
+own datagrams. Control this with =IP_MULTICAST_LOOP=:
+
+#+begin_src python
+# Disable loopback (sender does not receive its own datagrams)
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+#+end_src
+
+For aq, loopback SHOULD be enabled (default). The dedup layer handles
+self-delivery. Disabling loopback prevents the local aq instance from
+verifying its own broadcasts arrived on the multicast group --- a useful
+debugging signal.
+
+Alternative: filter by =(agent, id)= in the dedup layer. This is
+already required for cross-transport dedup and handles self-delivery as
+a special case.
+
+* 6. Comparison to Other Transports
+
+| Property          | UDP Multicast | mDNS       | MQTT         | LoRa       | Filesystem | Keybase   |
+|-------------------+---------------+------------+--------------+------------+------------+-----------|
+| Broker needed     | no            | no         | yes          | no         | no         | no (service) |
+| Discovery needed  | no            | yes (browse) | yes (connect) | no       | no         | yes (user) |
+| Latency           | <1ms          | ~3s (browse) | ~100ms      | 1--30s     | <1ms (poll) | ~100ms   |
+| Scope             | LAN segment   | LAN segment | WAN         | radio range | local disk | WAN      |
+| Max payload       | 65KB          | 255 bytes (TXT) | ~256KB  | 200 bytes  | unlimited  | ~100KB   |
+| Reliability       | none (UDP)    | none       | QoS 0--2     | none       | fsync      | delivered |
+| Encryption        | none          | none       | TLS optional | AES-256-CTR | none      | E2E NaCl |
+| Persistence       | none          | DNS TTL    | retain flag  | none       | until delete | until delete |
+| Cross-machine     | yes (same LAN) | yes (same LAN) | yes (WAN) | yes (radio) | no (or NFS) | yes (WAN) |
+| Deps              | none (stdlib) | dns-sd/avahi | client lib  | am CLI     | none       | keybase   |
+| Lines of code (TX) | 4            | ~20        | ~15          | ~30        | 5          | ~20      |
+| Lines of code (RX) | 6            | ~30        | ~20          | ~40        | 8          | ~40      |
+
+Key observation: UDP multicast has the lowest latency of any
+cross-machine transport and the lowest implementation complexity of any
+transport (including filesystem, which needs directory creation and
+globbing). The cost is zero persistence and zero encryption.
+
+* 7. Why We Didn't Start Here
+
+A retrospective on the transport selection sequence:
+
+1. *Filesystem* was Tier 0 because =ls= and =cat= are the debugger.
+   Correct choice for the canonical backend. But filesystem is single-
+   machine --- it cannot cross from nexus to mini without NFS/SSHFS.
+
+2. *Meshtastic/LoRa* was the novelty that motivated the project.
+   Encrypted radio gossip with physical proximity scoping. The
+   excitement of "agents talking over radio" drove early development.
+   But LoRa is the wrong default: 200-byte frames, 1--30s latency,
+   duty cycle limits, serial contention.
+
+3. *MQTT* was already deployed for the Meshtastic MQTT bridge
+   (mqtt.meshtastic.org). Natural to reuse it. But MQTT requires a
+   broker --- the antithesis of zero-orchestrator gossip.
+
+4. *mDNS* felt like "the right way" for LAN discovery. RFC-backed,
+   zero-config, Apple Bonjour integration. But mDNS is a discovery
+   protocol, not a messaging protocol. aq's mDNS transport required
+   bolting HTTP POST onto DNS-SD service records --- a Rube Goldberg
+   chain where the broadcast traverses: aq -> HTTP POST -> mDNS TXT
+   records -> dns-sd browse -> HTTP GET. Three protocol boundaries to
+   deliver one gossip message.
+
+5. *Keybase* provided E2E encryption and identity. Correct for the
+   trust model. But it requires the Keybase client, a user account,
+   and a running service.
+
+6. *IRC* provided the human+agent hybrid monitoring use case. Correct
+   for that niche. But it requires a daemon (miniircd/ngircd).
+
+7. *NATS* was identified as the "real" upgrade path. Correct for
+   production. But it is a broker.
+
+8. *UDP multicast* was not considered because it was too obvious. It
+   lacked the novelty of radio, the RFC pedigree of mDNS, the
+   encryption of Keybase, and the existing deployment of MQTT. It is
+   "just sockets." But "just sockets" is exactly what gossip is.
+
+The lesson: mDNS IS UDP multicast with DNS formatting on top. SWIM IS
+UDP multicast with protocol protocol protocol messages on top. We kept
+reaching for abstractions built on the primitive instead of using the
+primitive directly.
+
+* 8. L1.5 Fit Score
+
+** 8.1 Scoring Against L1.5 Requirements
+
+| Requirement       | Score | Rationale                                                          |
+|-------------------+-------+--------------------------------------------------------------------|
+| Lossy-ok          |   100 | UDP is lossy by definition. No acks, no retries. Perfect match.    |
+| Multicast         |   100 | Literal multicast. The name of the transport is the requirement.   |
+| Zero orchestrator |   100 | No broker, no coordinator. The kernel does the fanout.             |
+| TTL semantics     |    70 | No built-in TTL. TTL is in the payload (same as filesystem). Expired broadcasts are pruned by the receiver. But no automatic cleanup without a receiver running. |
+| Zero/low deps     |   100 | stdlib sockets. Available on every POSIX system and Windows.       |
+| Cross-platform    |    95 | macOS, Linux, FreeBSD: full kernel multicast. Windows: supported. Docker: may need =--network=host=. |
+| Latency < 500ms   |   100 | Sub-millisecond. LAN UDP round-trip is typically <0.5ms.           |
+
+** 8.2 Composite Score
+
+Weighted composite (same weighting as TRANSPORTS.org):
+
+| Transport          | L1.5 fit | Latency | Zero-deps | Multicast | Persist | Tier        |
+|--------------------+----------+---------+-----------+-----------+---------+-------------|
+| Filesystem         |       95 |      75 |       100 |        80 |      90 | canonical   |
+| *UDP Multicast*    |     *92* |   *100* |     *100* |     *100* |     *10* | *Tier 0.5*  |
+| NATS               |       88 |      99 |        70 |        99 |      60 | light broker |
+| Keybase Chat       |       85 |      80 |        60 |        95 |      70 | E2E encrypted |
+| mDNS               |       75 |      60 |        85 |        90 |      30 | zero-config LAN |
+| MQTT               |       65 |      80 |        55 |        95 |      70 | IoT pub/sub |
+| IRC                |       55 |      70 |        50 |        95 |      30 | text protocol |
+| Meshtastic (MQTT)  |       55 |      40 |        40 |        85 |      20 | proximity radio |
+
+*Proposed fit score: 92.*
+
+The 3-point penalty vs filesystem comes entirely from persistence: UDP
+multicast has none. A datagram is delivered or lost. There is no
+=cat ~/.aq/channels/broadcast/aq-*.json= equivalent --- if no receiver
+is running when the datagram arrives, it is gone. For presence gossip
+this is acceptable (TTL + re-announce handles it), but for debugging
+and audit, the filesystem remains canonical.
+
+The 3-point lead over NATS comes from zero-deps and zero-broker. NATS
+requires a 20MB daemon. UDP multicast requires nothing that is not
+already in the kernel.
+
+** 8.3 Tier Classification: 0.5
+
+Position in the transport hierarchy:
+
+#+begin_example
+Tier 0:   Filesystem (~/.aq/)       -- single machine, zero deps, debuggable
+Tier 0.5: UDP Multicast (239.42.0.1) -- LAN, zero deps, zero broker
+Tier 1.5: mDNS (_aq._tcp)          -- LAN, zero infrastructure, discovery
+Tier 2:   KBFS / Keybase Chat       -- WAN, E2E encrypted, identity
+Tier 3:   MQTT                      -- broker-based, cross-network
+Tier 3.5: Meshtastic/LoRa           -- radio, proximity-scoped
+Tier 4:   NATS                      -- production broker, sub-ms, JetStream
+#+end_example
+
+Tier 0.5 because it fills the gap between "filesystem on one machine"
+and "mDNS service discovery on the LAN." It is the first cross-machine
+transport that requires zero infrastructure. mDNS is Tier 1.5 (not 1)
+because it requires external tools (dns-sd/avahi) and has a 3-second
+browse latency. UDP multicast requires nothing and delivers in <1ms.
+
+* 9. Relation to Existing Protocols
+
+** 9.1 mDNS is UDP multicast with DNS on top
+
+mDNS (RFC 6762) sends DNS-formatted queries and responses as UDP
+datagrams to =224.0.0.251:5353=. Strip away the DNS wire format ---
+the question/answer/authority/additional record structure, the domain
+name compression, the TXT record encoding --- and you have: UDP
+multicast with a structured payload.
+
+aq's mDNS transport packs broadcast metadata into TXT records, then
+unpacks them on the other side. The DNS formatting is pure overhead
+for aq's use case. UDP multicast with a JSON or compact payload
+achieves the same result with less code and lower latency.
+
+mDNS provides one thing UDP multicast does not: service discovery
+(browsing for =_aq._tcp= instances). But aq does not need discovery.
+Gossip is fire-and-forget. Join the group, hear the broadcasts. There
+is nothing to discover because there is no connection to establish.
+
+** 9.2 SWIM / memberlist uses UDP multicast for protocol messages
+
+HashiCorp's =memberlist= library (used by Serf and Consul) implements
+the SWIM protocol over UDP. The protocol has three message types: ping,
+indirect-ping, and suspect. These are sent as UDP datagrams --- some
+unicast, some multicast.
+
+aq's presence broadcast maps to SWIM's "alive" message: "I am here,
+this is my state." The difference is aq's state is richer (conjecture
+ID, phase, files) and aq does not implement failure detection (SWIM's
+primary purpose). aq assumes that absence of broadcasts means either
+"not working" or "broadcast lost" --- both handled by TTL expiry.
+
+** 9.3 Consul LAN gossip
+
+Consul's LAN gossip pool uses Serf (which uses memberlist, which uses
+UDP). Agents on the same LAN segment discover each other and propagate
+state via UDP gossip. The stack is:
+
+#+begin_example
+Consul -> Serf -> memberlist -> UDP multicast
+#+end_example
+
+aq multicast would be:
+
+#+begin_example
+aq -> UDP multicast
+#+end_example
+
+Three fewer layers. The tradeoff is that aq does not get failure
+detection, consistent hashing, or cluster membership --- features that
+aq does not need, because aq is presence gossip, not cluster management.
+
+** 9.4 aq multicast is mDNS without the DNS
+
+Or: SWIM without the protocol. Or: Consul gossip without Consul. The
+common denominator of all LAN gossip protocols is UDP multicast. aq
+can use it directly because aq's requirements are simpler than any of
+these systems: broadcast a small payload, let everyone hear it, accept
+loss.
+
+* 10. Security Considerations
+
+** 10.1 Threat Model
+
+UDP multicast on a LAN segment has the following security properties:
+
+| Property              | Status           | Notes                                  |
+|-----------------------+------------------+----------------------------------------|
+| Confidentiality       | *none*           | Payload is cleartext on the wire.      |
+| Integrity             | *none*           | Any process on the LAN can inject datagrams. |
+| Authentication        | *none*           | Source IP is trivially spoofable on a LAN. |
+| Availability          | *best-effort*    | UDP provides no delivery guarantee.    |
+| Non-repudiation       | *none*           | No signatures, no attribution beyond IP. |
+
+This is the same threat model as the filesystem transport (no
+encryption, no authentication, trust the local environment) extended
+to the LAN segment. The trust boundary is the LAN.
+
+** 10.2 Acceptable Risk Argument
+
+For aq's use case, this threat model is acceptable:
+
+- *What is being broadcast*: which files an agent is working on, which
+  conjecture, which phase. This is development metadata, not secrets.
+  Leaking "jwalsh/feat-auth is working on api.py" to the LAN is not a
+  security event.
+
+- *Who is on the LAN*: in the target deployment (Jason's home network:
+  nexus + mini), the LAN is trusted. There are no untrusted hosts.
+
+- *What an attacker could do*: inject false presence broadcasts. The
+  worst case is a spurious conflict signal ("a phantom agent claims to
+  be working on your files"). This causes a false positive in conflict
+  detection, not a false negative. False positives are annoying but
+  not dangerous.
+
+** 10.3 Mitigations (if the threat model changes)
+
+If the LAN is not fully trusted (shared office, cloud VPC with other
+tenants), the following mitigations apply in order of increasing
+complexity:
+
+*** 10.3.1 HMAC Signature
+
+Add an HMAC-SHA256 signature to the frame header:
+
+#+begin_example
+Offset  Length  Field       Value
+0       2       Magic       0x41 0x51 ("AQ")
+2       1       Version     0x02 (version 2, HMAC-signed)
+3       1       Format      0x01 (JSON) | 0x02 (compact)
+4       32      HMAC        HMAC-SHA256(key, payload)
+36      ...     Payload     Broadcast data
+#+end_example
+
+The HMAC key is a pre-shared secret (like Meshtastic's PSK). Any
+agent with the key can verify the signature. Any agent without it
+discards the datagram. This provides integrity and authentication
+(group membership) but not confidentiality.
+
+*** 10.3.2 Encrypted Payload
+
+Encrypt the payload with AES-256-CTR (same algorithm as Meshtastic)
+using a PSK. The nonce can be derived from the broadcast ID (which is
+a ULID, containing a timestamp and random component).
+
+This provides confidentiality but adds complexity: key distribution,
+nonce management, key rotation. For LAN gossip, this is likely
+overkill.
+
+*** 10.3.3 IPsec / WireGuard
+
+Use network-layer encryption. If all machines on the LAN are connected
+via WireGuard, all traffic (including multicast) is encrypted and
+authenticated at the tunnel layer. This is the cleanest solution
+because aq does not need to know about cryptography --- the network
+handles it.
+
+** 10.4 Comparison to Other Transport Security
+
+| Transport       | Confidentiality  | Integrity         | Authentication     |
+|-----------------+------------------+-------------------+--------------------|
+| UDP Multicast   | none             | none              | none               |
+| Filesystem      | none (file perms) | none             | Unix UID           |
+| mDNS            | none             | none              | none               |
+| MQTT            | TLS (optional)   | TLS (optional)    | username/password  |
+| LoRa/Meshtastic | AES-256-CTR      | none (PSK shared) | none (PSK shared)  |
+| Keybase         | E2E NaCl         | per-device signing | sigchain + proofs |
+
+UDP multicast is at parity with filesystem and mDNS --- all three
+trust the local environment. The security upgrade path is clear:
+Keybase for E2E, WireGuard for network-layer, HMAC for lightweight
+group authentication.
+
+* 11. Platform Support
+
+** 11.1 macOS
+
+Full support. The kernel handles IGMP multicast group joins and
+datagram delivery. Tested on macOS 14+ (Sonoma). No special
+configuration needed.
+
+#+begin_src bash
+# Verify multicast routing exists
+netstat -rn | grep 239
+# Expected: 239.0.0.0/8 route via en0 or similar
+#+end_src
+
+If no multicast route exists (rare):
+
+#+begin_src bash
+sudo route add -net 239.0.0.0/8 -interface en0
+#+end_src
+
+** 11.2 Linux
+
+Full support. The kernel handles IGMP. =net.ipv4.conf.all.rp_filter=
+may need to be set to 0 or 2 (loose mode) if reverse path filtering
+drops multicast on multi-homed hosts.
+
+#+begin_src bash
+# Verify multicast support
+cat /proc/net/igmp | grep -i 239
+# Or:
+ip maddr show
+#+end_src
+
+** 11.3 FreeBSD
+
+Full support. FreeBSD has had multicast support since 4.4BSD. No
+special configuration for link-local multicast (TTL=1).
+
+#+begin_src bash
+# Verify multicast group membership
+netstat -gn
+#+end_src
+
+** 11.4 Windows
+
+Supported. Winsock provides =IP_ADD_MEMBERSHIP= and =IP_MULTICAST_TTL=.
+The Python =socket= module abstracts the platform differences. Windows
+Firewall may need a rule to allow inbound UDP on port 4271.
+
+** 11.5 Docker / Containers
+
+Containers with default bridge networking do NOT receive host multicast
+traffic. Solutions:
+
+| Mode                | Multicast works | Notes                               |
+|---------------------+-----------------+-------------------------------------|
+| =--network=host=    | yes             | Container shares host network stack |
+| =--network=macvlan= | yes             | Container gets its own MAC address  |
+| Bridge (default)    | no              | Docker bridge does not forward multicast |
+| =--network=none=    | no              | No network                          |
+
+For aq in Docker, use =--network=host=. This is the same requirement
+as running Consul or Serf in containers --- they need host networking
+for UDP multicast gossip to work.
+
+** 11.6 Virtual Machines
+
+VMs connected via bridged networking receive multicast normally. VMs
+on NAT or host-only networks may not, depending on the hypervisor's
+multicast forwarding. VMware and VirtualBox both support multicast
+forwarding on bridged adapters.
+
+** 11.7 Network Interface Selection
+
+On multi-homed hosts (multiple network interfaces), the OS selects the
+outbound interface for multicast based on the routing table. To force
+a specific interface:
+
+#+begin_src python
+# Bind to a specific interface for multicast TX
+sock.setsockopt(
+    socket.IPPROTO_IP,
+    socket.IP_MULTICAST_IF,
+    socket.inet_aton("192.168.1.100")  # IP of the desired interface
+)
+#+end_src
+
+Configurable via =AQ_MCAST_IFACE= environment variable (takes an IP
+address or interface name).
+
+* 12. Configuration
+
+** 12.1 Environment Variables
+
+| Variable         | Default       | Description                            |
+|------------------+---------------+----------------------------------------|
+| =AQ_MCAST=       | =0=           | Enable UDP multicast transport (0/1)  |
+| =AQ_MCAST_GROUP= | =239.42.0.1=  | IPv4 multicast group address          |
+| =AQ_MCAST_PORT=  | =4271=        | UDP port                              |
+| =AQ_MCAST_TTL=   | =1=           | Multicast TTL (hop limit)             |
+| =AQ_MCAST_IFACE= | (all)         | Network interface (IP or name)        |
+| =AQ_MCAST_LOOP=  | =1=           | Enable multicast loopback (0/1)       |
+
+** 12.2 Transport Mount Configuration
+
+#+begin_src toml
+# In ~/.aq/transports.toml
+
+[mounts.multicast]
+type = "udp-multicast"
+path = "/"
+enabled = true
+group = "239.42.0.1"
+port = 4271
+ttl = 1
+# interface = "en0"  # optional: bind to specific interface
+#+end_src
+
+** 12.3 CLI Integration
+
+#+begin_example
+aq announce -c C-42 -f api.py --multicast
+aq listen --multicast
+#+end_example
+
+The =--multicast= flag triggers =multicast_send(broadcast)= in the
+fanout, same pattern as =--mdns=, =--mqtt=, =--mesh=.
+
+* 13. Failure Modes
+
+** 13.1 No Multicast Route
+
+Symptom: =sendto()= raises =OSError: [Errno 101] Network is unreachable=
+or similar.
+
+Cause: no route for =239.0.0.0/8= in the routing table.
+
+Behavior: =multicast_send()= returns False. =aq announce= proceeds
+with other transports. Log at DEBUG level. This is the expected state
+in containers without host networking, cloud VMs without multicast
+support, or minimal installs.
+
+** 13.2 Firewall Blocks UDP
+
+Symptom: =sendto()= succeeds (UDP is connectionless; the sender does
+not know if anyone received it) but no receivers see the datagram.
+
+Cause: host or network firewall drops UDP on port 4271 or blocks IGMP.
+
+Behavior: silent failure. The sender believes it sent. The receiver
+never sees the datagram. This is indistinguishable from "no receivers
+are running." For gossip, this is fine --- the sender has no
+expectation of delivery.
+
+** 13.3 No Receiver Running
+
+Symptom: datagrams are sent but nobody processes them.
+
+Cause: no aq instance has called =IP_ADD_MEMBERSHIP= on this host or
+LAN segment.
+
+Behavior: datagrams are delivered to the multicast group but discarded
+by the kernel (no socket is listening). No error on the sender side.
+If the aq instance starts later, it will not see past datagrams ---
+they are gone. This is the fundamental tradeoff vs filesystem
+(persistence) and MQTT (retain flag).
+
+** 13.4 Duplicate Delivery
+
+Symptom: the same broadcast is processed multiple times.
+
+Cause: broadcast sent on multiple transports (filesystem + multicast),
+or multicast loopback delivers the sender's own datagram.
+
+Behavior: the dedup layer (=agent=, =id=) filters duplicates. This is
+not a failure --- it is expected operation.
+
+** 13.5 Subnet Isolation
+
+Symptom: agents on different subnets do not see each other's multicast
+datagrams.
+
+Cause: TTL=1 prevents datagrams from crossing routers. Even with higher
+TTL, routers must be configured to forward multicast (PIM, IGMP
+snooping).
+
+Behavior: each subnet is an independent gossip domain. Agents that need
+cross-subnet gossip must use a Tier 2+ transport (MQTT, Keybase, NATS).
+This is a feature, not a bug: the TTL defines the gossip neighborhood.
+
+* 14. Monitoring and Debugging
+
+** 14.1 tcpdump
+
+#+begin_src bash
+# Watch all aq multicast traffic
+sudo tcpdump -i en0 -X udp and dst 239.42.0.1 and port 4271
+
+# Count packets per second
+sudo tcpdump -i en0 -c 100 udp and dst 239.42.0.1 and port 4271 2>&1 | tail -1
+#+end_src
+
+** 14.2 socat (send a test datagram)
+
+#+begin_src bash
+# Send a test broadcast
+echo -n 'aq:test/main C-0 [conjecture] test.py' | \
+  socat - UDP4-DATAGRAM:239.42.0.1:4271,ip-multicast-ttl=1
+
+# Listen for broadcasts
+socat UDP4-RECVFROM:4271,ip-add-membership=239.42.0.1:0.0.0.0,reuseaddr,fork -
+#+end_src
+
+** 14.3 netcat
+
+#+begin_src bash
+# macOS (BSD netcat does not support multicast join directly; use socat)
+# Linux:
+nc -luk 4271  # listen on UDP port 4271 (does not join multicast group)
+#+end_src
+
+Note: =nc= typically does not handle =IP_ADD_MEMBERSHIP=. Use =socat=
+or a minimal Python script for proper multicast receive testing.
+
+** 14.4 aq listen --multicast
+
+The native monitoring command. Joins the group, parses frames, prints
+broadcasts as they arrive:
+
+#+begin_example
+$ aq listen --multicast
+[multicast] listening on 239.42.0.1:4271
+[multicast] jwalsh/feat-auth C-42 [proof] api.py,auth.py  (from 192.168.1.50)
+[multicast] daidaitaotao/main C-1 [conjecture] send.py    (from 192.168.1.51)
+#+end_example
+
+* 15. Open Questions
+
+1. *IPv4 vs IPv6 vs dual-stack*: should the transport bind both
+   =239.42.0.1= (IPv4) and =ff02::42:1= (IPv6) simultaneously? Dual-
+   stack doubles the code but covers IPv6-only networks. Recommendation:
+   IPv4 only for v1, with IPv6 as an opt-in via =AQ_MCAST_GROUP=.
+
+2. *Fragmentation*: should the transport refuse payloads larger than
+   the Ethernet MTU (1472 bytes for IPv4 with standard headers)?
+   IP fragmentation works but increases loss probability. aq payloads
+   are well under this limit, so fragmentation should not occur in
+   practice. Log a warning if payload exceeds 1400 bytes.
+
+3. *Rate limiting*: should the sender throttle multicast emission?
+   At aq's typical rate (1--10 broadcasts per minute per agent), this
+   is irrelevant. At higher rates (100+ agents, sub-second re-announce),
+   multicast storm potential exists. Mitigate with jitter: randomize
+   re-announce intervals within [TTL/3, TTL/2].
+
+4. *Multicast group per channel*: should different aq channels
+   (broadcast, session, heartbeat) use different multicast groups?
+   E.g., =239.42.0.1= for broadcast, =239.42.0.2= for session.
+   This would allow receivers to subscribe selectively. Alternative:
+   single group, demux in the payload (current approach for all other
+   transports). Recommendation: single group for simplicity; the
+   payload already carries channel information.
+
+5. *Relation to =aq listen= command*: the existing =aq status= reads
+   from the filesystem. =aq listen --multicast= would be a live
+   stream. Should =aq listen= (no flag) automatically join multicast
+   if =AQ_MCAST=1=? Probably yes, for convergent behavior.
+
+* 16. References
+
+- RFC 1112: Host Extensions for IP Multicasting (1989)
+  https://www.rfc-editor.org/rfc/rfc1112
+- RFC 2365: Administratively Scoped IP Multicast (1998)
+  https://www.rfc-editor.org/rfc/rfc2365
+- RFC 3171: IANA Guidelines for IPv4 Multicast Address Assignments
+  https://www.rfc-editor.org/rfc/rfc3171
+- RFC 4291: IP Version 6 Addressing Architecture, Section 2.7 (Multicast)
+  https://www.rfc-editor.org/rfc/rfc4291#section-2.7
+- SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol
+  Das et al., DSN 2002
+- HashiCorp memberlist: https://github.com/hashicorp/memberlist
+- HashiCorp Serf: https://www.serf.io/
+- aq spec -- =spec.org=
+- aq transports -- =TRANSPORTS.org=
+- mDNS transport spec -- =contrib/mdns/mdns-transport.org=
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
