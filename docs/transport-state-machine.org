@@ -1,0 +1,901 @@
+#+TITLE: aq Transport Layer State Machine Architecture
+#+SUBTITLE: TX/RX Paths, Fanout Controller, and Health Monitor
+#+AUTHOR: Alex Morgan (L7 Engineer) / Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* 0. Architectural Context
+
+=aq= is gossip, not coordination. The transport layer moves =Broadcast=
+payloads between agents with no delivery guarantees, no ordering
+constraints, and no central authority. Missed messages are handled by
+TTL-driven re-announcement (every TTL/2), not by retransmission.
+
+This document specifies the state machines governing the TX and RX
+paths across all six transports, the fanout controller that
+orchestrates multi-transport delivery, and the health monitor that
+tracks transport reliability over time.
+
+The existing codebase (=cli.py:_fanout()=) implements a simplified
+version: sequential best-effort send across enabled transports,
+returning a list of successes. This document is the target architecture
+for v0.5+.
+
+** 0.1 Design Principles
+
+1. *Filesystem is always Tier 0.* If every other transport fails, the
+   filesystem write succeeds. Period. It has no state machine --- it is
+   the ground truth.
+
+2. *Transports lie.* =is_available()= returning =True= does not mean
+   =send()= will succeed. The adversarial transport matrix means we
+   must probe, verify, and degrade gracefully.
+
+3. *Gossip tolerates loss.* The system is correct even if only one
+   transport delivers. Redundant delivery across multiple transports is
+   insurance, not a requirement.
+
+4. *Never block the caller.* =aq announce= must return in bounded time.
+   No transport failure should stall the CLI.
+
+5. *Observe, don't assume.* Transport health is derived from actual
+   send/receive outcomes, not from configuration or capability probes.
+
+** 0.2 Transport Inventory
+
+| Transport  | Tier | TX Latency   | RX Model    | Payload    | Notes                              |
+|------------+------+--------------+-------------+------------+------------------------------------|
+| Filesystem | 0    | <1ms         | poll/inotify | JSON       | Canonical. Always works.           |
+| MQTT       | 3    | 50-500ms     | subscribe   | JSON       | Via =mosquitto_pub= / paho         |
+| Mesh/LoRa  | 3    | 1-30s        | push (radio)| compact    | 200-byte frame limit, via =am= CLI |
+| KBFS       | 2    | 100ms-10s    | poll        | JSON       | Via =keybase fs write=             |
+| GH Issues  | 4    | 500ms-15s    | poll        | markdown   | Via =gh issue comment=             |
+| mDNS       | 1    | 10-100ms     | subscribe   | TXT record | Via =hashicorp/mdns= or =dns-sd=   |
+
+** 0.3 SendResult Enum
+
+Every transport =send()= returns one of:
+
+| Value     | Meaning                                                     |
+|-----------+-------------------------------------------------------------|
+| CONFIRMED | Transport confirms delivery (filesystem write, mDNS ack)   |
+| ACCEPTED  | Transport accepted the message but cannot confirm delivery  |
+| FAILED    | Transport rejected or errored                               |
+| TIMEOUT   | Transport did not respond within deadline                    |
+
+#+begin_src python
+from enum import Enum
+
+class SendResult(Enum):
+    CONFIRMED = "confirmed"   # write succeeded, peer acked
+    ACCEPTED = "accepted"     # accepted for delivery, no ack
+    FAILED = "failed"         # explicit failure
+    TIMEOUT = "timeout"       # deadline exceeded
+#+end_src
+
+Mapping per transport:
+
+| Transport  | Best achievable | Typical failure modes                    |
+|------------+-----------------+------------------------------------------|
+| Filesystem | CONFIRMED       | FAILED (disk full, permission)           |
+| MQTT       | ACCEPTED (QoS0) | TIMEOUT (broker down), FAILED (no binary)|
+| Mesh/LoRa  | ACCEPTED        | TIMEOUT (serial contention), FAILED      |
+| KBFS       | CONFIRMED       | TIMEOUT (sync lag), FAILED (not logged in)|
+| GH Issues  | CONFIRMED       | TIMEOUT (API), FAILED (rate limit)       |
+| mDNS       | CONFIRMED       | FAILED (no multicast), TIMEOUT           |
+
+* 1. Roles and Responsibilities
+
+** 1.1 Transport
+
+Owns exactly one communication channel. Responsible for:
+
+- *Availability probing*: Can this transport send right now?
+- *Serialization*: Convert =Broadcast= to transport-native format
+  (JSON, compact AMTP, TXT records, markdown)
+- *Send*: Transmit one message. Return =SendResult=.
+- *Receive* (v0.5+): Return messages received since last poll.
+- *Configuration*: Read env vars, config file, detect binaries.
+
+Does NOT:
+- Retry on failure (that is the health monitor's decision)
+- Know about other transports (no cross-transport awareness)
+- Manage scheduling (that is the scheduler's job)
+
+#+begin_src python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Transport(Protocol):
+    name: str
+    tier: int
+
+    def is_available(self) -> bool: ...
+    def send(self, broadcast: Broadcast) -> SendResult: ...
+    def receive(self, channel: str) -> list[Broadcast]: ...
+    def health(self) -> "TransportHealth": ...
+#+end_src
+
+** 1.2 TransportRegistry
+
+Manages all transports. Handles fanout orchestration.
+
+Responsible for:
+- *Registration*: Accept transport instances at startup.
+- *Fanout*: Dispatch =send()= to all eligible transports.
+- *Result aggregation*: Collect =SendResult= from each transport.
+- *Ordering*: Send to Tier 0 first (filesystem), then fan out
+  to remaining transports by tier (ascending).
+- *Timeout enforcement*: Global deadline for the entire fanout.
+
+#+begin_src python
+class TransportRegistry:
+    def __init__(self) -> None:
+        self.transports: list[Transport] = []
+
+    def register(self, transport: Transport) -> None: ...
+    def fanout(self, broadcast: Broadcast, deadline_ms: int = 5000) -> FanoutResult: ...
+    def available(self) -> list[Transport]: ...
+    def status(self) -> dict[str, TransportHealth]: ...
+#+end_src
+
+** 1.3 Scheduler (Trickle Timer)
+
+Decides *when* to re-announce. Implements RFC 6206.
+
+Responsible for:
+- *Adaptive interval*: Double on consistent state, reset on change.
+- *Suppression*: Skip redundant broadcasts when peers are consistent.
+- *Per-conjecture tracking*: Each active conjecture has its own timer.
+
+Parameters (from =aq-v0.5-plan.org=):
+- =Imin = 30s= (minimum interval)
+- =Imax = 3600s= (maximum interval, matches default TTL)
+- =k = 1= (redundancy constant --- suppress after 1 consistent echo)
+
+#+begin_src python
+class TrickleTimer:
+    def __init__(self, imin_s: float = 30, imax_s: float = 3600, k: int = 1): ...
+    def should_send(self) -> bool: ...
+    def on_consistent(self) -> None: ...   # heard peer with same state
+    def on_inconsistent(self) -> None: ... # state changed, reset to Imin
+    def reset(self) -> None: ...
+#+end_src
+
+** 1.4 Deduplicator
+
+Prevents duplicate delivery on the RX path. Gossip means the same
+=Broadcast= can arrive via filesystem, MQTT, and mDNS simultaneously.
+
+Responsible for:
+- *ID-based dedup*: Track seen =(broadcast.id)= values.
+- *Agent+seq dedup*: Track =(agent, conjecture_id)= pairs to
+  collapse re-announcements of the same claim.
+- *TTL-based expiry*: Evict entries from the dedup set after TTL.
+- *Convergence signal*: When a duplicate arrives, increment the
+  trickle timer's consistency counter.
+
+#+begin_src python
+class Deduplicator:
+    def __init__(self, max_entries: int = 10000) -> None:
+        self.seen: dict[str, float] = {}  # id -> first_seen_ts
+
+    def is_duplicate(self, broadcast: Broadcast) -> bool: ...
+    def record(self, broadcast: Broadcast) -> None: ...
+    def prune_expired(self) -> int: ...
+#+end_src
+
+** 1.5 Health Monitor
+
+Tracks per-transport reliability. Implements circuit breaker pattern.
+
+Responsible for:
+- *Success/failure counters*: Rolling window of last N send results.
+- *Circuit breaker*: CLOSED -> OPEN -> HALF_OPEN -> CLOSED cycle.
+- *Latency tracking*: p50, p95, p99 per transport.
+- *Promotion/demotion*: Recommend transport tier changes based on
+  observed behavior.
+
+#+begin_src python
+@dataclass
+class TransportHealth:
+    transport_name: str
+    circuit_state: str         # "closed" | "open" | "half_open"
+    success_count: int
+    failure_count: int
+    timeout_count: int
+    last_success_ts: float
+    last_failure_ts: float
+    latency_p50_ms: float
+    latency_p95_ms: float
+    consecutive_failures: int
+#+end_src
+
+* 2. TX State Machine (Per-Transport)
+
+Each transport instance maintains its own state machine governing
+the send path. The machine tracks what we *know* about the
+transport's readiness, not what it *claims*.
+
+** 2.1 States
+
+| State     | Meaning                                                        |
+|-----------+----------------------------------------------------------------|
+| UNKNOWN   | Initial. Never probed. No information about availability.      |
+| PROBING   | Actively checking availability (binary exists, broker reachable)|
+| AVAILABLE | Last probe or send succeeded. Ready to accept messages.        |
+| SENDING   | Message transmission in progress.                              |
+| COOLDOWN  | Send completed. Brief pause before next send (rate limiting).  |
+| FAILED    | Last N sends failed. Circuit breaker open.                     |
+
+** 2.2 State Diagram
+
+#+begin_src
+                          +------------------+
+                          |                  |
+      startup --------->  |     UNKNOWN      |
+                          |                  |
+                          +--------+---------+
+                                   |
+                           probe() |
+                                   v
+                          +--------+---------+
+                     +----|                  |<--- probe_timeout
+                     |    |     PROBING      |       (retry)
+         probe_fail  |    |                  |----+
+                     |    +--------+---------+    |
+                     |             |               |
+                     |     probe_ok|               |
+                     |             v               |
+                     |    +--------+---------+     |
+                     |    |                  |<----+
+                     +--->|    AVAILABLE     |<---------+
+                     |    |                  |          |
+                     |    +--------+---------+          |
+                     |             |                    |
+                     |       send()|                    |
+                     |             v                    |
+                     |    +--------+---------+          |
+                     |    |                  |          |
+                     |    |     SENDING      |          |
+                     |    |                  |          |
+                     |    +--+-----+-----+--+          |
+                     |       |     |     |             |
+                     | FAILED| ACCEPTED  |CONFIRMED    |
+                     |  or   | (cooldown)|  (cooldown) |
+                     |TIMEOUT|     |     |             |
+                     |       v     v     v             |
+                     |    +--------+---------+          |
+                     |    |                  |----------+
+                     |    |    COOLDOWN      |  cooldown_expired
+                     |    |                  |
+                     |    +--------+---------+
+                     |             |
+                     |  consecutive_failures > N
+                     |             v
+                     |    +--------+---------+
+                     |    |                  |
+                     +--->|     FAILED       |
+                          |                  |
+                          +--------+---------+
+                                   |
+                      half_open_timeout (30s)
+                                   |
+                                   v
+                              (PROBING)
+#+end_src
+
+** 2.3 Transition Table
+
+| From      | Event                      | To        | Action                                             |
+|-----------+----------------------------+-----------+----------------------------------------------------|
+| UNKNOWN   | =probe()= called           | PROBING   | Run =is_available()= with timeout                  |
+| PROBING   | probe succeeds             | AVAILABLE | Record success, reset failure counter               |
+| PROBING   | probe fails                | FAILED    | Record failure, start half-open timer               |
+| PROBING   | probe times out            | PROBING   | Retry with backoff (max 3 retries, then FAILED)    |
+| AVAILABLE | =send()= called            | SENDING   | Dispatch message, start send timer                  |
+| SENDING   | CONFIRMED returned         | COOLDOWN  | Record success, record latency, start cooldown      |
+| SENDING   | ACCEPTED returned          | COOLDOWN  | Record success, record latency, start cooldown      |
+| SENDING   | FAILED returned            | COOLDOWN  | Increment failure counter, start cooldown           |
+| SENDING   | deadline exceeded          | COOLDOWN  | Record TIMEOUT, increment failure counter           |
+| COOLDOWN  | cooldown expires           | AVAILABLE | Ready for next send                                |
+| COOLDOWN  | consecutive_failures > N   | FAILED    | Open circuit breaker                               |
+| FAILED    | half_open_timeout (30s)    | PROBING   | Attempt one probe to check recovery                 |
+| FAILED    | manual reset               | UNKNOWN   | Operator intervention                               |
+
+** 2.4 Transport-Specific Parameters
+
+| Transport  | Probe method               | Send timeout | Cooldown | Failure threshold |
+|------------+----------------------------+--------------+----------+-------------------|
+| Filesystem | =os.access(dir, W_OK)=     | 100ms        | 0ms      | 5                 |
+| MQTT       | =which mosquitto_pub=      | 5s           | 100ms    | 3                 |
+| Mesh/LoRa  | =which am= + serial check  | 30s          | 5s       | 2                 |
+| KBFS       | =which keybase= + status   | 10s          | 500ms    | 3                 |
+| GH Issues  | =which gh= + auth check    | 15s          | 1s       | 2                 |
+| mDNS       | multicast socket test      | 3s           | 100ms    | 3                 |
+
+** 2.5 Adversarial Transport Matrix
+
+Transports can lie. This table documents known failure modes where
+=is_available()= returns =True= but =send()= will fail:
+
+| Transport  | =is_available()= says | Reality                             | Mitigation                        |
+|------------+-----------------------+-------------------------------------+-----------------------------------|
+| Filesystem | writable              | disk full                           | check free space in probe         |
+| MQTT       | binary exists         | broker down, DNS fail, port blocked | probe with =mosquitto_pub -t test=|
+| Mesh/LoRa  | =am= binary exists    | serial port locked by another proc  | flock check, or just try + fail   |
+| KBFS       | =keybase= exists      | not logged in, sync stalled         | =keybase status= in probe        |
+| GH Issues  | =gh= exists           | not authenticated, rate limited     | =gh auth status= in probe        |
+| mDNS       | socket opens          | firewall blocks multicast           | send + listen for own echo        |
+
+* 3. RX State Machine (Per-Transport)
+
+The RX path does not exist in the current Python codebase. Only
+filesystem is readable today (via =read_active()=). This section
+specifies the target architecture.
+
+** 3.1 Push vs Pull
+
+| Transport  | RX Model   | Mechanism                                       |
+|------------+------------+-------------------------------------------------|
+| Filesystem | Pull (poll)| =glob("aq-*.json")= every 100ms, or inotify/kqueue/FSEvents |
+| MQTT       | Push (sub) | =paho.Client.on_message= callback               |
+| Mesh/LoRa  | Push       | =am mon= process, pipe to aq                    |
+| KBFS       | Pull (poll)| =keybase fs ls= + =keybase fs read= every 5s    |
+| GH Issues  | Pull (poll)| =gh api= to list comments, every 30s             |
+| mDNS       | Push (sub) | =mdns.Query= browse, continuous                  |
+
+** 3.2 States
+
+| State            | Meaning                                            |
+|------------------+----------------------------------------------------|
+| IDLE             | Not actively listening. Waiting for scheduler.     |
+| LISTENING        | Actively polling or subscribed. Waiting for data.  |
+| MESSAGE_RECEIVED | Raw message obtained. Needs parsing.               |
+| DEDUP            | Checking against deduplicator.                     |
+| DELIVER          | New message. Delivering to local store / callbacks.|
+
+** 3.3 State Diagram
+
+#+begin_src
+      +---------------+
+      |               |
+      |     IDLE      |<---------------------------+
+      |               |                            |
+      +-------+-------+                            |
+              |                                    |
+    start() / subscribe()                          |
+              |                                    |
+              v                                    |
+      +-------+-------+                            |
+      |               |---+                        |
+      |   LISTENING   |   | (push: callback fires) |
+      |               |<--+ (pull: poll interval)  |
+      +-------+-------+                            |
+              |                                    |
+        raw message                                |
+        received                                   |
+              |                                    |
+              v                                    |
+      +-------+---------+                          |
+      |                 |                          |
+      | MSG_RECEIVED    |                          |
+      | (parse + validate)                         |
+      +-------+---------+                          |
+              |                                    |
+         parse ok                                  |
+         (parse fail -> drop, back to LISTENING)   |
+              |                                    |
+              v                                    |
+      +-------+-------+                            |
+      |               |                            |
+      |    DEDUP      |                            |
+      |               |                            |
+      +--+----+-------+                            |
+         |    |                                    |
+   duplicate  | new                                |
+   (drop)     |                                    |
+         |    v                                    |
+         | +--+----------+                         |
+         | |             |                         |
+         | |   DELIVER   |                         |
+         | |             |                         |
+         | +--+----------+                         |
+         |    |                                    |
+         |    | write to local store               |
+         |    | notify trickle (consistent)        |
+         |    | fire callbacks                     |
+         |    |                                    |
+         +----+------>  LISTENING  ----stop()----->+
+#+end_src
+
+** 3.4 Transition Table
+
+| From          | Event                   | To             | Action                                         |
+|---------------+-------------------------+----------------+------------------------------------------------|
+| IDLE          | =start()= called        | LISTENING      | Open connection / start poll loop               |
+| LISTENING     | message arrives         | MSG_RECEIVED   | Buffer raw bytes/text                           |
+| LISTENING     | poll interval fires     | LISTENING      | Check source, return to LISTENING if empty      |
+| LISTENING     | =stop()= called         | IDLE           | Close connection / stop poll loop               |
+| LISTENING     | transport error         | IDLE           | Log error, notify health monitor                |
+| MSG_RECEIVED  | parse succeeds          | DEDUP          | Construct =Broadcast= from payload              |
+| MSG_RECEIVED  | parse fails             | LISTENING      | Log warning, increment parse_error counter      |
+| DEDUP         | duplicate detected      | LISTENING      | Notify trickle (=on_consistent()=), drop msg    |
+| DEDUP         | new message             | DELIVER        | Record in dedup set                             |
+| DELIVER       | delivery complete       | LISTENING      | Write to =~/.aq/=, fire callbacks, notify trickle |
+| DELIVER       | delivery fails          | LISTENING      | Log error (should not happen for filesystem)    |
+
+** 3.5 Transport-Specific RX Notes
+
+*** 3.5.1 Filesystem
+
+The simplest RX implementation. Already exists as =read_active()=.
+
+#+begin_src python
+# Current: one-shot poll
+active = read_active(channel)
+
+# Target: watch mode via kqueue/inotify/FSEvents
+watcher = FilesystemRX(channel)
+watcher.start()  # -> LISTENING, uses platform-native file watcher
+# on_message callback fires for each new aq-*.json file
+#+end_src
+
+*** 3.5.2 MQTT
+
+Subscribe to =aq/announce= topic. Parse JSON payloads.
+
+#+begin_src python
+# paho MQTT subscriber
+client = mqtt.Client()
+client.on_message = lambda c, u, msg: rx_pipeline(msg.payload)
+client.connect(host, port)
+client.subscribe("aq/announce")
+client.loop_start()  # -> LISTENING in background thread
+#+end_src
+
+*** 3.5.3 Mesh/LoRa
+
+Monitor mode via =am mon= or =meshtastic --listen=. Parse compact AMTP
+format back to =Broadcast=.
+
+#+begin_src python
+# am mon as subprocess, parse stdout
+proc = subprocess.Popen(["am", "mon"], stdout=PIPE)
+for line in proc.stdout:
+    parsed = mesh.parse(line.strip())  # compact -> dict
+    if parsed:
+        broadcast = Broadcast(**parsed, ts=time.time(), ttl=300, id=ulid())
+        rx_pipeline(broadcast)
+#+end_src
+
+*** 3.5.4 mDNS
+
+Browse for =_aq._tcp= services. Each service's TXT records contain
+broadcast fields.
+
+#+begin_src python
+# Continuous browse (hashicorp/mdns style, or zeroconf in Python)
+from zeroconf import Zeroconf, ServiceBrowser
+
+class AQListener:
+    def add_service(self, zc, type_, name):
+        info = zc.get_service_info(type_, name)
+        broadcast = parse_txt_records(info.properties)
+        rx_pipeline(broadcast)
+
+browser = ServiceBrowser(Zeroconf(), "_aq._tcp.local.", AQListener())
+#+end_src
+
+* 4. Fanout Controller State Machine
+
+The fanout controller orchestrates a single =aq announce= across
+multiple transports. It is the state machine that =_fanout()= in
+=cli.py= should evolve into.
+
+** 4.1 Design Decisions
+
+- *Filesystem first, always.* Tier 0 is synchronous and must succeed
+  before any other transport is attempted. This ensures the local
+  store always has the broadcast even if the process is killed during
+  fanout.
+
+- *Remaining transports in parallel.* After filesystem succeeds,
+  dispatch to all remaining available transports concurrently. No
+  transport waits for another.
+
+- *Global deadline.* The entire fanout has a deadline (default: 5s).
+  Any transport that has not returned by the deadline gets a TIMEOUT.
+
+- *Partial success is success.* If filesystem + any one other transport
+  succeeds, the fanout is considered successful. Total transport
+  failure (filesystem fails) is the only hard error.
+
+** 4.2 States
+
+| State        | Meaning                                                    |
+|--------------+------------------------------------------------------------|
+| INIT         | Broadcast received, not yet dispatched.                    |
+| FS_WRITE     | Writing to filesystem (Tier 0). Synchronous, blocking.     |
+| DISPATCHING  | Filesystem done. Dispatching to remaining transports.      |
+| COLLECTING   | All dispatched. Waiting for results within deadline.       |
+| COMPLETE     | All results collected (or deadline reached). Done.         |
+
+** 4.3 State Diagram
+
+#+begin_src
+    aq announce
+         |
+         v
+    +---------+
+    |  INIT   |   validate broadcast, check registry
+    +---------+
+         |
+         v
+    +---------+      fs write fails
+    |FS_WRITE |--------------------> COMPLETE (hard error)
+    +---------+
+         | fs write CONFIRMED
+         v
+    +------------+
+    |DISPATCHING |   for each transport where state == AVAILABLE:
+    |            |     spawn async send()
+    +------------+
+         | all dispatched
+         v
+    +------------+
+    | COLLECTING |   await results with global deadline
+    |            |   (concurrent.futures or asyncio.gather)
+    +------------+
+         | all returned OR deadline reached
+         v
+    +------------+
+    | COMPLETE   |   aggregate FanoutResult
+    +------------+
+         |
+         v
+    return FanoutResult {
+      filesystem: CONFIRMED,
+      mqtt: ACCEPTED,
+      mesh: TIMEOUT,
+      kbfs: FAILED,
+      ghissue: <skipped, circuit open>,
+      mdns: CONFIRMED
+    }
+#+end_src
+
+** 4.4 Transition Table
+
+| From        | Event                       | To          | Action                                           |
+|-------------+-----------------------------+-------------+--------------------------------------------------|
+| INIT        | broadcast validated         | FS_WRITE    | Call =FilesystemTransport.send()=                 |
+| INIT        | broadcast invalid           | COMPLETE    | Return error, no sends                            |
+| FS_WRITE    | CONFIRMED                   | DISPATCHING | Record fs result, enumerate other transports      |
+| FS_WRITE    | FAILED                      | COMPLETE    | Hard error --- broadcast not persisted             |
+| DISPATCHING | all tasks spawned           | COLLECTING  | Start global deadline timer                        |
+| COLLECTING  | transport returns result    | COLLECTING  | Record result, check if all done                   |
+| COLLECTING  | all results received        | COMPLETE    | Aggregate =FanoutResult=                           |
+| COLLECTING  | global deadline reached     | COMPLETE    | Mark remaining as TIMEOUT, aggregate               |
+
+** 4.5 FanoutResult
+
+#+begin_src python
+@dataclass
+class FanoutResult:
+    results: dict[str, SendResult]   # transport_name -> result
+    elapsed_ms: float
+    broadcast_id: str
+
+    @property
+    def any_confirmed(self) -> bool:
+        return any(r == SendResult.CONFIRMED for r in self.results.values())
+
+    @property
+    def fs_ok(self) -> bool:
+        return self.results.get("filesystem") == SendResult.CONFIRMED
+
+    def summary(self) -> str:
+        parts = [f"{name}:{result.value}" for name, result in self.results.items()]
+        return f"[{self.broadcast_id}] {', '.join(parts)} ({self.elapsed_ms:.0f}ms)"
+#+end_src
+
+** 4.6 Parallel Execution Strategy
+
+#+begin_src python
+import concurrent.futures
+
+def fanout(self, broadcast: Broadcast, deadline_ms: int = 5000) -> FanoutResult:
+    start = time.monotonic()
+    results: dict[str, SendResult] = {}
+
+    # Phase 1: filesystem (synchronous, must succeed)
+    fs = self._get_transport("filesystem")
+    results["filesystem"] = fs.send(broadcast)
+    if results["filesystem"] == SendResult.FAILED:
+        return FanoutResult(results=results, elapsed_ms=_elapsed(start), broadcast_id=broadcast.id)
+
+    # Phase 2: remaining transports (parallel)
+    remaining = [t for t in self.transports
+                 if t.name != "filesystem"
+                 and self.monitor.circuit_state(t.name) != "open"]
+
+    remaining_deadline = (deadline_ms - _elapsed(start)) / 1000.0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(remaining)) as pool:
+        futures = {pool.submit(t.send, broadcast): t.name for t in remaining}
+        done, not_done = concurrent.futures.wait(
+            futures, timeout=max(0, remaining_deadline)
+        )
+        for f in done:
+            results[futures[f]] = f.result()
+        for f in not_done:
+            results[futures[f]] = SendResult.TIMEOUT
+            f.cancel()
+
+    return FanoutResult(
+        results=results,
+        elapsed_ms=_elapsed(start),
+        broadcast_id=broadcast.id,
+    )
+#+end_src
+
+** 4.7 Skipped Transports
+
+A transport is skipped (not included in =FanoutResult.results=) when:
+
+1. Its circuit breaker is OPEN (recent consecutive failures).
+2. It is not enabled (env var / config says off).
+3. It was not registered at startup.
+
+Skipped transports appear in =FanoutResult= as absent keys, not as
+FAILED. This distinguishes "tried and failed" from "did not attempt."
+
+* 5. Health Monitor (Circuit Breaker)
+
+** 5.1 States
+
+Standard circuit breaker pattern (Nygard, /Release It!/ 2nd ed.):
+
+| State     | Meaning                                                    |
+|-----------+------------------------------------------------------------|
+| CLOSED    | Transport healthy. All sends routed through.               |
+| OPEN      | Transport unhealthy. Sends skipped. Timer running.         |
+| HALF_OPEN | Recovery probe in progress. One send allowed through.      |
+
+** 5.2 State Diagram
+
+#+begin_src
+                     success
+    +------------------------------------------+
+    |                                          |
+    v                                          |
++--------+    consecutive_failures > N    +----+----+
+|        |------------------------------->|         |
+| CLOSED |                                |  OPEN   |
+|        |<------+                        |         |
++--------+       |                        +----+----+
+                 |                             |
+            success                    half_open_timeout
+                 |                        (30 seconds)
+                 |                             |
+            +----+------+                      |
+            |           |<---------------------+
+            | HALF_OPEN |
+            |           |
+            +-----+-----+
+                  |
+             failure
+                  |
+                  v
+              (OPEN)
+#+end_src
+
+** 5.3 Transition Table
+
+| From      | Event                        | To        | Action                                        |
+|-----------+------------------------------+-----------+-----------------------------------------------|
+| CLOSED    | send returns CONFIRMED       | CLOSED    | Reset failure counter, record latency          |
+| CLOSED    | send returns ACCEPTED        | CLOSED    | Reset failure counter, record latency          |
+| CLOSED    | send returns FAILED          | CLOSED    | Increment failure counter, check threshold     |
+| CLOSED    | send returns TIMEOUT         | CLOSED    | Increment failure counter, check threshold     |
+| CLOSED    | consecutive_failures > N     | OPEN      | Log warning, start half_open timer             |
+| OPEN      | send requested               | OPEN      | Skip send, return FAILED immediately           |
+| OPEN      | half_open_timeout expires     | HALF_OPEN | Allow exactly one send through                 |
+| HALF_OPEN | probe send succeeds          | CLOSED    | Log recovery, reset counters                   |
+| HALF_OPEN | probe send fails             | OPEN      | Restart half_open timer with backoff           |
+
+** 5.4 Parameters
+
+| Parameter               | Default | Notes                                       |
+|-------------------------+---------+---------------------------------------------|
+| =failure_threshold=     | 3       | Consecutive failures before opening circuit  |
+| =half_open_timeout_s=   | 30      | Seconds before attempting recovery probe     |
+| =half_open_max_backoff= | 300     | Max seconds between recovery attempts        |
+| =success_threshold=     | 1       | Successes in HALF_OPEN before closing        |
+| =window_size=           | 100     | Rolling window for success/failure tracking  |
+
+** 5.5 Implementation
+
+#+begin_src python
+@dataclass
+class CircuitBreaker:
+    failure_threshold: int = 3
+    half_open_timeout_s: float = 30.0
+    half_open_max_backoff_s: float = 300.0
+
+    state: str = "closed"
+    consecutive_failures: int = 0
+    last_failure_ts: float = 0.0
+    last_state_change_ts: float = 0.0
+    half_open_backoff_s: float = 30.0
+
+    def record_result(self, result: SendResult) -> None:
+        if result in (SendResult.CONFIRMED, SendResult.ACCEPTED):
+            self.consecutive_failures = 0
+            if self.state == "half_open":
+                self._transition("closed")
+                self.half_open_backoff_s = self.half_open_timeout_s
+        else:
+            self.consecutive_failures += 1
+            self.last_failure_ts = time.time()
+            if self.state == "half_open":
+                self._transition("open")
+                self.half_open_backoff_s = min(
+                    self.half_open_backoff_s * 2,
+                    self.half_open_max_backoff_s,
+                )
+            elif self.consecutive_failures >= self.failure_threshold:
+                self._transition("open")
+
+    def should_allow(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            elapsed = time.time() - self.last_state_change_ts
+            if elapsed >= self.half_open_backoff_s:
+                self._transition("half_open")
+                return True
+            return False
+        if self.state == "half_open":
+            return True  # one request allowed
+        return False
+
+    def _transition(self, new_state: str) -> None:
+        self.state = new_state
+        self.last_state_change_ts = time.time()
+#+end_src
+
+** 5.6 Promotion and Demotion
+
+The health monitor tracks transport reliability over time and can
+recommend tier changes. This is advisory --- tier assignments in
+code are static, but the *effective priority* during fanout can shift.
+
+| Observation                             | Action                               |
+|-----------------------------------------+--------------------------------------|
+| Transport succeeds 100% over 1h window  | Promote: try earlier in fanout order |
+| Transport fails >50% over 10min window  | Demote: try later, reduce timeout    |
+| Transport circuit open >5min            | Disable: skip entirely until manual  |
+| Transport recovers from OPEN to CLOSED  | Restore: return to configured tier   |
+
+* 6. Integration: How the Pieces Compose
+
+** 6.1 TX Path (=aq announce=)
+
+#+begin_src
+User runs: aq announce -c C-1 -f "auth.py"
+
+  1. CLI parses args, constructs Broadcast
+  2. Scheduler.should_send() -> True (or: forced by explicit announce)
+  3. TransportRegistry.fanout(broadcast)
+       a. FS_WRITE: FilesystemTransport.send() -> CONFIRMED
+       b. DISPATCHING: spawn threads for MQTT, Mesh, KBFS, GH, mDNS
+          - Each thread: check CircuitBreaker.should_allow()
+          - If allowed: Transport.send() -> SendResult
+          - If blocked: skip (circuit OPEN)
+       c. COLLECTING: wait for results, enforce deadline
+       d. COMPLETE: aggregate FanoutResult
+  4. Health monitor records each SendResult
+  5. CLI prints summary: "announced: C-1 -> aq-xxx.json (+ mqtt, mdns)"
+#+end_src
+
+** 6.2 RX Path (=aq watch=, future)
+
+#+begin_src
+Agent daemon runs: aq watch --channel broadcast
+
+  1. For each transport with RX capability:
+       TransportRX.start() -> LISTENING
+  2. Message arrives on any transport:
+       a. MSG_RECEIVED: parse payload
+       b. DEDUP: check Deduplicator.is_duplicate()
+          - If duplicate: drop, notify Trickle.on_consistent()
+          - If new: continue
+       c. DELIVER:
+          - Write to local filesystem (canonical store)
+          - Fire callbacks (conflict check, UI notification)
+          - Notify Trickle.on_inconsistent() (new data = reset timer)
+  3. Conflict detection runs on each new Broadcast:
+       check_conflicts(incoming, channel) -> list[ConflictSignal]
+  4. If conflicts detected:
+       - Print to stderr
+       - Optionally: re-announce own broadcasts (trickle reset)
+#+end_src
+
+** 6.3 Convergent Multicast Flow
+
+The same broadcast can arrive via multiple transports. The deduplicator
+ensures exactly-once processing while the trickle timer uses duplicate
+arrivals as a consistency signal.
+
+#+begin_src
+Agent A announces C-1 on filesystem + MQTT + mDNS
+
+Agent B receives:
+  t=0ms   filesystem poll   -> C-1 (NEW, deliver)
+  t=50ms  MQTT subscribe    -> C-1 (DUPLICATE, suppress, trickle++)
+  t=80ms  mDNS browse       -> C-1 (DUPLICATE, suppress, trickle++)
+
+Trickle timer: 2 redundant copies -> double interval (Imin -> 2*Imin)
+Result: Agent B has C-1 once, with high confidence in delivery.
+#+end_src
+
+* 7. Migration Path from Current Code
+
+The current =_fanout()= in =cli.py= is a ~20-line sequential
+best-effort loop. The target architecture adds five new concerns.
+Migration should be incremental.
+
+| Phase | Work                                    | Touches                            |
+|-------+-----------------------------------------+------------------------------------|
+| M0    | Extract =Transport= protocol            | =protocol.py=, each transport      |
+| M1    | Add =SendResult= enum                   | =protocol.py=, each =*_publish()=  |
+| M2    | Add =TransportRegistry=, replace =_fanout()= | =cli.py=, new =registry.py=   |
+| M3    | Add =CircuitBreaker= per transport      | New =health.py=                    |
+| M4    | Parallel fanout (ThreadPoolExecutor)    | =registry.py=                      |
+| M5    | Add =Deduplicator=                      | New =dedup.py=                     |
+| M6    | Add RX state machine (filesystem first) | New =rx.py=, =protocol.py=        |
+| M7    | Add RX for MQTT and mDNS               | =mqtt.py=, new =mdns.py=           |
+| M8    | Add =TrickleTimer=                      | Port from =amigosmalla/am/trickle.py= |
+
+Each phase is independently shippable and testable. Filesystem
+always works as the fallback at every phase.
+
+* 8. Open Questions
+
+1. *Should the fanout be async (=asyncio=) or threaded?* Current code
+   uses =subprocess.run()= (blocking). Threads are simpler to retrofit.
+   Asyncio is cleaner long-term but requires rewriting transport
+   implementations. Recommendation: threads for v0.5, asyncio for v1.0.
+
+2. *Should the RX path write to the filesystem unconditionally?* If a
+   broadcast arrives via MQTT, should =aq= write it to
+   =~/.aq/channels/broadcast/requests/= so =read_active()= sees it?
+   Recommendation: yes. The filesystem is the canonical merge point.
+   All transports converge there.
+
+3. *Per-conjecture or per-transport trickle timers?* RFC 6206 suggests
+   per-"code" (where code = the state being disseminated). For =aq=, this
+   means per-=(agent, conjecture_id)= pair. Each active conjecture has
+   its own trickle interval. Recommendation: per-conjecture, not per-transport.
+
+4. *mDNS lifetime semantics.* mDNS service registrations naturally
+   expire when the process exits. This maps cleanly to =aq='s lifecycle
+   (broadcast lives while agent works). But =aq announce= is a one-shot
+   CLI, not a long-running process. Options: (a) background daemon holds
+   registrations, (b) treat mDNS as RX-only (browse, don't register),
+   (c) =aq watch= daemon handles both TX registration and RX browsing.
+   Recommendation: (c).
+
+5. *OTP-style supervision vs circuit breaker.* The 10-agent review
+   (=aq-v0.5-plan.org=) suggested OTP let-it-crash over circuit breakers.
+   For a Python system without actor supervision trees, circuit breakers
+   are more pragmatic. The crash-and-restart model could apply to the
+   RX subscriber processes specifically: if the MQTT subscriber crashes,
+   restart it, don't circuit-break it.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
