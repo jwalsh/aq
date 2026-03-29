@@ -21,8 +21,17 @@ _MAX_FILES_LEN = 130
 
 
 def is_enabled() -> bool:
-    """Check if mesh broadcasting is enabled via environment."""
-    return os.environ.get("AQ_MESH", "0") == "1"
+    """Check if mesh broadcasting is enabled via environment or config."""
+    env_val = os.environ.get("AQ_MESH")
+    if env_val is not None:
+        return env_val == "1"
+    try:
+        import json
+        from pathlib import Path
+        cfg = json.loads((Path.home() / ".aq" / "config.json").read_text())
+        return cfg.get("mesh", {}).get("enabled", False)
+    except Exception:
+        return False
 
 
 def compact(broadcast: Broadcast) -> str:

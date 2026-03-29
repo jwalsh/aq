@@ -24,7 +24,16 @@ logger = logging.getLogger("aq.kbfs")
 
 
 def is_enabled() -> bool:
-    return os.environ.get("AQ_KBFS", "0") == "1"
+    env_val = os.environ.get("AQ_KBFS")
+    if env_val is not None:
+        return env_val == "1"
+    try:
+        import json
+        from pathlib import Path
+        cfg = json.loads((Path.home() / ".aq" / "config.json").read_text())
+        return cfg.get("kbfs", {}).get("enabled", False)
+    except Exception:
+        return False
 
 
 def kbfs_publish(broadcast: "Broadcast", channel: str = "broadcast") -> bool:
@@ -35,7 +44,15 @@ def kbfs_publish(broadcast: "Broadcast", channel: str = "broadcast") -> bool:
     """
     kbfs_dir = os.environ.get("AQ_KBFS_DIR", "")
     if not kbfs_dir:
-        logger.debug("AQ_KBFS_DIR not set, skipping")
+        try:
+            import json
+            from pathlib import Path
+            cfg = json.loads((Path.home() / ".aq" / "config.json").read_text())
+            kbfs_dir = cfg.get("kbfs", {}).get("dir", "")
+        except Exception:
+            pass
+    if not kbfs_dir:
+        logger.debug("AQ_KBFS_DIR not set and no dir in config, skipping")
         return False
 
     if not _find_keybase():

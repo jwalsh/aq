@@ -25,7 +25,16 @@ logger = logging.getLogger("aq.ghissue")
 
 
 def is_enabled() -> bool:
-    return os.environ.get("AQ_GHISSUE", "0") == "1"
+    env_val = os.environ.get("AQ_GHISSUE")
+    if env_val is not None:
+        return env_val == "1"
+    try:
+        import json
+        from pathlib import Path
+        cfg = json.loads((Path.home() / ".aq" / "config.json").read_text())
+        return cfg.get("ghissue", {}).get("enabled", False)
+    except Exception:
+        return False
 
 
 def ghissue_publish(broadcast: "Broadcast") -> bool:
