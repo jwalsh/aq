@@ -1,0 +1,934 @@
+#+TITLE: Keybase as aq Transport
+#+SUBTITLE: Bot API, Chat API, KBFS, and Recommended Architecture
+#+AUTHOR: Diego Martinez (Researcher) / Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* Abstract
+
+Keybase provides three transport surfaces relevant to aq: the chat API
+(message-based, with a persistent listener), KBFS (file-based, encrypted
+at rest), and bot accounts (dedicated identities with scoped
+permissions). This document evaluates each surface, proposes an
+architecture that uses chat as the primary RX path and KBFS as a
+durable fallback, and provides implementation sketches for both.
+
+The key finding: =keybase chat api-listen= is a persistent,
+non-polling, JSON-streaming subscriber that maps directly to the aq
+ingest pipeline. Combined with exploding messages (TTL-based
+auto-deletion), Keybase chat is a natural fit for ambient presence
+gossip with built-in forward secrecy.
+
+* Transport Scoring (L1.5 Requirements)
+
+| Requirement       | KBFS (files) | Chat (messages) | Chat + Bot |
+|-------------------+--------------+-----------------+------------|
+| Lossy-ok          |           85 |              90 |         90 |
+| Multicast         |           70 |              95 |         95 |
+| Zero orchestrator |           90 |              85 |         70 |
+| TTL semantics     |           40 |              95 |         95 |
+| Zero/low deps     |           60 |              60 |         50 |
+| Cross-platform    |           80 |              90 |         90 |
+| Latency < 500ms   |           50 |              80 |         80 |
+|-------------------+--------------+-----------------+------------|
+| *Composite*       |           68 |              85 |         81 |
+
+KBFS suffers on TTL (must implement cleanup externally) and latency
+(FUSE mount propagation is non-deterministic). Chat wins on TTL
+(exploding messages) and multicast (all conversation members receive).
+Bot accounts add complexity but enable restricted permissions.
+
+Proposed tier for TRANSPORTS.org: *Tier 1.5* -- between NATS and MQTT.
+Higher fidelity than MQTT (E2E encryption native), lower than NATS
+(latency), but unique in providing identity-verified, encrypted gossip
+with zero infrastructure.
+
+* Keybase Bot API
+
+** What Are Keybase Bots
+
+Bots are Keybase accounts with their own cryptographic identity --
+independent sigchain, keys, and device tree. They authenticate via
+paperkey (no GUI device required) and can join conversations, teams,
+and access KBFS.
+
+Two classes:
+
+- *Bot accounts*: created via =keybase bot signup=. Full Keybase
+  accounts authenticated with a paperkey. Can do everything a user
+  can do via the CLI/API.
+
+- *Restricted bots*: a role within teams (alongside owner, admin,
+  writer, reader). Restricted bots can only see messages explicitly
+  directed to them (via @-mention or matching a configured trigger
+  pattern). The team admin configures which messages are decrypted
+  for the bot using HMAC-derived keys from the team's shared key.
+
+** Bot Account Creation
+
+#+begin_src bash
+# Generate a bot token from your account
+keybase bot token create
+
+# Signup a new bot account using the token
+keybase bot signup --username aq-gossip-bot --token <token>
+# Returns a paperkey -- store this securely
+
+# The bot can now run headless:
+KEYBASE_PAPERKEY="word1 word2 ... word8" keybase oneshot --username aq-gossip-bot
+# This starts a temporary keybase session for the bot
+#+end_src
+
+** Bot Permissions Model
+
+When a bot is added to a team as a restricted bot, the admin configures
+message filtering:
+
+- Only @-mentions reach the bot
+- Only messages matching specific prefixes (e.g., =!aq= or =aq:=) reach the bot
+- The bot cannot read the broader conversation history
+
+Cryptographic enforcement: the server derives a bot-specific key from
+the team's shared key via HMAC-based key derivation, then encrypts only
+qualifying messages for the bot's public key. Human-to-human messages
+use the standard team key and remain unreadable to the bot.
+
+** Bot vs User Account for aq
+
+Recommendation: *use the user's existing keybase session* for initial
+deployment. Reasons:
+
+1. =keybase chat api-listen= works with the logged-in user session.
+   No additional account needed.
+2. aq messages are already sent via =keybase chat send aygpdr "..."=
+   from the user session.
+3. KBFS access requires the user's session for private directories.
+4. A dedicated bot account adds operational burden (paperkey management,
+   separate session) without clear benefit for a 2-3 person group.
+
+Upgrade path: create =aq-gossip-bot= when the group grows beyond
+direct participants, or when aq needs to run as a daemon independent
+of any user's session (e.g., on a headless server).
+
+** Official SDKs
+
+| Language   | Package              | Status          |
+|------------+----------------------+-----------------|
+| Python     | pykeybasebot         | Archived Jan 2025 |
+| Go         | go-keybase-chat-bot  | Maintained      |
+| JavaScript | keybase-bot          | Archived        |
+
+The Python SDK wraps =keybase chat api-listen= in an asyncio event
+loop and dispatches events to a handler function. The Go SDK provides
+=ListenForNewTextMessages()= as a blocking reader. Both are thin
+wrappers around the CLI JSON API -- for aq, calling the CLI directly
+via shell is simpler and avoids depending on archived libraries.
+
+* Chat API (Send + Receive)
+
+** Sending Messages
+
+#+begin_src bash
+# Direct user conversation
+keybase chat api -m '{
+  "method": "send",
+  "params": {
+    "options": {
+      "channel": {"name": "aygpdr,jwalsh"},
+      "message": {"body": "aq:researcher/feat-keybase C-7 [conjecture] contrib/keybase/"}
+    }
+  }
+}'
+
+# Team channel
+keybase chat api -m '{
+  "method": "send",
+  "params": {
+    "options": {
+      "channel": {
+        "name": "jwalsh1",
+        "members_type": "team",
+        "topic_name": "aq"
+      },
+      "message": {"body": "aq:researcher/feat-keybase C-7 [conjecture] contrib/keybase/"}
+    }
+  }
+}'
+
+# Exploding message (TTL = 60 seconds)
+keybase chat api -m '{
+  "method": "send",
+  "params": {
+    "options": {
+      "channel": {"name": "aygpdr,jwalsh"},
+      "message": {"body": "aq:researcher/feat-keybase C-7 [conjecture] contrib/keybase/"},
+      "exploding_lifetime": "60s"
+    }
+  }
+}'
+#+end_src
+
+** Reading Messages (Pull)
+
+#+begin_src bash
+# Read last N messages from a conversation
+keybase chat api -m '{
+  "method": "read",
+  "params": {
+    "options": {
+      "channel": {"name": "aygpdr,jwalsh"},
+      "pagination": {"num": 10}
+    }
+  }
+}'
+
+# Unread only, without marking as read (peek)
+keybase chat api -m '{
+  "method": "read",
+  "params": {
+    "options": {
+      "channel": {"name": "aygpdr,jwalsh"},
+      "unread_only": true,
+      "peek": true
+    }
+  }
+}'
+#+end_src
+
+** Receiving Messages (Push): =keybase chat api-listen=
+
+This is the critical capability. =api-listen= is a long-running process
+that streams incoming messages as newline-delimited JSON to stdout. It
+does not poll -- it subscribes to the keybase service's notification
+stream.
+
+#+begin_src bash
+# Listen to all conversations
+keybase chat api-listen
+
+# Listen to a specific conversation
+keybase chat api-listen --filter-channel '{"name":"aygpdr,jwalsh"}'
+
+# Listen to multiple channels
+keybase chat api-listen --filter-channels '[
+  {"name":"aygpdr,jwalsh"},
+  {"name":"jwalsh1", "topic_name":"aq", "members_type":"team"}
+]'
+
+# Include exploding messages (default: shown; use --hide-exploding to suppress)
+keybase chat api-listen
+
+# Include wallet events
+keybase chat api-listen --wallet
+
+# Include new-conversation notifications
+keybase chat api-listen --convs
+#+end_src
+
+Output format (one JSON object per line):
+
+#+begin_src json
+{
+  "type": "chat",
+  "source": "remote",
+  "msg": {
+    "id": 500,
+    "conversation_id": "0000824c...",
+    "channel": {
+      "name": "aygpdr,jwalsh",
+      "members_type": "impteamnative",
+      "topic_type": "chat"
+    },
+    "sender": {
+      "uid": "bf6e8d07...",
+      "username": "jwalsh",
+      "device_id": "3d835...",
+      "device_name": "Mac Device 2"
+    },
+    "sent_at": 1774785607,
+    "sent_at_ms": 1774785607362,
+    "content": {
+      "type": "text",
+      "text": {
+        "body": "aq:researcher/feat-keybase C-7 [conjecture] contrib/keybase/"
+      }
+    },
+    "is_ephemeral": false
+  }
+}
+#+end_src
+
+For exploding messages, additional fields appear:
+
+#+begin_src json
+{
+  "msg": {
+    "is_ephemeral": true,
+    "is_ephemeral_expired": false,
+    "e_time": 1774787530223,
+    "has_pairwise_macs": true
+  }
+}
+#+end_src
+
+Once =is_ephemeral_expired= becomes true, the content is gone -- the
+=content.type= becomes ="none"= and the body is empty.
+
+* KBFS Integration
+
+** Current State
+
+KBFS is already in use for aq. The AMTP messages are written to:
+
+#+begin_example
+/keybase/private/jwalsh,aygpdr/amtp/
+#+end_example
+
+Observed file pattern: =caso-{epoch}.msg= (e.g., =caso-1774786869.msg=).
+
+The =transports.sample.toml= already declares a KBFS mount:
+
+#+begin_src toml
+[mounts.kbfs]
+type = "kbfs"
+path = "/"
+enabled = false
+dir = "/keybase/private/jwalsh,aygpdr/aq"
+#+end_src
+
+** KBFS Access Modes
+
+Two access methods, depending on whether the FUSE mount is available:
+
+#+begin_src bash
+# FUSE-mounted (if /keybase/ exists)
+ls /keybase/private/jwalsh,aygpdr/amtp/
+cat /keybase/private/jwalsh,aygpdr/amtp/caso-1774786869.msg
+
+# CLI-based (always works, even without FUSE)
+keybase fs ls /keybase/private/jwalsh,aygpdr/amtp/
+keybase fs read /keybase/private/jwalsh,aygpdr/amtp/caso-1774786869.msg
+keybase fs write /keybase/private/jwalsh,aygpdr/aq/broadcast-{ulid}.json < payload.json
+#+end_src
+
+On macOS, the FUSE mount is not always available (requires macFUSE,
+which has kernel extension signing issues post-Catalina). The CLI
+=keybase fs= commands work regardless -- but they are not watchable
+via FSEvents/kqueue. This is the latency problem: without FUSE, the
+only RX mechanism is polling =keybase fs ls=.
+
+** KBFS vs Chat: When to Use Which
+
+| Property           | KBFS                           | Chat                          |
+|--------------------+--------------------------------+-------------------------------|
+| Delivery model     | File write, reader must poll   | Push notification to listener |
+| TTL                | Manual (must delete files)     | Native (exploding messages)   |
+| Persistence        | Until deleted                  | Until deleted or expired      |
+| Multicast          | All readers of the directory   | All conversation members      |
+| Latency (FUSE)     | ~200ms (inode watch)           | ~100ms (service notification) |
+| Latency (no FUSE)  | 1-5s (polling)                 | ~100ms (service notification) |
+| Encryption         | E2E (per-user keys)            | E2E (per-conversation keys)   |
+| Cross-machine      | Yes (Keybase syncs)            | Yes (Keybase syncs)           |
+| Debuggability      | =ls= and =cat=                 | =keybase chat api read=       |
+| Bot support        | Write only (bots can't watch)  | Full (api-listen)             |
+
+Verdict: chat for the live presence bus (RX via api-listen, TX via
+api send). KBFS for durable artifacts that outlive a TTL -- conjecture
+specs, session logs, CPRR digests.
+
+* Exploding Messages as TTL Mechanism
+
+** Mapping aq TTL to Exploding Lifetime
+
+aq broadcasts carry a TTL field (e.g., 60s for whisper, 300s for
+announce, 3600s for session). Keybase exploding messages provide
+native enforcement of these semantics.
+
+| aq Broadcast Type | aq TTL | Exploding Lifetime | Notes                          |
+|-------------------+--------+--------------------+--------------------------------|
+| whisper           |    60s | "60s"              | Perfect fit                    |
+| announce          |   300s | "5m"               | Perfect fit                    |
+| session/startup   |  3600s | "1h"               | Perfect fit                    |
+| session/shutdown  |  3600s | "1h"               | Perfect fit                    |
+| conjecture        |    N/A | (none)             | Conjectures should persist     |
+
+** Semantics
+
+- Timer begins at send time, not receive time.
+- All recipients see the same expiry (=e_time= in the message).
+- Upon expiry, the client destroys both the decryption key material
+  and the plaintext. The ciphertext blob may remain on the server
+  but is unrecoverable.
+- Forward secrecy: exploding messages use ephemeral keys derived
+  per-message, so compromising a device after expiry does not
+  reveal past exploding messages.
+
+** Implementation
+
+#+begin_src bash
+# aq announce via Keybase with TTL
+aq_keybase_send() {
+    local channel="$1"
+    local body="$2"
+    local ttl="${3:-300}"  # default 5 minutes
+
+    local lifetime="${ttl}s"
+
+    keybase chat api -m "$(cat <<EOF
+{
+  "method": "send",
+  "params": {
+    "options": {
+      "channel": {"name": "$channel"},
+      "message": {"body": "$body"},
+      "exploding_lifetime": "$lifetime"
+    }
+  }
+}
+EOF
+)"
+}
+
+# Usage:
+# aq_keybase_send "aygpdr,jwalsh" "aq:researcher/main C-7 [proof] spec.org" 60
+#+end_src
+
+* Keybase Teams for aq
+
+** Architecture
+
+A Keybase team provides:
+- Named channels (topics) within the team
+- Role-based access (owner, admin, writer, reader, bot, restricted_bot)
+- Shared KBFS directory at =/keybase/team/<teamname>/=
+- Bot isolation via restricted permissions
+
+Proposed team structure for aq:
+
+#+begin_example
+team: amigosmalla (or defrecord.aq as a subteam)
+  #general     -- human chat
+  #aq          -- aq gossip bus (agents write here)
+  #conjectures -- CPRR conjecture discussion
+  #mesh        -- Meshtastic relay (am bridge)
+#+end_example
+
+The =#aq= channel would carry all aq broadcasts. =api-listen= filtered
+to this channel becomes the RX path. KBFS at =/keybase/team/amigosmalla/aq/=
+stores durable artifacts.
+
+** Existing Infrastructure
+
+The =jwalsh1= team already exists with:
+- jwalsh (owner)
+- mynja (writer)
+- reminderbot (restricted_bot)
+
+This demonstrates the bot role is already operational in the team
+infrastructure.
+
+** Creating the aq Channel
+
+#+begin_src bash
+# Create the team (if not using existing)
+keybase team api -m '{"method": "create-team", "params": {"options": {"team": "amigosmalla"}}}'
+
+# Or create a subteam under existing team
+keybase team api -m '{"method": "create-team", "params": {"options": {"team": "defrecord.aq"}}}'
+
+# Add members
+keybase team api -m '{
+  "method": "add-members",
+  "params": {
+    "options": {
+      "team": "amigosmalla",
+      "usernames": [
+        {"username": "aygpdr", "role": "writer"},
+        {"username": "jwalsh", "role": "admin"}
+      ]
+    }
+  }
+}'
+
+# Send to the team channel
+keybase chat send --channel aq amigosmalla "aq:test/main [announce] hello from aq"
+#+end_src
+
+* Security Comparison
+
+** Keybase vs Other aq Transports
+
+| Property                  | Keybase (Chat)     | Keybase (KBFS)    | Meshtastic        | MQTT (plain)    | Filesystem      |
+|---------------------------+--------------------+-------------------+-------------------+-----------------+-----------------|
+| Encryption                | E2E (NaCl)         | E2E (NaCl)        | AES-256-CTR (PSK) | None (TLS opt.) | None            |
+| Key management            | Automatic (sigchain)| Automatic         | Manual (PSK share)| Manual (certs)  | N/A             |
+| Forward secrecy           | Yes (ephemeral keys)| No               | No                | No              | N/A             |
+| Identity verification     | Sigchain + proofs  | Sigchain + proofs | Node ID (no auth) | None            | Unix UID        |
+| Message authentication    | Per-device signing | Per-device signing | None (PSK shared) | None            | None            |
+| Metadata protection       | Partial (server sees routing) | Partial | Partial (MQTT broker) | None       | Full (local)    |
+| Compromise recovery       | Device revocation  | Device revocation | Re-key all nodes  | Re-cert         | N/A             |
+
+** Key Observations
+
+Keybase provides the strongest identity model of any aq transport.
+Each message is signed by a specific device key, chained to a user's
+sigchain, which is anchored to public proofs (GitHub, Twitter, DNS).
+This means aq broadcasts over Keybase are non-repudiable and
+attributable to a specific user and device.
+
+Meshtastic's AES-256-CTR with a shared PSK provides confidentiality
+but no authentication -- any node with the PSK can impersonate any
+other node. Keybase's per-device signing eliminates this class of
+attack entirely.
+
+The forward secrecy property of exploding messages is unique among
+aq transports. A compromised device yields no access to expired
+broadcasts. This is a strong property for presence gossip, where
+stale information should not only expire semantically (TTL) but
+also cryptographically (key destruction).
+
+* Recommended Architecture for aq
+
+** Dual-Path Design
+
+#+begin_example
+                    +-------------------+
+                    |   aq daemon       |
+                    |   (local bus)     |
+                    +--------+----------+
+                             |
+              +--------------+--------------+
+              |                             |
+    +---------v----------+     +------------v-----------+
+    | Keybase Chat       |     | Keybase KBFS           |
+    | (live gossip)      |     | (durable artifacts)    |
+    +--------------------+     +------------------------+
+    |                    |     |                        |
+    | TX: chat api send  |     | TX: fs write           |
+    |   + exploding TTL  |     |   to /keybase/team/    |
+    |                    |     |   amigosmalla/aq/      |
+    | RX: api-listen     |     |                        |
+    |   (persistent,     |     | RX: fs ls + poll       |
+    |    push-based)     |     |   or FUSE + fswatch    |
+    +--------------------+     +------------------------+
+#+end_example
+
+** Transport Mount Configuration
+
+#+begin_src toml
+# In ~/.aq/transports.toml
+
+[mounts.keybase-chat]
+type = "keybase-chat"
+path = "/"
+enabled = true
+channel = "aygpdr,jwalsh"
+# For team: channel = "amigosmalla", topic = "aq", members_type = "team"
+exploding_ttl_default = "5m"
+# Exploding TTL overrides per broadcast type:
+#   whisper  -> 60s
+#   announce -> 5m
+#   session  -> 1h
+
+[mounts.kbfs]
+type = "kbfs"
+path = "/conjecture"
+enabled = true
+dir = "/keybase/private/jwalsh,aygpdr/aq"
+# Only conjectures and durable artifacts go to KBFS.
+# Live gossip goes through chat.
+#+end_src
+
+* Sample Implementation: RX Side
+
+** Shell: =keybase chat api-listen= piped to aq ingest
+
+This is the zero-dependency RX path. No SDK, no library. A shell
+pipeline that reads the JSON stream and feeds messages into aq.
+
+#+begin_src bash :tangle aq-keybase-rx.sh :shebang "#!/usr/bin/env bash"
+# aq-keybase-rx.sh -- Keybase chat RX for aq
+#
+# Listens for incoming Keybase messages and ingests them into aq.
+# Runs as a long-lived process (daemon or tmux session).
+#
+# Usage:
+#   ./aq-keybase-rx.sh                          # all conversations
+#   ./aq-keybase-rx.sh "aygpdr,jwalsh"          # specific channel
+#   ./aq-keybase-rx.sh "amigosmalla" "aq" team  # team channel
+
+set -euo pipefail
+
+AQ_DIR="${AQ_DIR:-$HOME/.aq}"
+AQ_CHANNELS="${AQ_DIR}/channels"
+AQ_PREFIX="aq:"
+
+CHANNEL_NAME="${1:-}"
+TOPIC_NAME="${2:-}"
+MEMBERS_TYPE="${3:-}"
+
+# Build filter arguments
+FILTER_ARGS=()
+if [[ -n "$CHANNEL_NAME" ]]; then
+    if [[ -n "$MEMBERS_TYPE" ]]; then
+        FILTER_ARGS=(--filter-channel "{\"name\":\"$CHANNEL_NAME\",\"topic_name\":\"$TOPIC_NAME\",\"members_type\":\"$MEMBERS_TYPE\"}")
+    else
+        FILTER_ARGS=(--filter-channel "{\"name\":\"$CHANNEL_NAME\"}")
+    fi
+fi
+
+mkdir -p "${AQ_CHANNELS}/broadcast" "${AQ_CHANNELS}/session"
+
+process_message() {
+    local json_line="$1"
+
+    # Extract fields via jq
+    local msg_type body sender sent_at is_ephemeral
+    msg_type=$(echo "$json_line" | jq -r '.type // empty' 2>/dev/null) || return 0
+    body=$(echo "$json_line" | jq -r '.msg.content.text.body // empty' 2>/dev/null) || return 0
+    sender=$(echo "$json_line" | jq -r '.msg.sender.username // empty' 2>/dev/null) || return 0
+    sent_at=$(echo "$json_line" | jq -r '.msg.sent_at // empty' 2>/dev/null) || return 0
+    is_ephemeral=$(echo "$json_line" | jq -r '.msg.is_ephemeral // false' 2>/dev/null) || return 0
+
+    # Only process chat text messages
+    [[ "$msg_type" == "chat" ]] || return 0
+    [[ -n "$body" ]] || return 0
+
+    # Only process aq-prefixed messages
+    if [[ "$body" != "${AQ_PREFIX}"* ]]; then
+        return 0
+    fi
+
+    # Parse aq wire format: aq:agent/branch C-id [phase] files
+    local aq_payload="${body#${AQ_PREFIX}}"
+
+    # Generate ULID-like filename (epoch + random suffix)
+    local filename
+    filename="kb-${sent_at}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ').json"
+
+    # Determine channel from broadcast type
+    local channel_dir="${AQ_CHANNELS}/broadcast"
+
+    # Compute TTL from ephemeral status
+    local ttl="300"
+    if [[ "$is_ephemeral" == "true" ]]; then
+        local e_time
+        e_time=$(echo "$json_line" | jq -r '.msg.e_time // empty' 2>/dev/null) || true
+        if [[ -n "$e_time" ]]; then
+            # e_time is epoch seconds; compute remaining TTL
+            local now
+            now=$(date +%s)
+            ttl=$(( e_time - now ))
+            [[ "$ttl" -gt 0 ]] || return 0  # already expired
+        fi
+    fi
+
+    # Write aq broadcast file
+    cat > "${channel_dir}/${filename}" <<PAYLOAD
+{
+  "agent": "${sender}",
+  "payload": "${aq_payload}",
+  "transport": "keybase-chat",
+  "ttl": ${ttl},
+  "ts": ${sent_at},
+  "ephemeral": ${is_ephemeral},
+  "raw": $(echo "$json_line" | jq -c '.msg | {id, channel, sender, is_ephemeral, e_time}')
+}
+PAYLOAD
+
+    echo "[aq-keybase-rx] ingested: ${filename} from ${sender} (ttl=${ttl}s)"
+}
+
+echo "[aq-keybase-rx] starting listener..."
+echo "[aq-keybase-rx] filter: ${FILTER_ARGS[*]:-none (all conversations)}"
+echo "[aq-keybase-rx] prefix: ${AQ_PREFIX}"
+echo "[aq-keybase-rx] writing to: ${AQ_CHANNELS}/broadcast/"
+
+# The main loop: api-listen streams JSON, one object per line
+keybase chat api-listen "${FILTER_ARGS[@]}" | while IFS= read -r line; do
+    process_message "$line"
+done
+#+end_src
+
+** Shell: TX Side (Sending aq Broadcasts via Keybase)
+
+#+begin_src bash :tangle aq-keybase-tx.sh :shebang "#!/usr/bin/env bash"
+# aq-keybase-tx.sh -- Send an aq broadcast via Keybase chat
+#
+# Usage:
+#   ./aq-keybase-tx.sh "aygpdr,jwalsh" "researcher/main C-7 [proof] spec.org" 300
+
+set -euo pipefail
+
+CHANNEL="${1:?usage: aq-keybase-tx.sh <channel> <payload> [ttl_seconds]}"
+PAYLOAD="${2:?usage: aq-keybase-tx.sh <channel> <payload> [ttl_seconds]}"
+TTL="${3:-300}"
+
+BODY="aq:${PAYLOAD}"
+
+# Build send command
+SEND_JSON="{
+  \"method\": \"send\",
+  \"params\": {
+    \"options\": {
+      \"channel\": {\"name\": \"${CHANNEL}\"},
+      \"message\": {\"body\": \"${BODY}\"},
+      \"exploding_lifetime\": \"${TTL}s\"
+    }
+  }
+}"
+
+result=$(keybase chat api -m "$SEND_JSON" 2>&1)
+msg_id=$(echo "$result" | jq -r '.result.id // empty' 2>/dev/null)
+
+if [[ -n "$msg_id" ]]; then
+    echo "[aq-keybase-tx] sent msg_id=${msg_id} ttl=${TTL}s to ${CHANNEL}"
+else
+    echo "[aq-keybase-tx] error: ${result}" >&2
+    exit 1
+fi
+#+end_src
+
+** Python: Async Bot Using pykeybasebot Pattern
+
+For cases where the shell pipeline is insufficient (e.g., structured
+message parsing, state management):
+
+#+begin_src python :tangle aq_keybase_bot.py
+"""
+aq Keybase bot -- async listener that ingests aq broadcasts.
+
+Wraps keybase chat api-listen via subprocess (no SDK dependency).
+The pykeybasebot library is archived; this reimplements the core
+pattern using only asyncio and subprocess.
+"""
+
+import asyncio
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+AQ_DIR = Path(os.environ.get("AQ_DIR", Path.home() / ".aq"))
+AQ_CHANNELS = AQ_DIR / "channels"
+AQ_PREFIX = "aq:"
+
+
+def parse_aq_message(msg: dict) -> Optional[dict]:
+    """Extract aq broadcast from a Keybase chat message."""
+    content = msg.get("content", {})
+    if content.get("type") != "text":
+        return None
+
+    body = content.get("text", {}).get("body", "")
+    if not body.startswith(AQ_PREFIX):
+        return None
+
+    payload = body[len(AQ_PREFIX):]
+    sender = msg.get("sender", {}).get("username", "unknown")
+    sent_at = msg.get("sent_at", int(time.time()))
+    is_ephemeral = msg.get("is_ephemeral", False)
+
+    ttl = 300  # default
+    if is_ephemeral:
+        e_time = msg.get("e_time", 0)
+        if e_time:
+            # e_time is milliseconds
+            remaining = (e_time / 1000) - time.time()
+            if remaining <= 0:
+                return None  # already expired
+            ttl = int(remaining)
+
+    return {
+        "agent": sender,
+        "payload": payload,
+        "transport": "keybase-chat",
+        "ttl": ttl,
+        "ts": sent_at,
+        "ephemeral": is_ephemeral,
+        "raw": {
+            "id": msg.get("id"),
+            "channel": msg.get("channel"),
+            "sender": msg.get("sender"),
+            "is_ephemeral": is_ephemeral,
+            "e_time": msg.get("e_time"),
+        },
+    }
+
+
+async def ingest_broadcast(broadcast: dict) -> Path:
+    """Write a parsed aq broadcast to the local bus."""
+    broadcast_dir = AQ_CHANNELS / "broadcast"
+    broadcast_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"kb-{broadcast['ts']}-{os.urandom(4).hex()}.json"
+    filepath = broadcast_dir / filename
+
+    filepath.write_text(json.dumps(broadcast, indent=2))
+    return filepath
+
+
+async def listen(
+    channel: Optional[str] = None,
+    topic: Optional[str] = None,
+    members_type: Optional[str] = None,
+):
+    """
+    Start keybase chat api-listen as a subprocess and process
+    incoming messages.
+    """
+    command = ["keybase", "chat", "api-listen"]
+
+    if channel:
+        filter_spec = {"name": channel}
+        if topic:
+            filter_spec["topic_name"] = topic
+        if members_type:
+            filter_spec["members_type"] = members_type
+        command.extend(["--filter-channel", json.dumps(filter_spec)])
+
+    print(f"[aq-keybase] starting: {' '.join(command)}", file=sys.stderr)
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") != "chat":
+            continue
+
+        msg = event.get("msg", {})
+        broadcast = parse_aq_message(msg)
+        if broadcast is None:
+            continue
+
+        filepath = await ingest_broadcast(broadcast)
+        sender = broadcast["agent"]
+        ttl = broadcast["ttl"]
+        print(
+            f"[aq-keybase] ingested: {filepath.name} "
+            f"from {sender} (ttl={ttl}s)",
+            file=sys.stderr,
+        )
+
+
+def main():
+    """Entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="aq Keybase chat listener")
+    parser.add_argument("--channel", default=None, help="Channel name filter")
+    parser.add_argument("--topic", default=None, help="Topic name (for teams)")
+    parser.add_argument(
+        "--members-type", default=None, help="Members type (team, impteamnative)"
+    )
+    args = parser.parse_args()
+
+    asyncio.run(listen(args.channel, args.topic, args.members_type))
+
+
+if __name__ == "__main__":
+    main()
+#+end_src
+
+* Cross-Platform Support
+
+=keybase chat api= and =keybase chat api-listen= are features of the
+Keybase client, which is available on:
+
+| Platform | Package                     | Status       |
+|----------+-----------------------------+--------------|
+| macOS    | =brew install keybase=      | Confirmed (6.6.0) |
+| Linux    | =.deb= / =.rpm= / =snap=   | Available    |
+| FreeBSD  | Build from source (Go)      | Untested     |
+
+The Keybase client is written in Go. FreeBSD support is not officially
+packaged but the codebase should compile on FreeBSD given Go's BSD
+support. The chat API is CLI-based (stdin/stdout JSON), so no
+platform-specific dependencies beyond the keybase binary itself.
+
+For the aq use case (jwalsh on macOS, nexus on FreeBSD), the macOS
+path is confirmed working. FreeBSD would need a source build of the
+keybase client -- this is the main risk for cross-platform deployment.
+
+* KBFS vs Chat: Coexistence
+
+Both should coexist. They serve different purposes and the transport
+mount system already supports multiple backends.
+
+** Routing Rules
+
+#+begin_src
+IF broadcast.type IN (whisper, announce):
+    -> keybase-chat (exploding, TTL-matched)
+    -> local filesystem (canonical)
+
+IF broadcast.type IN (session/startup, session/shutdown):
+    -> keybase-chat (exploding, 1h TTL)
+    -> local filesystem (canonical)
+
+IF broadcast.type == conjecture:
+    -> kbfs (durable, no TTL)
+    -> keybase-chat (non-exploding, for notification)
+    -> local filesystem (canonical)
+
+IF broadcast.type == cprr-digest:
+    -> kbfs (durable)
+    -> local filesystem (canonical)
+#+end_src
+
+The local filesystem remains canonical. Keybase transports are
+replication paths that extend the gossip scope beyond the local
+machine.
+
+* Open Questions
+
+1. *FreeBSD keybase client*: Can it be built from source? The Go
+   codebase should compile, but the KBFS FUSE layer may not work
+   on FreeBSD. Chat API does not depend on FUSE.
+
+2. *Bot account lifecycle*: If aq runs as a daemon, should it use
+   =keybase oneshot= (ephemeral session) or a persistent login?
+   Oneshot is cleaner for containers; persistent login is simpler
+   for a tmux session.
+
+3. *Message ordering*: =api-listen= delivers messages in arrival
+   order. aq broadcasts are designed to be commutative (order
+   doesn't matter, latest-writer-wins with TTL). No ordering
+   guarantees needed.
+
+4. *Rate limiting*: The chat API has rate limits (observed:
+   capacity=9000, gas=8998 per tank). At aq's broadcast rate
+   (~1-10 messages per minute per agent), this is not a concern.
+
+5. *Team vs direct conversation*: For 2-3 people, a direct
+   conversation (=aygpdr,jwalsh=) is simpler. For a group with
+   bots, a team with channels provides better isolation. The
+   transport config should support both.
+
+6. *Threshold cryptography research angle*: Keybase's per-device
+   signing and HMAC-derived bot keys hint at a threshold scheme
+   where multiple agents could collaboratively verify a broadcast.
+   This is speculative but aligns with collaborative verification
+   research -- multiple aq agents contributing to conjecture
+   validation through distributed trust.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
