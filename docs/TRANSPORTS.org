@@ -49,6 +49,7 @@ Scores are 0–100 against L1.5 requirements. Higher = better fit.
 | Filesystem (~/.aq/)    |       95 |      75 |       100 |        80 |      90 | canonical     |
 | Serf / memberlist      |       92 |      95 |        65 |        99 |      30 | true gossip   |
 | NATS                   |       88 |      99 |        70 |        99 |      60 | light broker  |
+| mDNS / Bonjour         |       78 |      85 |       100 |        95 |      20 | local-net     |
 | NFS mount              |       72 |      65 |        90 |        80 |      90 | network-fs    |
 | etcd                   |       62 |      90 |        40 |        85 |      95 | k8s-native    |
 | Redis pub/sub          |       68 |      92 |        60 |        95 |      50 | in-memory bus |
@@ -58,6 +59,7 @@ Scores are 0–100 against L1.5 requirements. Higher = better fit.
 | SMB / Samba            |       55 |      55 |        70 |        80 |      85 | network-fs    |
 | Wave (wave-server)     |       70 |      60 |        35 |        85 |      90 | federated     |
 | WebDAV                 |       50 |      50 |        80 |        70 |      80 | http-fs       |
+| Meshtastic / LoRa      |       45 |      20 |        40 |        99 |      10 | offline mesh  |
 | Named FIFO             |       40 |      95 |       100 |        20 |      20 | unix prim.    |
 | /tmp/ shared file      |       35 |      85 |       100 |        70 |      40 | unix prim.    |
 | k8s ConfigMap          |       35 |      40 |        30 |        40 |      70 | anti-pattern  |
@@ -696,6 +698,125 @@ Some teams use ConfigMap writes as a poor-man's coordination mechanism.
   =/tmp/= shared file anti-pattern. If you're in k8s, use etcd directly
   or NATS with a k8s operator.
 
+** mDNS / Bonjour — LOCAL NETWORK DISCOVERY
+:PROPERTIES:
+:FIT: 78
+:STATUS: natural fit for local mesh; zero-config LAN presence
+:TAGS: zero-deps local-network multicast zero-config
+:END:
+
+Multicast DNS for service discovery on local network. Zero configuration,
+works immediately on any LAN segment.
+
+- *Install*: none — built into FreeBSD (mDNSResponder), macOS (Bonjour), Linux (avahi)
+- *Protocol*: mDNS (RFC 6762) + DNS-SD (RFC 6763), port 5353 UDP multicast
+- *Discovery*: =_aq._tcp.local= service type
+- *Fanout*: true multicast — all hosts on subnet receive announcements
+- *Persistence*: none — presence expires when service deregisters or host dies
+- *TTL*: mDNS records have TTL (typically 120s); re-announce before expiry
+- *FreeBSD*: =mDNSResponder= in base; =dns-sd= CLI
+- *macOS*: Bonjour built-in; =dns-sd= CLI
+- *Linux*: =avahi-daemon= + =avahi-publish-service=
+
+#+begin_src bash :eval no
+# Register aq presence service
+dns-sd -R "hydra-aq" _aq._tcp local 9999 \
+  agent=HYDR repo=aygp-dr/hydra-setup branch=main
+
+# Browse for aq services on local network
+dns-sd -B _aq._tcp local
+
+# Resolve a discovered service
+dns-sd -L "hydra-aq" _aq._tcp local
+#+end_src
+
+#+begin_src python :eval no
+# aq mDNS transport sketch
+from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
+
+def announce_mdns(broadcast):
+    info = ServiceInfo(
+        "_aq._tcp.local.",
+        f"{broadcast.agent}-aq._aq._tcp.local.",
+        port=9999,
+        properties={
+            'agent': broadcast.agent,
+            'conjecture': broadcast.conjecture_id,
+            'repo': broadcast.repo,
+            'branch': broadcast.branch,
+        },
+        server=f"{socket.gethostname()}.local.",
+    )
+    zeroconf.register_service(info)
+#+end_src
+
+Verdict: Perfectly matches L1.5 requirements — zero deps, multicast fanout,
+lossy-ok, no orchestrator. The service discovery model (register → browse →
+resolve) maps cleanly to announce → read_active. Natural fit for local mesh
+presence: nexus, mini, pi all on same LAN see each other without any broker.
+The 120s default TTL is appropriate for presence. Primary limit: single LAN
+segment only (mDNS doesn't cross routers without special config). Works
+alongside Tailscale for hosts on both physical LAN and overlay network.
+
+** Meshtastic / LoRa — OFFLINE MESH
+:PROPERTIES:
+:FIT: 45
+:STATUS: deployed; amigosmalla channel for agent coordination
+:TAGS: lora mesh offline low-bandwidth serial
+:END:
+
+LoRa mesh network via Meshtastic radios. Works without internet, across
+kilometers. Primary transport for amigosmalla multi-agent collaboration.
+
+- *Install*: =pip install meshtastic= + Meshtastic radio hardware
+- *Protocol*: AMTP (Amigosmalla Text Protocol) over LoRa, 200 byte max
+- *Channel*: Private encrypted channel (ch1), not public default (ch0)
+- *Fanout*: true mesh broadcast — all nodes receive all messages
+- *Persistence*: none — fire-and-forget radio packets
+- *Latency*: 1-30 seconds (depends on mesh hops and duty cycle)
+- *FreeBSD*: =meshtastic= Python CLI; serial port via =/dev/cuaU*=
+- *macOS*: =meshtastic= Python CLI; serial port via =/dev/cu.usbmodem*=
+
+#+begin_src bash :eval no
+# Send presence via Meshtastic
+meshtastic --port /dev/cu.usbmodem3101 --ch-index 1 \
+  --sendtext "@HYDR|SYNC|42|ver=0.1,state=online"
+
+# Receive messages (non-blocking check via am CLI)
+am inbox
+#+end_src
+
+AMTP message format (v0.1):
+#+begin_example
+@AGENT|TYPE|SEQ|PAYLOAD
+
+Types: HELO, ACK, PROP, VOTE, SYNC, TASK, DONE, NOTE, PING
+Example: @HYDR|PROP|50|enc:use compact header
+#+end_example
+
+AMTP v0.2 compact format (proposed):
+#+begin_example
+<agent><type><seq>|<payload>
+
+Agent codes: C=CASO, H=HYDR, O=CORE, M=MESA, E=ECHO
+Type codes: H=HELO, A=ACK, P=PROP, V=VOTE, S=SYNC, T=TASK, D=DONE, N=NOTE, G=PING
+Seq: base62 encoded
+Example: HPo|enc:compact (saves ~40% vs v0.1)
+#+end_example
+
+Serial port coordination:
+- Advisory lock via =lockf= (FreeBSD) or =flock= (Linux)
+- Circuit breaker after 3 consecutive failures
+- Broker pattern for multi-process access (=am/broker.py=)
+
+Verdict: The offline capability is unique — works during internet outages,
+in Faraday-caged environments, across physical distance without infrastructure.
+Low bandwidth (200 bytes) forces protocol efficiency. Latency (1-30s) exceeds
+L1.5 target but acceptable for coordination when no other transport available.
+Primary use: amigosmalla agent collaboration across hosts without shared network.
+Secondary: fallback when all other transports fail. See =amigosmalla/am/= for
+implementation and =docs/amtp-v0.2-draft.org= for protocol spec.
+
 ** Redis PUBLISH/SUBSCRIBE
 :PROPERTIES:
 :FIT: 68
@@ -743,11 +864,13 @@ subject, or a Mosquitto topic.
 #+begin_src
 Tier 0 (default):    filesystem (~/.aq/)      — works everywhere, no deps
 Tier 0.5 (mounted):  NFS / SMB / WebDAV       — same code, shared path (AQ_HOME=/mnt/...)
+Tier 0.7 (local):    mDNS / Bonjour          — zero-config LAN presence, no broker
 Tier 1 (local net):  NATS or Redis pub/sub    — when nexus↔mini latency matters
 Tier 1.5 (object):   S3 / MinIO              — cloud or k8s-hosted agents
 Tier 2 (k8s):        etcd                    — already present if running k8s
 Tier 2.2 (gossip):   Serf / memberlist       — true SWIM gossip; semantics match aq's
 Tier 3 (IoT/hybrid): MQTT (Mosquitto)        — already deployed for Meshtastic
+Tier 3.5 (offline):  Meshtastic / LoRa       — amigosmalla mesh, works without internet
 Tier 4 (monitor):    IRC (#aq-presence)       — human+agent hybrid view
 Tier ∞ (ceremony):   BBS echomail            — daily CPRR digest
 #+end_src
