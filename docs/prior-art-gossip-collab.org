@@ -1,0 +1,730 @@
+#+TITLE: Prior Art: Gossip Protocols for Same-Machine, LAN, and Agent Collaboration
+#+SUBTITLE: What exists, what is novel about aq, and where the gaps are
+#+AUTHOR: Diego Martinez (Researcher)
+#+DATE: 2026-03-28
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* 0. Scope
+
+This document surveys prior art in six areas relevant to the amigosmalla
+project and the broader question of gossip-based coordination for AI
+agents working on shared codebases:
+
+1. Steve Yegge's writing on agent coordination
+2. Same-machine gossip (processes on one host)
+3. LAN gossip for developer coordination
+4. AI agent gossip and multi-agent coordination
+5. The "aq-like" pattern (ambient intent broadcasting)
+6. Physical proximity as information relevance filter
+
+The goal: identify what is genuinely novel about the amigosmalla /
+AMTP / aq approach vs. what has been explored before.
+
+* 1. Steve Yegge on Agent Coordination
+
+Yegge has not written about gossip protocols specifically. His work
+on multi-agent coordination takes a different architectural path ---
+hierarchical orchestration with persistent state in Git --- but
+his problem analysis overlaps substantially with ours.
+
+** 1.1 Gas Town (January 2026)
+
+Gas Town is an open-source multi-agent workspace manager built on
+Claude Code.
+
+- URL: https://github.com/steveyegge/gastown
+- Blog: https://steve-yegge.medium.com/welcome-to-gas-town-4f25ee16dd04
+
+Architecture:
+| Role     | Function                                              |
+|----------+-------------------------------------------------------|
+| Mayor    | Central Claude Code instance, full workspace context  |
+| Polecats | Ephemeral worker agents with persistent identity      |
+| Witness  | Per-rig supervisor, detects stuck agents              |
+| Deacon   | Cross-rig overseer, continuous patrol cycles          |
+| Refinery | Merge coordinator, Bors-style bisecting queue         |
+
+Key insight: agents are Beads (Git-backed persistent identities).
+Work persists in =.events.jsonl= logs. New agents discover prior
+context through "Seance" --- querying predecessor sessions.
+
+Communication is NOT gossip. It is hierarchical:
+- Mayor assigns tasks via "hooks" (pinned Beads)
+- GUPP: "If there is work on your hook, YOU MUST RUN IT"
+- Coordination through molecules (chained Beads), wisps (ephemeral
+  orchestration), and patrols (looping supervisor workflows)
+- Conflict resolution via Refinery's sequential rebasing
+
+Yegge's diagnosis of the coordination problem:
+
+#+begin_quote
+"Everything you do has to be 100% transparent and announced, all the
+time, or else you might as well be working in a sealed concrete chamber."
+#+end_quote
+
+#+begin_quote
+Gas Town currently has "a crummy, duct-taped API atop agents that offer
+barely any platform hooks."
+#+end_quote
+
+** 1.2 The Wasteland (March 2026)
+
+Scales Gas Town to inter-organization coordination.
+
+- URL: https://steve-yegge.medium.com/welcome-to-the-wasteland-a-thousand-gas-towns-a5eb9bc8dc1f
+
+Three actor types: rigs (AI-human units), posters (submit work items),
+validators (issue stamps). Coordination via a "wanted board" ---
+a shared task list backed by Dolt (SQL database with Git semantics).
+
+Stamps are multi-dimensional attestations: quality, reliability,
+creativity scored independently with confidence levels. The "yearbook
+rule" prevents self-stamping. Reputation accrues from completed,
+validated work.
+
+No gossip. No epidemic dissemination. No mention of mesh networks
+or physical proximity. The Wasteland is entirely digital trust-based.
+
+** 1.3 "The Future of Coding Agents" (2025)
+
+- URL: https://steve-yegge.medium.com/the-future-of-coding-agents-e9451a84207c
+
+Yegge identifies speed asymmetry as the core problem: agents move
+faster than human coordination can keep up with. A contributor
+working two hours behind was already "obsolete" to teammates.
+Information becomes "ancient" within hours.
+
+** 1.4 Relevance to aq
+
+| Yegge's approach            | aq / amigosmalla approach         |
+|-----------------------------+-----------------------------------|
+| Hierarchical (Mayor->Polecat)| Peer-to-peer (gossip)            |
+| Git-backed state             | Git + LoRa mesh + MQTT           |
+| Central coordinator          | No central authority              |
+| Same-cloud/same-machine      | Cross-machine, cross-network     |
+| Persistent identity in Git   | Persistent identity in AMTP seq  |
+| Conflict via sequential merge| Conflict via CRDT/LWW gossip     |
+| Scale: 20-30 agents         | Scale: 2-5 agents, bandwidth-bound|
+
+The fundamental divergence: Yegge solves coordination through
+hierarchy. We solve it through epidemic dissemination. His approach
+scales to more agents; ours works over lossy, low-bandwidth
+physical radio links.
+
+* 2. Same-Machine Gossip
+
+** 2.1 ZeroMQ zgossip
+
+The most direct precedent for intra-machine gossip between processes.
+
+- URL: http://czmq.zeromq.org/manual:zgossip
+- Source: https://github.com/zeromq/czmq/blob/master/src/zgossip.c
+
+zgossip implements decentralized configuration management via
+gossip over arbitrary ZeroMQ transports: inproc (in-process),
+IPC (Unix sockets), and TCP simultaneously within the same gossip
+network. Nodes exchange key-value tuples. Each node is a
+server-client hybrid (modified Harmony pattern).
+
+#+begin_quote
+"The gossip network consists of a set of loosely-coupled nodes that
+exchange tuples. Nodes can be connected across arbitrary transports,
+so the gossip network can have nodes that communicate over inproc,
+over IPC, and/or over TCP, at the same time."
+#+end_quote
+
+Design: accept PUBLISH messages, forward to every remote and every
+client. Duplicates discarded. New tuples stored and forwarded.
+
+Caveat from the docs:
+
+#+begin_quote
+"The gossip protocol is NOT designed to be efficient, and should not
+be used for application data, as the same tuples may be sent many
+times across the network."
+#+end_quote
+
+** 2.2 Zyre: Proximity-Based Peer-to-Peer
+
+- URL: https://github.com/zeromq/zyre
+- Protocol: ZRE (RFC 36)
+
+Zyre layers reliable group messaging on local area networks using
+two discovery mechanisms:
+
+1. *UDP beaconing* (default): broadcast for automatic peer discovery
+   on WiFi/Ethernet. Zero configuration.
+2. *Gossip* (alternative): uses zgossip endpoints when UDP broadcast
+   is unavailable. At least one node must bind to a well-known
+   gossip endpoint.
+
+Zyre handles dynamic join/leave without reconfiguration. Designed
+for IoT, multi-user collaboration, and local service clustering.
+
+This is the closest existing system to what aq does on a LAN: automatic
+peer discovery + group messaging + no central server. The difference
+is that Zyre operates over Ethernet/WiFi while aq operates over LoRa.
+
+** 2.3 Consul Agent in Local Mode
+
+- URL: https://developer.hashicorp.com/consul/docs/concept/gossip
+- Talk: https://www.hashicorp.com/en/resources/everybody-talks-gossip-serf-memberlist-raft-swim-hashicorp-consul
+
+Consul uses SWIM-based gossip (via the memberlist library) for
+cluster membership and failure detection. The LAN gossip pool
+operates on port 8301 within a single datacenter.
+
+In dev mode (=consul agent -dev=), a single Consul agent runs on
+localhost. Multiple agents CAN gossip on the same host, each
+binding different ports. But this is not the intended use case ---
+Consul assumes one agent per machine forwarding RPCs to servers.
+
+The LAN gossip pool is required and handles:
+- Automatic server discovery
+- Distributed failure detection
+- Event broadcasting
+
+Consul does not optimize for same-machine gossip. The protocol
+treats localhost peers identically to remote ones.
+
+** 2.4 Erlang Node Clustering on Localhost
+
+- URL: https://www.erlang.org/doc/system/distributed.html
+- URL: https://learnyousomeerlang.com/distribunomicon
+
+Erlang nodes discover each other via EPMD (Erlang Port Mapper Daemon)
+which maps symbolic node names to TCP ports. Multiple nodes on the
+same machine work fine --- each registers with EPMD, and connections
+are established lazily on first reference.
+
+Erlang does NOT use gossip for clustering. Connection is direct:
+=net_adm:ping(Node)= establishes a TCP link. The "global" module
+provides a distributed naming service. Nodes form a fully-connected
+mesh by default.
+
+However, Erlang's =pg= (process groups) module enables pub/sub within
+a cluster that resembles gossip semantics: processes join named groups,
+messages broadcast to all members, membership changes propagate
+transitively. On a single machine, this gives gossip-like behavior
+with much lower overhead.
+
+** 2.5 Kubernetes Same-Node Communication
+
+Pods on the same Kubernetes node communicate via localhost when they
+share a network namespace (containers within the same Pod). The
+loopback interface provides microsecond latency vs. milliseconds
+for cross-pod ClusterIP routing through kube-proxy iptables/IPVS.
+
+Service meshes (Istio, Linkerd) inject sidecar proxies into each pod.
+Sidecars communicate with their application containers via localhost.
+This is structurally similar to same-machine gossip: a local agent
+that participates in cluster-wide state dissemination while
+communicating with its co-located process over loopback.
+
+Kubernetes itself does not use gossip for pod coordination, but
+etcd (its backing store) uses Raft, and some service meshes use
+gossip for endpoint discovery.
+
+** 2.6 Assessment: Same-Machine Gossip
+
+| System         | Uses gossip locally? | Mechanism         | Purpose              |
+|----------------+----------------------+-------------------+----------------------|
+| zgossip/ZeroMQ | Yes (inproc/IPC)     | Tuple forwarding  | Config management    |
+| Zyre           | Yes (UDP beacon)     | ZRE protocol      | Group messaging      |
+| Consul         | Incidentally         | SWIM over TCP     | Membership           |
+| Erlang         | No (direct TCP)      | EPMD + pg groups  | Process clustering   |
+| K8s sidecars   | No (proxy pattern)   | Localhost HTTP    | Service mesh         |
+
+*Finding*: Same-machine gossip is rare in practice. Most systems
+use direct IPC (Unix sockets, shared memory, localhost TCP) because
+gossip's probabilistic guarantees are unnecessary when you have
+reliable localhost communication. The exception is zgossip, which
+explicitly supports inproc gossip for process coordination.
+
+* 3. LAN Gossip for Developer Coordination
+
+** 3.1 HashiCorp Serf
+
+- URL: https://developer.hashicorp.com/consul/docs/architecture/gossip
+- Built on: memberlist (Go, SWIM-based)
+
+Serf provides decentralized cluster membership, failure detection,
+and event broadcasting. It was designed for orchestrating deploys
+and triggering handlers across a cluster.
+
+In 2013, a GitHub issue (#53) proposed mDNS-based peer discovery
+for Serf, which would have enabled "completely zero touch discovery"
+on local networks. The feature was not implemented; Serf requires
+explicit join addresses or DNS-based discovery.
+
+Serf's event system allows broadcasting arbitrary payloads to all
+members. This is the closest existing production tool to "broadcast
+work intent" on a LAN. However, Serf targets operations, not
+developer workflow coordination.
+
+** 3.2 mDNS / Bonjour / Avahi
+
+- HashiCorp mDNS library: https://github.com/hashicorp/mdns
+- Avahi: https://avahi.org/
+- Go zeroconf: https://github.com/grandcat/zeroconf
+
+mDNS enables service discovery on local networks without central DNS.
+Apple Bonjour and Linux Avahi are the major implementations.
+
+Limitations: many corporate networks restrict multicast. Does not
+work in cloud or shared infrastructure. But in office/home networks,
+it provides zero-configuration service discovery.
+
+No developer-specific tooling has been built on mDNS for coordination
+purposes, though the primitives exist. A tool that advertises
+"developer X is working on module Y" via mDNS would be trivial
+to build but has not been attempted in the literature.
+
+** 3.3 The Gap
+
+No existing tool combines:
+1. LAN-local gossip or mDNS discovery
+2. Developer work intent broadcasting
+3. Semantic conflict detection
+4. Zero-configuration peer awareness
+
+This is the space aq occupies. Serf provides (1). CloudStudio
+provides (3) in a centralized way. Nobody has built (1+2+3+4)
+as an integrated system.
+
+* 4. AI Agent Gossip and Multi-Agent Coordination
+
+** 4.1 Academic Work: Gossip for Agentic AI
+
+*** Habiba & Khan, "Revisiting Gossip Protocols" (August 2025)
+
+- URL: https://arxiv.org/abs/2508.01531
+- Authors: Mansura Habiba (IBM Software), Nafiul I. Khan
+
+First paper to explicitly propose gossip protocols as a coordination
+layer for AI agent systems. Frames gossip as complementary to
+structured protocols (MCP, A2A). Identifies seven open research
+questions: semantic filtering, trust metrics, adaptive policies,
+temporal consistency, churn resilience, emergent coordination,
+evaluation methods.
+
+Does NOT propose a concrete implementation. Research agenda paper.
+
+#+begin_quote
+"Gossip may not be a silver bullet --- but ignoring it risks missing
+a path toward more resilient [emergent systems]."
+#+end_quote
+
+*** Khan, Habiba & Khan, "Gossip-Enhanced Communication Substrate" (December 2025)
+
+- URL: https://arxiv.org/abs/2512.03285
+- Accepted at AAAI 2026
+
+Follow-up expanding the research agenda. Advocates gossip for
+"context-rich state propagation, resilient coordination under
+uncertainty, and emergent global awareness." Still no concrete
+implementation --- identifies the same open challenges.
+
+*** Li et al., "RAPS: Reputation-Aware Publish-Subscribe" (February 2026)
+
+- URL: https://arxiv.org/abs/2602.08009
+
+Frames agent coordination as a dynamic ad-hoc networking problem.
+RAPS enables LLM agents to exchange messages based on declared
+intents rather than predefined topologies. Two overlays: reactive
+subscription (dynamic intent refinement) and Bayesian reputation
+(local watchdog for malicious peer detection).
+
+Tested on five benchmarks. The publish-subscribe paradigm is
+structurally different from gossip (topic-based routing vs.
+epidemic dissemination) but solves similar problems.
+
+*** AgentsNet (July 2025)
+
+- URL: https://arxiv.org/html/2507.08616v1
+
+Benchmark for multi-agent collaborative reasoning given a network
+topology. Measures how well agents form strategies, self-organize,
+and communicate effectively. Focuses on evaluation, not a specific
+coordination protocol.
+
+** 4.2 Industry Frameworks
+
+*** Claude Code Agent Teams (2026)
+
+- URL: https://code.claude.com/docs/en/agent-teams
+- Requires: Claude Code v2.1.32+, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+
+Built-in multi-agent orchestrator. One session acts as team lead,
+coordinates work, assigns tasks, synthesizes results. Key primitives:
+shared task list with dependency tracking, peer-to-peer messaging
+between teammates, file locking to prevent conflicts.
+
+Communication is direct messaging, not gossip. The team lead is a
+centralized coordinator. Agent Teams was used to build a 100,000-line
+C compiler over ~2,000 sessions with 16 agents (Anthropic engineering
+blog, "Building a C compiler with a team of parallel Claudes").
+
+*** Multi-Instance Redis Coordination (dev.to, 2026)
+
+- URL: https://dev.to/bredmond1019/multi-agent-orchestration-running-10-claude-instances-in-parallel-part-3-29da
+
+10+ Claude Code instances coordinated via Redis. Task queue
+(LPUSH/BRPOP), file-level locking (SET NX with 300s timeout),
+dependency management via topological sort, WebSocket monitoring
+dashboard. Specialization-based task assignment.
+
+Not gossip. Centralized queue with distributed workers. Successfully
+completed 12,000+ line refactoring with zero conflicts.
+
+*** Gas Town (Yegge, see Section 1)
+
+Hierarchical orchestration with Git-backed persistence. No gossip.
+
+*** CrewAI, LangGraph, AutoGen, OpenAI Agents SDK
+
+All major multi-agent frameworks use structured communication:
+
+| Framework       | Coordination Model                          |
+|-----------------+---------------------------------------------|
+| CrewAI          | Role-based, sequential/hierarchical/consensual |
+| LangGraph       | State machines, direct transitions          |
+| AutoGen/AG2     | GroupChat, selector-based turn-taking       |
+| OpenAI Agents   | Explicit handoffs with context transfer     |
+
+None use gossip. All assume reliable communication channels
+and centralized orchestration of some form.
+
+** 4.3 Assessment: Agent Gossip
+
+The academic literature has identified gossip as promising for
+agent coordination but no one has built it. Industry frameworks
+universally use structured communication (queues, direct messages,
+shared state stores, hierarchical delegation).
+
+AMTP over LoRa is, as far as this survey can determine, the first
+implementation of gossip-inspired coordination between AI agents
+over a physical radio link.
+
+* 5. The "aq-like" Pattern: Ambient Intent Broadcasting
+
+** 5.1 Semantic Conflict Detection (Pre-Merge)
+
+*** Cloud Studio (Levin & Yehudai, 2015)
+
+- URL: https://arxiv.org/abs/1508.01872
+
+Web-based collaborative IDE that replaces the update-modify-commit
+cycle with real-time conflict tracking. Maintains a "disk version"
+(error-free) and a "union version" (all edits with author attribution).
+
+Fine-grained visual awareness: developers see yellow highlighting
+(single developer changing elements) and squiggles (concurrent
+changes from multiple developers) in real-time. Conflict detection
+at the semantic element level (method bodies, parameters, return
+values), not just line-level.
+
+Operates reactively through visual indication, not proactively
+through locking. O(N*M) computational complexity for conflict
+detection.
+
+*** SAM: SemAntic Merge (2023)
+
+- URL: https://arxiv.org/html/2310.02395
+
+Generates unit tests as partial specifications of changes, then
+runs them to detect behavioral conflicts during merge. Detects
+conflicts that pass syntactic merge cleanly but alter semantics.
+
+*** RefFilter (2025)
+
+- URL: https://arxiv.org/html/2510.01960
+
+Refactoring-aware semantic interference detection. Addresses the
+problem where concurrent changes interact at the behavioral level
+("dynamic semantics conflicts") even when they don't touch the
+same lines.
+
+*** Semex (2015)
+
+- URL: https://dl.acm.org/doi/10.1145/2786805.2803208
+
+Encodes all parallel changes into a single program with conditional
+guards, then runs test cases using variability-aware execution to
+explore all possible combinations. Detects semantic conflicts that
+neither textual diff nor AST comparison would catch.
+
+** 5.2 Developer Presence and Ambient Awareness
+
+*** AmbiTeam
+
+- Cited in: Microsoft Research publications
+
+Ambient display showing file-level activity for team projects.
+"Using AmbiTeam had a quantifiable effect on researchers'
+perceptions of their collaborators' project prioritization and
+motivated researchers to work on their collaborative projects."
+
+*** Ambient Build Status (Ambient Awareness of Build Status in Collocated Software Teams)
+
+- URL: https://www.researchgate.net/publication/233757342
+
+Physical ambient displays (LED orbs, wall projections) showing
+CI/CD build status. Demonstrated that passive ambient information
+improves team coordination without requiring active attention.
+
+*** Ambient Agents (LangChain, January 2024)
+
+AI systems operating continuously in the background, monitoring
+signals, interpreting context, and acting without explicit prompts.
+Ambient in the sense of "always-on background process," not in the
+sense of spatial/physical proximity.
+
+** 5.3 Broadcasting Work Intent Before Starting
+
+This specific pattern --- announcing what you intend to work on
+before starting, so others can detect conflicts early --- appears
+in scattered forms:
+
+- *Standup meetings*: the manual, synchronous version
+- *Linear/Jira "in progress" status*: centralized, requires explicit action
+- *Tuple (RIP)*: pair-programming matching tool with availability signals
+- *VS Code Live Share*: real-time cursor presence, but requires explicit session
+- *Git branch naming conventions*: implicit intent signaling (feat/auth tells you
+  someone is working on auth)
+
+Nobody has automated this as a gossip protocol. The closest is
+Yegge's GUPP principle ("If there is work on your hook, YOU MUST
+RUN IT") but that is push-assigned, not self-announced.
+
+** 5.4 What aq Adds
+
+The novel combination in aq/amigosmalla is:
+
+1. *Decentralized intent broadcasting*: agents announce what they
+   are working on via gossip, without a central coordinator
+2. *Physical transport*: LoRa radio means the gossip network has
+   a physical topology (range-limited, not internet-global)
+3. *Pre-merge conflict detection*: AMTP PROP/VOTE messages let
+   agents negotiate before committing, not after
+4. *Lossy transport tolerance*: the protocol is designed to work
+   when 10-50% of messages are lost
+5. *Bandwidth constraint as feature*: 200-byte payloads force
+   information compression, which means only high-priority
+   state changes propagate
+
+None of the systems surveyed combine all five.
+
+* 6. Physical Proximity as Information Relevance
+
+** 6.1 Hyperbolic Mapping of Proximity Networks
+
+- URL: https://www.nature.com/articles/s41598-020-77277-7
+- Authors: Michetti et al., Scientific Reports, 2020
+
+Human proximity networks (close-range physical interactions) can be
+meaningfully embedded into hyperbolic spaces. The geometry of
+proximity affects information spreading dynamics. Physical closeness
+predicts information flow efficiency.
+
+** 6.2 Latent Geometry and Dynamics of Proximity Networks
+
+- URL: https://arxiv.org/abs/1907.00073
+- Authors: Flores et al., Physical Review E, 2019
+
+Studies proximity networks as time-varying graphs. Shows that latent
+geometry has significant impact on synchronization dynamics and
+routing algorithm performance. Physical topology constrains and
+shapes information topology.
+
+** 6.3 Proximity-Based Services
+
+- Reference: ScienceDirect, "Proximity-Based Service" chapter
+  https://www.sciencedirect.com/science/article/abs/pii/B9780128098592000176
+
+Proximity-based services extend human proximity awareness using
+close-range wireless (BLE beacons, WiFi, NFC). Context: retail,
+museum guides, smart offices. The key insight is that physical
+proximity is a strong prior for information relevance --- you
+care more about the status of the person sitting next to you
+than someone across the country.
+
+** 6.4 Bluetooth Mesh for Office Awareness
+
+- URL: https://pmc.ncbi.nlm.nih.gov/articles/PMC9965677/
+
+BLE Mesh is "useful for a collection of nodes within close range to
+inter-connect or to perform proximity sensing and localization for
+limited bandwidth operations." BLE mesh protocols operate as overlays
+on standard Bluetooth star topologies.
+
+BLE Mesh networks can support office-scale presence detection and
+ambient awareness, though no developer-specific tooling has been
+built on this foundation.
+
+** 6.5 The aq Insight: Physical Topology as Information Filter
+
+The amigosmalla network uses LoRa radio, which means:
+
+- Signal range determines who can gossip (3-hop, ~10km in Boston)
+- Physical environment affects reliability (buildings, weather)
+- The "gossip neighborhood" is geographically bounded
+- Agents that are physically closer have lower latency
+
+This is philosophically distinct from internet-based agent
+coordination, where network topology is orthogonal to physical
+location. In aq, the information topology IS the physical topology.
+
+Academic precedent exists for studying how physical proximity
+affects information flow (see 6.1, 6.2), but no one has applied
+this insight to agent coordination. The closest analogue is
+disaster-response mesh networks, where physical radio range
+naturally scopes the relevant coordination group.
+
+* 7. Novelty Assessment
+
+** 7.1 What Has Been Done Before
+
+| Aspect                        | Prior Art                              |
+|-------------------------------+----------------------------------------|
+| Gossip for config/membership  | SWIM, Serf, Consul, zgossip            |
+| LAN peer discovery            | Zyre, mDNS/Bonjour/Avahi               |
+| Multi-agent AI coordination   | Gas Town, CrewAI, LangGraph, AutoGen   |
+| Semantic conflict detection   | Cloud Studio, SAM, Semex, RefFilter    |
+| Developer ambient awareness   | AmbiTeam, ambient build orbs           |
+| Proximity-based services      | BLE beacons, WiFi proximity, NFC       |
+| Gossip for AI agents (theory) | Habiba & Khan 2025, AAAI 2026 paper    |
+
+** 7.2 What Is Genuinely Novel About aq
+
+1. *Gossip over constrained physical radio*: No prior system uses
+   gossip protocols over LoRa/Meshtastic for agent coordination.
+   The 200-byte payload constraint forces protocol innovations
+   (piggybacked state digests, compact CRDT encoding) that have
+   no precedent in the literature.
+
+2. *AI agents coordinating over lossy mesh*: All existing multi-agent
+   frameworks assume reliable TCP/HTTP communication. AMTP is
+   designed for 10-50% message loss with no ordering guarantees.
+   This is a fundamentally different engineering constraint.
+
+3. *Physical radio range as coordination scope*: No prior work uses
+   physical proximity (radio range) to naturally bound the set of
+   coordinating agents. This eliminates the "who should I gossip
+   with?" problem that plagues internet-scale gossip systems.
+
+4. *Pre-merge intent negotiation via gossip*: The AMTP PROP/VOTE
+   mechanism lets agents negotiate design decisions before
+   committing code, over a gossip protocol. Cloud Studio detects
+   conflicts reactively. aq prevents them proactively.
+
+5. *Bridging physical and digital coordination*: The system spans
+   LoRa radio, MQTT, Git, and GitHub Issues as a unified fanout.
+   No existing system treats physical radio as a first-class
+   transport alongside internet protocols for developer coordination.
+
+** 7.3 What Is NOT Novel
+
+- Using gossip for state dissemination (well-studied since 1987)
+- CRDT-based conflict resolution (Shapiro et al., 2011)
+- Piggybacking application data on protocol messages (SWIM, 2002)
+- Agent coordination via shared state stores (every framework does this)
+- mDNS/Bonjour for LAN discovery (two decades old)
+- Developer awareness tools (Cloud Studio, AmbiTeam, etc.)
+
+** 7.4 The Gap aq Fills
+
+The multi-agent AI community is converging on a recognized need
+for gossip-like coordination (Habiba & Khan 2025, AAAI 2026) but
+has produced zero implementations. Industry frameworks are stuck
+on hierarchical orchestration (Gas Town) or centralized queues
+(Redis, task lists).
+
+aq/amigosmalla is building the thing the papers are asking for:
+a working gossip protocol between AI agents, with the additional
+constraint of operating over a physical radio link.
+
+The research opportunity is to demonstrate that gossip-based
+coordination can match or exceed hierarchical orchestration for
+small agent teams (2-5) working on shared codebases, particularly
+when communication is unreliable.
+
+* 8. Key References
+
+** Papers
+
+- Das, Gupta, Kempe. "SWIM: Scalable Weakly-consistent Infection-style
+  Process Group Membership." Cornell, 2002.
+  https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf
+
+- Habiba, Khan. "Revisiting Gossip Protocols: A Vision for Emergent
+  Coordination in Agentic Multi-Agent Systems." arXiv:2508.01531, Aug 2025.
+  https://arxiv.org/abs/2508.01531
+
+- Khan, Habiba, Khan. "A Gossip-Enhanced Communication Substrate for
+  Agentic AI." arXiv:2512.03285, Dec 2025. Accepted AAAI 2026.
+  https://arxiv.org/abs/2512.03285
+
+- Li et al. "Towards Adaptive, Scalable, and Robust Coordination of LLM
+  Agents: A Dynamic Ad-Hoc Networking Perspective." arXiv:2602.08009,
+  Feb 2026. https://arxiv.org/abs/2602.08009
+
+- Levin, Yehudai. "Alleviating Merge Conflicts with Fine-grained Visual
+  Awareness." arXiv:1508.01872, Aug 2015.
+  https://arxiv.org/abs/1508.01872
+
+- "Detecting Semantic Conflicts with Unit Tests." arXiv:2310.02395, 2023.
+  https://arxiv.org/html/2310.02395
+
+- RefFilter. "Improving Semantic Conflict Detection via Refactoring-Aware
+  Static Analysis." arXiv:2510.01960, 2025.
+  https://arxiv.org/html/2510.01960
+
+- Michetti et al. "Hyperbolic mapping of human proximity networks."
+  Scientific Reports 10, 2020.
+  https://www.nature.com/articles/s41598-020-77277-7
+
+- Flores et al. "Latent geometry and dynamics of proximity networks."
+  Physical Review E, 2019.
+  https://arxiv.org/abs/1907.00073
+
+** Software
+
+- Gas Town (Yegge): https://github.com/steveyegge/gastown
+- ZeroMQ zgossip: http://czmq.zeromq.org/manual:zgossip
+- Zyre: https://github.com/zeromq/zyre
+- HashiCorp memberlist: https://github.com/hashicorp/memberlist
+- HashiCorp Serf: https://github.com/hashicorp/serf
+- HashiCorp mDNS: https://github.com/hashicorp/mdns
+- Avahi: https://avahi.org/
+- Claude Code Agent Teams: https://code.claude.com/docs/en/agent-teams
+
+** Blog Posts
+
+- Yegge. "Welcome to Gas Town." Medium, Jan 2026.
+  https://steve-yegge.medium.com/welcome-to-gas-town-4f25ee16dd04
+
+- Yegge. "Welcome to the Wasteland: A Thousand Gas Towns." Medium, Mar 2026.
+  https://steve-yegge.medium.com/welcome-to-the-wasteland-a-thousand-gas-towns-a5eb9bc8dc1f
+
+- Yegge. "The Future of Coding Agents." Medium, 2025.
+  https://steve-yegge.medium.com/the-future-of-coding-agents-e9451a84207c
+
+- Yegge. "Six New Tips for Better Coding With Agents." Medium, 2025.
+  https://steve-yegge.medium.com/six-new-tips-for-better-coding-with-agents-d4e9c86e42a9
+
+- Orosz. "From IDEs to AI Agents with Steve Yegge." Pragmatic Engineer.
+  https://newsletter.pragmaticengineer.com/p/from-ides-to-ai-agents-with-steve
+
+- Mason. "AI Coding Agents in 2026: Coherence Through Orchestration."
+  https://mikemason.ca/writing/ai-coding-agents-jan-2026/
+
+- Anthropic. "Building a C compiler with a team of parallel Claudes."
+  https://www.anthropic.com/engineering/building-c-compiler
+
+- dev.to. "Multi-Agent Orchestration: Running 10+ Claude Instances."
+  https://dev.to/bredmond1019/multi-agent-orchestration-running-10-claude-instances-in-parallel-part-3-29da
+
+- Microsoft Research. "Facilitating Team Awareness Through Ambient Displays."
+  https://www.microsoft.com/en-us/research/publication/facilitating-team-awareness-through-ambient-displays/

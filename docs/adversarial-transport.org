@@ -1,0 +1,191 @@
+#+TITLE: Adversarial Transport Matrix
+#+SUBTITLE: Why is_available() lies and ACCEPTED != DELIVERED
+#+AUTHOR: jwalsh + CASO
+#+DATE: 2026-03-28
+
+* 0. The Core Problem
+
+Every transport can:
+- Return =True= then fail on =send()=
+- Hang indefinitely on =send()= after reporting available
+- Accept the write, return =True=, and silently drop it
+- Deliver to self but not to peers (split MQTT broker)
+- Deliver with arbitrary delay (LoRa queue backed up, git pending merge)
+
+=is_available()= is a point-in-time snapshot of a system that changes
+between the check and the use. This is TOCTOU at the transport layer.
+
+* 1. Per-Transport Failure Modes
+
+| Transport | Reports Up | Actually Broken |
+|-----------+------------+-----------------|
+| Filesystem | always | disk full, permissions, NFS stale |
+| MQTT | ping responds | broker accepts, doesn't route |
+| LoRa/serial | port opens | TX queue full, RF blocked, antenna disconnected |
+| KBFS | mount exists | Keybase daemon hung, sync paused |
+| Git | remote reachable | push rejected, diverged HEAD |
+| GH Issues | API responds | rate limited, token expired |
+| Godot | telemetry flowing | reporting stale cached value |
+
+* 2. SendResult: Three Outcomes, Not Two
+
+#+begin_src python
+class SendResult(Enum):
+    CONFIRMED   # peer acknowledged
+    ACCEPTED    # transport accepted, delivery unknown
+    FAILED      # transport rejected
+    TIMEOUT     # no response within deadline
+#+end_src
+
+Convergent multicast only works if you know which leg actually
+delivered. Otherwise you cannot distinguish "mesh delivered, MQTT
+redundant" from "both dropped silently."
+
+Current =mesh.py= returns =bool=. That conflates ACCEPTED with
+CONFIRMED. The transport protocol interface needs this enum.
+
+* 3. Sequence Number Fragility
+
+=(agent, seq)= dedup assumes seq numbers are reliable. Under chaos:
+
+| Failure | Effect | Looks like |
+|---------+--------+------------|
+| seq gap | transport dropped msg | message loss or "not yet delivered" |
+| seq reorder | multi-hop LoRa delivers 3 before 2 | corruption |
+| seq reuse | agent reboots, counter resets to 0 | replay attack |
+| seq stale | old message arrives after new one | phantom |
+
+** 3.1 The Godot problem
+
+Voltage drops to 10% -> sends alert -> reboots -> seq resets to 0 ->
+peers see seq 0 again. Is this a new session or replay?
+
+The alert that triggered the reboot is now ambiguous.
+
+Fix: session ID (boot count or timestamp) prepended to seq. Requires
+persistent storage across reboots -- which a voltage-depleted node
+may not complete. The fix itself has a failure mode.
+
+** 3.2 Gap detection
+
+"If I haven't seen seq N+1 within =2*Imax=, declare N the last."
+
+This is a tombstone TTL. It conflates "slow transport" with "dead
+agent." A message delayed by 3*Imax (git push pending merge conflict)
+arrives after the tombstone and is treated as a ghost.
+
+** 3.3 What production systems do
+
+- Cassandra: vector clocks + hinted handoff + read repair
+- Consul: Serf protocol with separate ack path
+- Raft: leader confirms commit to majority before acknowledging
+
+All have an acknowledgment path because "I wrote it to the network"
+and "the peer received it" are different events separated by physics.
+
+* 4. Toxiproxy/Prism Test Scenarios
+
+#+begin_example
+latency:    mqtt +5000ms (appears up, messages "delivered" late)
+bandwidth:  lora 200 byte/s (queue backs up, appears functional)
+down:       filesystem transport (baseline gone, everything degrades)
+corrupt:    mqtt delivers 50% of messages (dedup sees gaps)
+timeout:    serial open() blocks forever (hangs multicast loop)
+partition:  git remote accepts push, peer never pulls
+lie:        transport.send() returns True, drops message
+#+end_example
+
+* 5. ChaosTransport Wrapper
+
+#+begin_src python
+class ChaosProfile:
+    drop_rate: float = 0.0          # silent drop probability
+    hang_rate: float = 0.0          # hang probability
+    hang_duration: float = 30.0     # seconds
+    corrupt_rate: float = 0.0       # corruption probability
+    lie_available: float = 0.0      # lie about availability
+    latency_ms: float = 0.0        # added latency
+
+class ChaosTransport:
+    def __init__(self, inner: Transport, profile: ChaosProfile):
+        self.inner = inner
+        self.profile = profile
+
+    def send(self, broadcast) -> SendResult:
+        if random.random() < self.profile.hang_rate:
+            time.sleep(self.profile.hang_duration)
+            return SendResult.TIMEOUT
+        if random.random() < self.profile.drop_rate:
+            return SendResult.ACCEPTED  # lie: accepted, dropped
+        if random.random() < self.profile.corrupt_rate:
+            broadcast = corrupt(broadcast)
+        if self.profile.latency_ms > 0:
+            time.sleep(self.profile.latency_ms / 1000)
+        return self.inner.send(broadcast)
+
+    def is_available(self) -> bool:
+        if random.random() < self.profile.lie_available:
+            return True  # lie
+        return self.inner.is_available()
+#+end_src
+
+Wrap every transport. Run convergent multicast. Assert receiver
+convergence within =k * Imax=.
+
+* 6. Convergence Assertion
+
+#+begin_src python
+def assert_convergence(agents, timeout=Imax*3):
+    """All agents should have the same set of (agent, seq) pairs."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        states = [a.seen_messages() for a in agents]
+        if all(s == states[0] for s in states):
+            return True  # converged
+        time.sleep(Imin)
+    # Report divergence
+    for i, s in enumerate(states):
+        missing = states[0] - s
+        extra = s - states[0]
+        if missing or extra:
+            print(f"agent {i}: missing={missing} extra={extra}")
+    return False
+#+end_src
+
+* 7. The Structural Fix for aq v0.5
+
+The transport protocol interface needs:
+
+#+begin_src python
+class Transport(Protocol):
+    def send(self, broadcast: Broadcast) -> SendResult: ...
+    def receive(self, channel: str) -> list[Broadcast]: ...
+    def is_available(self) -> bool: ...      # advisory, may lie
+    def confirm(self, msg_id: str) -> bool:  # peer ACK check
+        return False  # default: no confirmation path
+#+end_src
+
+=confirm()= is optional. Filesystem has none (write = done). MQTT
+could use retained message or /ack topic. LoRa has none (fire and
+forget). Git has none (push succeeds ≠ peer pulled). GH Issues could
+check for reaction emoji.
+
+For transports without confirmation, AMTP SYNC messages serve as
+application-level ACK: "I've seen your messages up to seq N." This
+is scuttlebutt anti-entropy. The transport doesn't need to confirm
+if the protocol layer can detect gaps.
+
+* 8. The Honest Summary
+
+The current convergent multicast plan assumes transports fail cleanly.
+They won't. The interesting failure is ACCEPTED with silent drop --
+the transport that lies.
+
+Every production gossip system (Cassandra, Consul, Serf) has an
+acknowledgment path specifically because "I wrote it to the network"
+and "the peer received it" are different events separated by physics.
+
+AMTP's SYNC messages are the ack path. But SYNC itself travels over
+the same unreliable transports. Turtles all the way down. At some
+point you accept that gossip is best-effort and the failure mode is
+"message arrives late or not at all" which is... the design.

@@ -1,0 +1,115 @@
+#+TITLE: Claude Code Channels as aq RX Path
+#+DATE: 2026-03-29
+
+* The Missing Piece
+
+TX: 6 transports, all working.
+RX: only filesystem read_active(). Everything else requires polling.
+
+Channels solve this. They push external events into a running Claude
+session in real-time without polling.
+
+* How Channels Work
+
+A channel is an MCP server subprocess that emits
+=notifications/claude/channel= events over stdio. Claude receives
+them as =<channel>= tags mid-conversation:
+
+#+begin_example
+<channel source="aq" sender="CORE" via="mqtt">
+aq:github.com/jwalsh/amigosmalla/main C-42 [proof] api.py,auth.py
+</channel>
+#+end_example
+
+Claude reacts immediately. No cron. No git fetch. No polling.
+
+* Architecture
+
+#+begin_example
+                    Channels (RX)                Hooks (TX)
+                        |                            |
+  MQTT ──┐              |                            |
+  LoRa ──┤  aq-channel  |   Claude Code Session      |  PostToolUse
+  KBFS ──┤  (MCP server)├──> reads <channel> tags ───>├──> aq announce
+  mDNS ──┤  polls all   |   reacts, works            |     --mesh --mqtt
+  GH   ──┘  transports  |                            |
+#+end_example
+
+Channels = RX. Hooks = TX. Complementary, not overlapping.
+
+* aq-channel Implementation Sketch
+
+#+begin_src typescript
+// aq-channel.ts — MCP server that polls aq transports
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+
+const mcp = new Server(
+  { name: 'aq-channel', version: '1.0.0' },
+  {
+    capabilities: {
+      experimental: { 'claude/channel': {} },
+      tools: {},
+    },
+    instructions: 'Peer broadcasts arrive as <channel source="aq">. React to conflicts, ACK proposals.',
+  },
+)
+
+await mcp.connect(new StdioServerTransport())
+
+async function pollAq() {
+  while (true) {
+    const messages = await readAqMessages() // poll filesystem + MQTT + KBFS
+    for (const msg of messages) {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: msg.body,
+          meta: { sender: msg.agent, via: msg.transport, ts: msg.timestamp },
+        },
+      })
+    }
+    await sleep(5000)
+  }
+}
+
+pollAq()
+#+end_src
+
+* Registration
+
+#+begin_src json
+// .mcp.json
+{
+  "mcpServers": {
+    "aq-channel": { "command": "bun", "args": ["./aq-channel.ts"] }
+  }
+}
+#+end_src
+
+Launch: =claude --channels server:aq-channel=
+
+* Limitations
+
+- Research preview (v2.1.80+, claude.ai login required)
+- Only works in active sessions (not scheduled/background)
+- Sender allowlist required (security — prevent prompt injection)
+- 5s poll interval adds latency vs true push
+
+* What This Replaces
+
+| Current (polling) | With channels |
+|--------------------+---------------|
+| 2-min cron loop | Real-time push |
+| git fetch + diff | Channel event |
+| keybase chat read | Channel event |
+| Manual gh api call | Channel event |
+| Can't see LoRa RX | Channel polls am mon |
+
+* Next Steps
+
+1. Build aq-channel.ts (TypeScript MCP server)
+2. Wire RX for each transport (MQTT subscribe, KBFS watch, filesystem inotify)
+3. Register in .mcp.json
+4. Launch with =--channels=
+5. Remove the 2-min cron loop — channels make it obsolete
