@@ -1,0 +1,161 @@
+#+TITLE: aq v0.5 Plan — Transport Layer + Convergent Multicast
+#+SUBTITLE: Incorporating mesh gossip research into the ambient agent queue
+#+AUTHOR: CASO@MAVK (amigosmalla research)
+#+DATE: 2026-03-28
+#+STARTUP: overview
+
+* 0. Context
+
+aq v0.4 is filesystem-only (Tier 0). The mesh bridge in =contrib/meshtastic/=
+proved that multi-transport gossip works but exposed fundamental questions
+about coordination, contention, and whether transports should be layered
+or convergent.
+
+This plan pulls concrete findings from the amigosmalla project into aq.
+
+* 1. Transport Registry
+
+Replace the hardcoded filesystem transport with a pluggable registry:
+
+#+begin_src python
+class Transport(Protocol):
+    def send(self, broadcast: Broadcast) -> bool: ...
+    def receive(self, channel: str) -> list[Broadcast]: ...
+    def is_available(self) -> bool: ...
+
+TRANSPORTS: list[Transport] = [
+    FilesystemTransport(),   # Tier 0, always works
+    MQTTTransport(),         # Tier 3, needs broker
+    MeshTransport(),         # Tier 3, needs radio
+    KBFSTransport(),         # Tier 2, needs Keybase
+    GitTransport(),          # Tier 1, needs remote
+]
+#+end_src
+
+Each transport is independent. Failures in one don't affect others.
+
+* 2. Convergent Multicast (from CRDT agent)
+
+On =aq announce=, send to ALL available transports, not just one:
+
+#+begin_src python
+def announce(broadcast, channel, transports=TRANSPORTS):
+    results = {}
+    for t in transports:
+        if t.is_available():
+            results[t.name] = t.send(broadcast)
+    return results  # {"filesystem": True, "mqtt": True, "mesh": False}
+#+end_src
+
+Dedup at receivers via =(agent, seq)= pair. Messages are idempotent
+(per AMTP proposal 4, adopted). This is epidemic dissemination.
+
+Key insight from research: don't coordinate access to one transport.
+Send on all available. Let receivers merge.
+
+* 3. Trickle Timer (RFC 6206)
+
+Replace fixed-interval polling with adaptive trickle:
+
+- =Imin=30s=, =Imax=3600s=, =k=1=
+- Double interval on consistent state (both agents agree)
+- Reset to Imin on divergence (new proposal, vote, state change)
+- Suppress redundant SYNCs when peers are consistent
+
+Implementation exists: =amigosmalla/am/trickle.py= (90 lines).
+Port to =aq/trickle.py=.
+
+* 4. AMTP Wire Format (for constrained transports)
+
+For transports with payload limits (LoRa: 200 bytes, SMS: 160 chars):
+
+#+begin_example
+aq:agent/branch C-id [phase] file1,file2
+#+end_example
+
+Compact representation already implemented in =aq/mesh.py:compact()=.
+Works for any transport with a text interface.
+
+* 5. Transport-Specific Notes
+
+** 5.1 Filesystem (Tier 0, unchanged)
+
+=~/.aq/channels/{channel}/requests/= — JSON files, one per broadcast.
+Always works. No network. No daemon. This is the baseline.
+
+** 5.2 MQTT (Tier 3)
+
+Two options discovered during research:
+- Public broker (=mqtt.meshtastic.org=): unreliable (18+ hours unresponsive)
+- Local broker (=nexus.lan= mosquitto): reliable but localhost-only initially
+
+Recommendation: support both with fallback. =AQ_MQTT_HOST= env var.
+
+** 5.3 Meshtastic/LoRa (Tier 3)
+
+Via =am= CLI. Best-effort, never blocks. The =mesh.py= bridge handles this.
+Key learning: the serial port is a single-writer resource. Options:
+- flock(1) — 25 lines, good enough
+- Broker daemon — 280 lines, proper but complex
+- Skip serial, use MQTT — if you have a gateway node (hydra)
+- Convergent multicast — just try serial, if busy use MQTT
+
+** 5.4 KBFS / Keybase (Tier 2)
+
+Shared directory between collaborators:
+=/keybase/private/user1,user2/aq/=
+
+Write: =keybase fs write /keybase/.../aq/broadcast-{id}.json=
+Read: =keybase fs ls /keybase/.../aq/= + =keybase fs read=
+
+Works without network (Keybase syncs asynchronously). Good for
+cross-machine gossip between known collaborators.
+
+** 5.5 Git (Tier 1)
+
+Broadcast → commit + push. Receive → pull + read.
+Already the most reliable transport in practice.
+Downside: 1-2s latency, requires manual pull (or polling).
+
+** 5.6 GH Issues (Tier 4)
+
+=gh issue comment= as broadcast channel.
+Works when everything else is down. Human-readable.
+Rate-limited by GitHub API.
+
+* 6. Architecture Decisions (from 10-agent review)
+
+The serial contention research produced proposals from 10 agents
+across 9 paradigms. Key findings for aq:
+
+| Finding | Impact on aq |
+|---------+--------------|
+| CRDT: don't coordinate, multicast all transports | Core v0.5 architecture |
+| PROF/CALM: serial I/O is non-monotonic, needs coordination | Transport-specific, not aq's problem |
+| KLEP: append-only intent log, single consumer | Already how filesystem transport works |
+| OTP: supervision + let-it-crash | Transport failures should crash + restart, not circuit-break |
+| UNIX: flock is enough | For serial specifically, yes |
+| PROF: "what are the device's temporal semantics?" | Transport implementations must respect downstream constraints |
+
+* 7. Reading List for Contributors
+
+- Kleppmann, /DDIA/ Ch. 11 (Stream Processing)
+- Shapiro et al., "CRDTs" (2011)
+- Hellerstein, "CALM Theorem" (2010)
+- RFC 6206, Trickle Algorithm
+- Armstrong, PhD thesis (2003) — supervision trees
+- Full survey: =amigosmalla/research/gossip-protocols.org=
+- Full paradigm analysis: =amigosmalla/research/serial-contention-proposals.org=
+
+* 8. Implementation Plan
+
+| Phase | Work | Transport(s) |
+|-------+------+--------------|
+| v0.5a | Transport protocol + registry | all |
+| v0.5b | Convergent multicast in =announce()= | filesystem + MQTT |
+| v0.5c | Trickle timer for SYNC scheduling | all |
+| v0.5d | KBFS transport | Keybase |
+| v0.5e | Receive-side mesh bridge | LoRa |
+| v0.5f | GH Issues transport | GitHub API |
+
+Each phase is independently shippable. Filesystem always works as fallback.
