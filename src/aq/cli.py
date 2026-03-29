@@ -6,6 +6,32 @@ from .protocol import Broadcast, announce, read_active
 from .conflict import check_conflicts
 from .mesh import mesh_broadcast, is_enabled as mesh_is_enabled
 from .mqtt import mqtt_publish, is_enabled as mqtt_is_enabled
+from .kbfs import kbfs_publish, is_enabled as kbfs_is_enabled
+from .ghissue import ghissue_publish, is_enabled as ghissue_is_enabled
+
+
+def _fanout(broadcast: Broadcast, args: argparse.Namespace) -> list[str]:
+    """Best-effort fanout to all enabled transports. Returns list of successes."""
+    sent = []
+
+    if getattr(args, "mesh", False) or mesh_is_enabled():
+        via = getattr(args, "mesh_via", "serial")
+        if mesh_broadcast(broadcast, via=via):
+            sent.append("mesh")
+
+    if getattr(args, "mqtt", False) or mqtt_is_enabled():
+        if mqtt_publish(broadcast, subtopic="announce"):
+            sent.append("mqtt")
+
+    if getattr(args, "kbfs", False) or kbfs_is_enabled():
+        if kbfs_publish(broadcast):
+            sent.append("kbfs")
+
+    if getattr(args, "ghissue", False) or ghissue_is_enabled():
+        if ghissue_publish(broadcast):
+            sent.append("ghissue")
+
+    return sent
 
 
 def cmd_announce(args: argparse.Namespace) -> int:
@@ -21,27 +47,12 @@ def cmd_announce(args: argparse.Namespace) -> int:
         ttl=args.ttl,
     )
     path = announce(broadcast, args.channel)
-
-    # Best-effort mesh broadcast (--mesh flag or AQ_MESH=1)
-    mesh_sent = False
-    if getattr(args, "mesh", False) or mesh_is_enabled():
-        via = getattr(args, "mesh_via", "serial")
-        mesh_sent = mesh_broadcast(broadcast, via=via)
-
-    # Best-effort MQTT broadcast (--mqtt flag or AQ_MQTT=1)
-    mqtt_sent = False
-    if getattr(args, "mqtt", False) or mqtt_is_enabled():
-        mqtt_sent = mqtt_publish(broadcast, subtopic="announce")
+    sent = _fanout(broadcast, args)
 
     if args.json:
         print(broadcast.to_json())
     else:
-        transports = []
-        if mesh_sent:
-            transports.append("mesh")
-        if mqtt_sent:
-            transports.append("mqtt")
-        suffix = f" (+ {', '.join(transports)})" if transports else ""
+        suffix = f" (+ {', '.join(sent)})" if sent else ""
         print(f"announced: {broadcast.conjecture_id} \u2192 {path.name}{suffix}")
     return 0
 
@@ -100,6 +111,10 @@ def main() -> int:
                      help="mesh transport (default: serial)")
     ann.add_argument("--mqtt", action="store_true",
                      help="also publish to MQTT broker")
+    ann.add_argument("--kbfs", action="store_true",
+                     help="also write to Keybase filesystem")
+    ann.add_argument("--ghissue", action="store_true",
+                     help="also comment on GH issue (noisy, POC only)")
 
     chk = sub.add_parser("check")
     chk.add_argument("--conjecture", "-c", default=None)
