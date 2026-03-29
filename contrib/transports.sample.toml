@@ -1,0 +1,142 @@
+# ~/.aq/transports.toml — aq transport mount table
+#
+# Declares which transports are "mounted" and where they sync.
+# Inspired by /etc/fstab: each entry maps a backend to a channel scope.
+#
+# The local filesystem (~/.aq/channels/) is the universal bus.
+# All other transports sync from/to that bus. A failed remote mount
+# never blocks a local announce.
+#
+# Syntax:
+#   [mounts.<name>]
+#   type    = "<backend>"     # required: local, mqtt, mesh, kbfs, ghissue, mdns, nats
+#   path    = "<scope>"       # channel scope: "/" = all channels, "/broadcast" = one
+#   enabled = true|false      # default: true
+#   <backend-specific keys>   # passed as options dict to the transport module
+#
+# Environment overrides:
+#   AQ_{TYPE}_{KEY} overrides any option. E.g. AQ_MQTT_HOST=nexus.lan
+#   overrides host below. Secrets should use env vars, not this file.
+#
+# See: docs/transport-mounts.org for the full specification.
+
+# ---------------------------------------------------------------------------
+# Tier 0: Local filesystem (always present, cannot be disabled)
+# ---------------------------------------------------------------------------
+# Declaring this is optional — it exists implicitly. Shown here for
+# documentation. The local mount IS ~/.aq/channels/. All other mounts
+# sync through it.
+
+[mounts.local]
+type = "local"
+path = "/"
+
+# ---------------------------------------------------------------------------
+# Tier 1: MQTT broker (Mosquitto on nexus.lan)
+# ---------------------------------------------------------------------------
+# Publishes all broadcasts to MQTT. Uses mosquitto_pub (must be on PATH).
+# Topic structure: {topic}/{subtopic} e.g. aq/announce, aq/session/startup
+#
+# Future: bidirectional sync via mosquitto_sub ingest.
+
+[mounts.mqtt]
+type = "mqtt"
+path = "/"
+enabled = false
+host = "localhost"
+port = 1883
+topic = "aq"
+# For nexus.lan deployment, override:
+#   host = "nexus.lan"
+# Or via env: AQ_MQTT_HOST=nexus.lan
+
+# ---------------------------------------------------------------------------
+# Tier 1: Meshtastic / LoRa radio
+# ---------------------------------------------------------------------------
+# Broadcasts to LoRa mesh via am CLI. Scoped to /broadcast only —
+# LoRa bandwidth is precious (~200 bytes per frame, 1-30s airtime).
+# Uses compact wire format: aq:agent/branch C-id [phase] files
+#
+# via = "serial"  -> am send (direct USB serial to device)
+# via = "mqtt"    -> am send --via mqtt (through MQTT bridge to radio)
+
+[mounts.mesh]
+type = "mesh"
+path = "/broadcast"
+enabled = false
+via = "serial"
+# port = "/dev/cu.usbmodem2101"  # serial device path (optional, am auto-detects)
+
+# ---------------------------------------------------------------------------
+# Tier 1: Keybase filesystem (KBFS)
+# ---------------------------------------------------------------------------
+# Writes broadcasts to a shared Keybase directory. If KBFS is FUSE-mounted,
+# this could also be a symlink:
+#   ln -s /keybase/private/user1,user2/aq ~/.aq/mounts/kbfs
+#
+# The dir must exist and the keybase CLI must be on PATH.
+
+[mounts.kbfs]
+type = "kbfs"
+path = "/"
+enabled = false
+dir = "/keybase/private/jwalsh,aygpdr/aq"
+
+# ---------------------------------------------------------------------------
+# Tier 2: GitHub Issues (POC / audit trail)
+# ---------------------------------------------------------------------------
+# Comments broadcast summaries on a configured GitHub issue.
+# Requires gh CLI authenticated. Noisy — use sparingly.
+# Scoped to /broadcast to avoid flooding.
+
+[mounts.ghissue]
+type = "ghissue"
+path = "/broadcast"
+enabled = false
+repo = "jwalsh/amigosmalla"
+issue = 5
+
+# ---------------------------------------------------------------------------
+# Tier 2: mDNS / Bonjour (local network discovery)
+# ---------------------------------------------------------------------------
+# Advertises aq presence as an mDNS service on the local network.
+# Other aq instances can discover peers via service browsing.
+
+[mounts.mdns]
+type = "mdns"
+path = "/"
+enabled = false
+port = 5353
+service_type = "_aq._tcp"
+
+# ---------------------------------------------------------------------------
+# Tier 2: NATS (future — light broker for sub-ms cross-machine)
+# ---------------------------------------------------------------------------
+# Uncomment when NATS is deployed. Single binary, telnet-able protocol.
+# Best upgrade path from filesystem for multi-machine presence.
+
+# [mounts.nats]
+# type = "nats"
+# path = "/"
+# enabled = false
+# url = "nats://localhost:4222"
+# subject = "aq.>"
+
+# ---------------------------------------------------------------------------
+# Example: multiple MQTT brokers
+# ---------------------------------------------------------------------------
+# Mount names are user-chosen. You can have multiple mounts of the same type.
+
+# [mounts.mqtt-public]
+# type = "mqtt"
+# path = "/broadcast"
+# host = "mqtt.meshtastic.org"
+# port = 1883
+# topic = "aq/public"
+
+# [mounts.mqtt-lan]
+# type = "mqtt"
+# path = "/"
+# host = "nexus.lan"
+# port = 1883
+# topic = "aq"

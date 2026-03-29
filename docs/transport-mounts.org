@@ -1,0 +1,859 @@
+#+TITLE: aq Transport Mounts
+#+SUBTITLE: Declarative Transport Configuration via fstab-style Mount Table
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-03-28
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* Abstract
+
+This document specifies a declarative transport configuration system for
+=aq=, replacing the current ad-hoc approach of individual environment
+variables (=AQ_MQTT=1=, =AQ_MESH=1=, =AQ_KBFS=1=) and =argparse= flags
+(=--mqtt=, =--mesh=, =--kbfs=, =--ghissue=) with a unified mount table
+inspired by Unix =/etc/fstab=.
+
+Two approaches are evaluated. The conclusion: they converge. The
+filesystem /is/ the universal bus, and transports are sync daemons that
+bridge local disk to remote backends. This is the Plan 9 model, declared
+via an fstab-style config file.
+
+* Motivation
+
+** Current state
+
+Each transport is a Python module with =is_enabled()= and =publish()=.
+Enabling one requires:
+
+1. Setting an environment variable (=AQ_MQTT=1=)
+2. Optionally setting backend-specific vars (=AQ_MQTT_HOST=, =AQ_MQTT_PORT=)
+3. Optionally passing a CLI flag (=aq announce --mqtt=)
+4. Per-transport configuration in =~/.aq/config.json=
+
+The =_fanout()= function in =cli.py= checks each transport individually
+with an if/elif chain that grows linearly with every new transport:
+
+#+begin_src python
+def _fanout(broadcast: Broadcast, args: argparse.Namespace) -> list[str]:
+    sent = []
+    if getattr(args, "mesh", False) or mesh_is_enabled():
+        ...
+    if getattr(args, "mqtt", False) or mqtt_is_enabled():
+        ...
+    if getattr(args, "kbfs", False) or kbfs_is_enabled():
+        ...
+    if getattr(args, "ghissue", False) or ghissue_is_enabled():
+        ...
+    return sent
+#+end_src
+
+Problems:
+
+- Adding a transport requires touching =cli.py=, =argparse= setup, the
+  transport module, documentation, and environment variable conventions.
+- No unified view of "what's mounted" (=aq status= shows broadcasts, not
+  transport health).
+- No way to declare "this transport is enabled but only for channel X."
+- Config is split across =~/.aq/config.json=, env vars, and CLI flags
+  with unclear precedence.
+- The relationship between filesystem-as-store and filesystem-as-transport
+  is implicit.
+
+** Design goals
+
+1. One config file declares all transports and their mount points.
+2. =_fanout()= becomes a loop over the mount table, not a hardcoded chain.
+3. Each transport can be scoped to specific channels.
+4. The filesystem transport's special status is made explicit.
+5. =aq mounts= shows what's mounted and healthy.
+6. Adding a transport requires only the transport module and a config entry.
+
+* The Key Question: Disk as Peer or Disk as Bus?
+
+The user observes: "this might be the same as just disk."
+
+Two mental models:
+
+** Model A: Disk is one mount among many (peer model)
+
+#+begin_example
+                  +--- mqtt.publish() ---> broker
+announce() ------+--- mesh.publish() ---> radio
+                  +--- kbfs.publish() ---> keybase
+                  +--- fs.publish()   ---> ~/.aq/
+#+end_example
+
+Every transport is a peer. =announce()= fans out to all of them.
+The filesystem is not special; it just happens to always work.
+
+** Model B: Disk is the bus (Plan 9 model)
+
+#+begin_example
+announce() ---> ~/.aq/channels/  (canonical write)
+                       |
+                       +--- mqtt-sync daemon watches, publishes to broker
+                       +--- mesh-sync daemon watches, publishes to radio
+                       +--- kbfs-sync is a symlink to /keybase/...
+#+end_example
+
+Every write goes to disk first. Other transports /sync from disk/, not
+from the in-memory broadcast object. The filesystem is the write-ahead log.
+
+** Verdict: they converge, and Model B is correct
+
+The convergence argument:
+
+1. The filesystem transport already writes to =~/.aq/channels/= on every
+   =announce()= call -- it is the /only/ transport that provides
+   =read_active()=. All other transports are write-only (=publish()= with
+   no corresponding read). This means disk is already functioning as the
+   canonical store.
+
+2. In the current =_fanout()= implementation, the filesystem write happens
+   /before/ =_fanout()= is called (=announce()= in =protocol.py= writes
+   to disk, then =_fanout()= publishes to remote transports). The
+   filesystem is already the WAL.
+
+3. =read_active()= only reads from disk. If MQTT received a broadcast
+   from a peer but disk didn't have it, =aq check= would miss it. This
+   proves disk is the authoritative store, not one-of-many.
+
+4. From a failure semantics perspective: if MQTT fails, the broadcast
+   still exists on disk. If disk fails, nothing works. Disk is not a
+   peer; it is the foundation.
+
+Therefore: *the filesystem is the universal bus. Other transports are
+sync bridges that propagate the bus to remote backends.* This is the
+Plan 9 "everything is a file" model, not the peer model.
+
+The practical consequence: =announce()= writes to disk. Period. Transport
+mounts declare which sync bridges should watch =~/.aq/channels/= and
+propagate writes to their backends. The mount table declares /what gets
+synced where/, not /what gets published to/.
+
+This also opens the read path: a transport mount can /ingest/ messages
+from its backend into =~/.aq/channels/=, making remote broadcasts
+visible to =aq check= and =aq status= locally. Currently impossible --
+remote transports are write-only.
+
+* Approach A: fstab-style Mount Table (~/.aq/transports.toml)
+
+** Config file format
+
+TOML, matching =pyproject.toml= convention. Located at =~/.aq/transports.toml=.
+
+Each transport is a TOML table under =[mounts]=. The key is a
+user-chosen mount name (like a label in fstab). Required fields:
+
+| Field       | Type   | Description                                          |
+|-------------+--------+------------------------------------------------------|
+| =type=      | string | Transport backend: =local=, =mqtt=, =mesh=, =kbfs=, =ghissue=, =mdns=, =nats= |
+| =path=      | string | Channel path scope (=/= = all channels, =/broadcast= = one channel) |
+| =enabled=   | bool   | Whether this mount is active (default =true=)        |
+
+All other fields are transport-specific options passed to the backend.
+
+#+begin_src toml
+# ~/.aq/transports.toml — aq transport mount table
+#
+# Syntax:
+#   [mounts.<name>]
+#   type = "<backend>"
+#   path = "<channel-scope>"
+#   enabled = true|false
+#   <backend-specific options>
+#
+# The local mount at "/" is implicit and cannot be disabled.
+# All other mounts sync from/to the local filesystem bus.
+
+[mounts.local]
+type = "local"
+path = "/"
+# The root mount. Always present, even if not declared.
+# Declaring it explicitly is allowed (for documentation) but not required.
+# This IS ~/.aq/channels/ — the write-ahead log for all transports.
+
+[mounts.mqtt]
+type = "mqtt"
+path = "/"
+host = "nexus.lan"
+port = 1883
+topic = "aq"
+# Syncs all channels to MQTT broker.
+# Write: local file -> mqtt publish
+# Read:  mqtt subscribe -> local file (future)
+
+[mounts.mesh]
+type = "mesh"
+path = "/broadcast"
+via = "serial"
+port = "/dev/cu.usbmodem2101"
+# Scoped to broadcast channel only (LoRa bandwidth is precious).
+# Compact wire format (aq:agent/branch C-id [phase] files).
+# Write-only: no ingest from mesh (yet).
+
+[mounts.kbfs]
+type = "kbfs"
+path = "/"
+dir = "/keybase/private/jwalsh,aygpdr/aq"
+# Keybase filesystem. Could be a symlink instead of a sync daemon:
+#   ln -s /keybase/private/jwalsh,aygpdr/aq ~/.aq/mounts/kbfs
+
+[mounts.ghissue]
+type = "ghissue"
+path = "/broadcast"
+enabled = false
+repo = "jwalsh/amigosmalla"
+issue = 5
+# POC only. Disabled by default. Noisy.
+
+[mounts.mdns]
+type = "mdns"
+path = "/"
+enabled = false
+port = 5353
+service_type = "_aq._tcp"
+#+end_src
+
+** Why not keep config.json?
+
+=~/.aq/config.json= works for the current approach (flat key-value per
+transport). It does not express:
+
+- Mount paths (channel scoping)
+- Multiple mounts of the same type (two MQTT brokers)
+- The filesystem's special role
+- Mount ordering or priority
+
+TOML's nested tables map naturally to mount entries. JSON requires
+inventing a schema. TOML /is/ the schema.
+
+Migration: if =transports.toml= does not exist, fall back to
+=config.json= and env vars (current behavior). If it exists, it is
+the sole source of truth for transport configuration. Env vars become
+overrides for specific fields (=AQ_MQTT_HOST= overrides =host= in
+the =[mounts.mqtt]= table).
+
+** Precedence
+
+From highest to lowest:
+
+1. CLI flags (=--mqtt=, =--no-mqtt=) -- per-invocation override
+2. Environment variables (=AQ_MQTT_HOST=) -- per-field override
+3. =~/.aq/transports.toml= -- declarative config
+4. =~/.aq/config.json= -- legacy fallback
+5. Defaults -- filesystem only
+
+* Approach B: Filesystem IS the Transport (Plan 9 Model)
+
+** Directory structure
+
+#+begin_example
+~/.aq/
+  channels/
+    broadcast/
+      requests/       # canonical write target for announce()
+      archive/        # expired broadcasts (TTL prune)
+    private/
+      requests/
+      archive/
+  mounts/
+    mqtt/
+      .transport      # metadata: type=mqtt, host=nexus.lan, ...
+      broadcast/      # mirror of channels/broadcast/ via MQTT sync
+    mesh/
+      .transport      # metadata: type=mesh, via=serial, ...
+      broadcast/      # mirror of channels/broadcast/ via mesh sync
+    kbfs/             # could be a symlink: -> /keybase/private/.../aq
+      broadcast/
+  transports.toml     # mount table (Approach A config, used to bootstrap mounts/)
+#+end_example
+
+** How it works
+
+1. =announce()= writes to =~/.aq/channels/{channel}/requests/=. Unchanged.
+2. A sync process (=aq mount-sync= or per-transport watcher) monitors
+   =channels/= for new files.
+3. For each enabled mount, the sync process propagates the write to the
+   backend:
+   - mqtt: =mosquitto_pub= with the JSON payload
+   - mesh: =am send= with the compact wire format
+   - kbfs: =keybase fs write= or just filesystem copy (if KBFS is FUSE-mounted)
+   - ghissue: =gh issue comment=
+4. For bidirectional mounts, the sync process also ingests from the backend:
+   - mqtt: =mosquitto_sub= -> write to =~/.aq/mounts/mqtt/{channel}/requests/=
+   - mesh: =am mon= -> parse compact format -> write to mounts/mesh/
+5. =read_active()= reads from =channels/= (canonical) and optionally
+   merges from =mounts/*/= (remote broadcasts not yet propagated locally).
+
+** The symlink optimization
+
+For KBFS and NFS, the mount can be a literal symlink:
+
+#+begin_src bash
+ln -s /keybase/private/jwalsh,aygpdr/aq/broadcast ~/.aq/mounts/kbfs/broadcast
+#+end_src
+
+Writes to KBFS are writes to Keybase. Reads from KBFS are reads from
+Keybase. No sync daemon required. The filesystem abstraction provides
+the transport for free. This is the Plan 9 insight made literal.
+
+* Unified Design: A + B Combined
+
+The two approaches are not alternatives. They are layers:
+
+- *Approach A* (transports.toml) answers: "what should be mounted?"
+- *Approach B* (filesystem bus) answers: "how does mounting work?"
+
+The config file declares intent. The filesystem structure is the
+runtime manifestation of that intent.
+
+#+begin_example
+transports.toml  --(parsed at startup)-->  Mount table in memory
+                                               |
+                                               v
+                                     For each enabled mount:
+                                       1. Create ~/.aq/mounts/{name}/
+                                       2. Write .transport metadata
+                                       3. Start sync (if not symlink)
+                                               |
+                                               v
+announce() --> channels/{ch}/requests/  (disk write, always)
+                       |
+                       +-- sync loop --> for each mount scoped to {ch}:
+                                           publish(broadcast, mount.options)
+#+end_example
+
+** Specification
+
+*** 1. Config file format
+
+TOML at =~/.aq/transports.toml=. See Approach A above for full schema.
+
+The file is optional. Without it, aq operates in filesystem-only mode
+(current default behavior). The implicit mount table when no config exists:
+
+#+begin_src toml
+[mounts.local]
+type = "local"
+path = "/"
+#+end_src
+
+*** 2. Mount/unmount lifecycle
+
+*Mount (startup or =aq mount=):*
+
+1. Parse =transports.toml=.
+2. For each enabled mount entry:
+   a. Validate options (type exists, required fields present).
+   b. Create =~/.aq/mounts/{name}/= directory.
+   c. Write =~/.aq/mounts/{name}/.transport= with mount metadata as JSON.
+   d. Probe backend reachability (health check).
+   e. Record mount state: =mounted=, =degraded= (unreachable but configured),
+      or =error= (invalid config).
+3. Return mount table with health status.
+
+*Unmount (=aq unmount {name}= or shutdown):*
+
+1. Stop sync watcher for the mount.
+2. Remove =~/.aq/mounts/{name}/.transport= (but not synced data).
+3. Mark mount as =unmounted= in state.
+
+*Lazy mounting:*
+
+Mounts need not start a persistent daemon. The current model (subprocess
+per publish) is fine for most transports. A mount is "active" if its
+config is valid and its backend was reachable at last check. Persistent
+sync daemons are an optimization for bidirectional mounts, not a
+requirement.
+
+*** 3. Health check integration
+
+Each transport module exposes a =health_check()= function:
+
+#+begin_src python
+def health_check(options: dict) -> HealthStatus:
+    """Probe backend reachability. Never blocks > 5 seconds."""
+    ...
+#+end_src
+
+=HealthStatus= is one of:
+
+| Status     | Meaning                                      |
+|------------+----------------------------------------------|
+| =healthy=  | Backend reachable, credentials valid          |
+| =degraded= | Backend unreachable but config is valid       |
+| =error=    | Invalid config or permanent failure           |
+| =disabled= | Mount exists but =enabled = false=            |
+
+=aq mounts= (new subcommand) displays the mount table with health:
+
+#+begin_example
+$ aq mounts
+NAME      TYPE     PATH         STATUS    BACKEND
+local     local    /            healthy   ~/.aq/channels/
+mqtt      mqtt     /            healthy   nexus.lan:1883
+mesh      mesh     /broadcast   degraded  /dev/cu.usbmodem2101 (not connected)
+kbfs      kbfs     /            healthy   /keybase/private/jwalsh,aygpdr/aq
+ghissue   ghissue  /broadcast   disabled  jwalsh/amigosmalla#5
+mdns      mdns     /            disabled  _aq._tcp:5353
+#+end_example
+
+*** 4. Replacing the env var approach
+
+| Current                  | New (transports.toml)                    |
+|--------------------------+------------------------------------------|
+| =AQ_MQTT=1=             | =[mounts.mqtt]= with =enabled = true=    |
+| =AQ_MQTT_HOST=nexus=    | =host = "nexus"= under =[mounts.mqtt]=   |
+| =AQ_MESH=1=             | =[mounts.mesh]= with =enabled = true=    |
+| =AQ_KBFS=1=             | =[mounts.kbfs]= with =enabled = true=    |
+| =AQ_KBFS_DIR=/keybase/..= | =dir = "/keybase/..."= under =[mounts.kbfs]= |
+| =AQ_GHISSUE=1=          | =[mounts.ghissue]= with =enabled = true= |
+| =AQ_GHISSUE_REPO=...=   | =repo = "..."= under =[mounts.ghissue]=  |
+| =--mqtt= flag            | Per-invocation: =aq announce --mount mqtt= |
+
+Env vars remain as overrides (precedence rule from Approach A).
+A mount declared in TOML with =enabled = true= does not require an env var.
+An env var =AQ_MQTT=1= with no TOML entry falls back to legacy behavior
+(auto-generate a mount entry with defaults).
+
+*** 5. Interaction with _fanout() in cli.py
+
+=_fanout()= becomes transport-agnostic:
+
+#+begin_src python
+from .mounts import load_mount_table, get_transport
+
+def _fanout(broadcast: Broadcast, channel: str, args: argparse.Namespace) -> list[str]:
+    """Best-effort fanout to all mounted transports for this channel."""
+    sent = []
+    mount_table = load_mount_table()
+
+    for mount in mount_table.active_mounts(channel):
+        # Skip local -- already written by announce()
+        if mount.transport_type == "local":
+            continue
+
+        # CLI override: --mount mqtt or --no-mount mesh
+        if not _mount_enabled_for_invocation(mount, args):
+            continue
+
+        transport = get_transport(mount.transport_type)
+        try:
+            if transport.publish(broadcast, mount.options):
+                sent.append(mount.name)
+        except Exception as exc:
+            logger.debug("mount %s failed: %s", mount.name, exc)
+            mount.record_failure(exc)
+
+    return sent
+#+end_src
+
+Key changes:
+
+- Loop over mount table, not hardcoded if/elif.
+- Mounts are filtered by channel scope (=mount.path= matches =channel=).
+- Local mount is skipped (already written by =announce()=).
+- CLI flags become =--mount {name}= / =--no-mount {name}= instead of
+  per-transport flags.
+- Adding a transport requires zero changes to =_fanout()=.
+
+*** 6. Failure semantics per mount
+
+Principle: *a mount failure must never fail an announce.* This is already
+the invariant in the current code (every transport catches all exceptions
+and returns False). The mount table formalizes it:
+
+| Failure                  | Behavior                                    |
+|--------------------------+---------------------------------------------|
+| Backend unreachable      | Log warning, mark mount =degraded=, skip    |
+| Timeout (per-mount, 5s default) | Log warning, skip                    |
+| Invalid credentials      | Log error, mark mount =error=, skip         |
+| Publish returns False    | Log debug, skip                             |
+| Transport module missing | Mark mount =error= at load time, never call |
+| Config parse error       | Refuse to load, fall back to legacy config   |
+
+Degraded mounts are retried on next =announce()=. No backoff needed --
+presence is best-effort and TTL-bounded. If a mount is degraded for
+longer than a broadcast TTL, the broadcast was never going to be useful
+on that transport anyway.
+
+Error counters are tracked per mount:
+
+#+begin_src python
+@dataclass
+class MountState:
+    name: str
+    status: str  # healthy, degraded, error, disabled
+    consecutive_failures: int = 0
+    last_failure: float | None = None
+    last_success: float | None = None
+#+end_src
+
+=aq mounts --verbose= shows failure history.
+
+*** 7. Relationship between local and remote mounts
+
+The local filesystem mount is *not* one mount among many. It is the
+write-ahead log through which all other mounts receive data. This is
+codified as follows:
+
+1. *The local mount cannot be disabled.* It is always present, even if
+   not declared in =transports.toml=.
+
+2. *=announce()= always writes to =~/.aq/channels/=.* This happens in
+   =protocol.py=, before =_fanout()= is called. This does not change.
+
+3. *Remote mounts sync /from/ the local filesystem.* Conceptually, a
+   remote mount is a watcher on =~/.aq/channels/= that propagates writes
+   to a backend. The current implementation (subprocess per publish)
+   achieves this synchronously in =_fanout()=. A future implementation
+   could use inotify/FSEvents to decouple the sync.
+
+4. *=read_active()= reads from =~/.aq/channels/= only.* Remote mounts
+   may /ingest/ data into =~/.aq/mounts/{name}/= but this data is
+   advisory, not authoritative. Merging remote data into =read_active()=
+   is a separate concern (and a future feature).
+
+5. *The local mount is Tier 0.* All other mounts are Tier 1+. If the
+   system has nothing but a local mount, =aq= is fully functional. Every
+   other mount is an amplifier, not a requirement.
+
+Diagram of the data flow:
+
+#+begin_example
+                   +----- AUTHORITATIVE -----+
+                   |                          |
+announce() ------> ~/.aq/channels/{ch}/requests/{id}.json
+                   |
+                   v
+             _fanout() iterates mount table:
+                   |
+                   +--[mqtt]----> mosquitto_pub ---> broker
+                   |                                    |
+                   |              (future: subscribe)   v
+                   |                                 ingest to
+                   |                              ~/.aq/mounts/mqtt/
+                   |
+                   +--[mesh]----> am send ---------> LoRa radio
+                   |
+                   +--[kbfs]----> keybase fs write -> /keybase/...
+                   |              (or: symlink)
+                   |
+                   +--[ghissue]-> gh issue comment -> GitHub
+
+read_active() <--- ~/.aq/channels/{ch}/requests/  (only source today)
+                   |
+                   +-- (future) merge ~/.aq/mounts/*/  (advisory)
+#+end_example
+
+* Transport Module Interface
+
+Each transport module must expose:
+
+#+begin_src python
+"""aq transport module interface."""
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .protocol import Broadcast
+
+def health_check(options: dict) -> str:
+    """Return 'healthy', 'degraded', or 'error'. Must not block > 5s."""
+    ...
+
+def publish(broadcast: Broadcast, options: dict) -> bool:
+    """Publish broadcast to this transport's backend.
+
+    Returns True on success, False on failure.
+    Must not raise. Must not block > options.get('timeout', 5) seconds.
+    """
+    ...
+
+# Optional: for bidirectional transports
+def subscribe(channel: str, options: dict, callback) -> None:
+    """Watch backend for incoming broadcasts. Call callback(Broadcast) on receipt."""
+    ...
+#+end_src
+
+The =options= dict comes from the mount's TOML table (all keys except
+=type=, =path=, =enabled=). Transport modules do not read environment
+variables directly -- the mount loader resolves env overrides before
+passing options.
+
+* Mount Table Loader
+
+#+begin_src python
+"""aq.mounts — declarative transport configuration."""
+from __future__ import annotations
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+AQ_HOME = Path(os.environ.get("AQ_HOME", Path.home() / ".aq"))
+TRANSPORTS_FILE = AQ_HOME / "transports.toml"
+
+# Registry of known transport types -> module paths
+TRANSPORT_REGISTRY: dict[str, str] = {
+    "local": "aq.protocol",
+    "mqtt": "aq.mqtt",
+    "mesh": "aq.mesh",
+    "kbfs": "aq.kbfs",
+    "ghissue": "aq.ghissue",
+    "mdns": "aq.mdns",
+    "nats": "aq.nats",
+}
+
+
+@dataclass
+class Mount:
+    name: str
+    transport_type: str
+    path: str  # channel scope: "/" = all, "/broadcast" = one channel
+    enabled: bool = True
+    options: dict[str, Any] = field(default_factory=dict)
+    status: str = "unknown"
+    consecutive_failures: int = 0
+
+    def matches_channel(self, channel: str) -> bool:
+        """Check if this mount's path scope includes the given channel."""
+        if self.path == "/":
+            return True
+        # /broadcast matches channel "broadcast"
+        mount_channel = self.path.lstrip("/")
+        return channel == mount_channel or channel.startswith(mount_channel + "/")
+
+    def record_failure(self, exc: Exception) -> None:
+        import time
+        self.consecutive_failures += 1
+        self.status = "degraded"
+
+    def record_success(self) -> None:
+        self.consecutive_failures = 0
+        self.status = "healthy"
+
+
+@dataclass
+class MountTable:
+    mounts: list[Mount] = field(default_factory=list)
+
+    def active_mounts(self, channel: str = "broadcast") -> list[Mount]:
+        """Return mounts that are enabled and scoped to this channel."""
+        return [
+            mount for mount in self.mounts
+            if mount.enabled and mount.matches_channel(channel)
+        ]
+
+
+def load_mount_table() -> MountTable:
+    """Load mount table from transports.toml, env vars, or defaults."""
+    # Try transports.toml first
+    if TRANSPORTS_FILE.exists():
+        return _load_from_toml(TRANSPORTS_FILE)
+
+    # Fall back to legacy config.json + env vars
+    return _load_from_legacy()
+
+
+def _load_from_toml(path: Path) -> MountTable:
+    """Parse transports.toml into a MountTable."""
+    with open(path, "rb") as file_handle:
+        data = tomllib.load(file_handle)
+
+    mounts_data = data.get("mounts", {})
+    mounts = []
+
+    for name, mount_config in mounts_data.items():
+        transport_type = mount_config.pop("type", "local")
+        channel_path = mount_config.pop("path", "/")
+        enabled = mount_config.pop("enabled", True)
+
+        # Remaining keys are transport-specific options
+        options = _apply_env_overrides(transport_type, mount_config)
+
+        mounts.append(Mount(
+            name=name,
+            transport_type=transport_type,
+            path=channel_path,
+            enabled=enabled,
+            options=options,
+        ))
+
+    # Ensure local mount exists
+    if not any(m.transport_type == "local" for m in mounts):
+        mounts.insert(0, Mount(name="local", transport_type="local", path="/"))
+
+    return MountTable(mounts=mounts)
+
+
+def _apply_env_overrides(transport_type: str, options: dict) -> dict:
+    """Apply environment variable overrides to mount options."""
+    prefix = f"AQ_{transport_type.upper()}_"
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            option_name = key[len(prefix):].lower()
+            options[option_name] = value
+    return options
+
+
+def _load_from_legacy() -> MountTable:
+    """Build mount table from config.json and AQ_* env vars (backward compat)."""
+    mounts = [Mount(name="local", transport_type="local", path="/")]
+
+    # Check each known transport's env var
+    if os.environ.get("AQ_MQTT", "0") == "1":
+        mounts.append(Mount(
+            name="mqtt",
+            transport_type="mqtt",
+            path="/",
+            options={
+                "host": os.environ.get("AQ_MQTT_HOST", "localhost"),
+                "port": int(os.environ.get("AQ_MQTT_PORT", "1883")),
+                "topic": os.environ.get("AQ_MQTT_TOPIC", "aq"),
+            },
+        ))
+
+    if os.environ.get("AQ_MESH", "0") == "1":
+        mounts.append(Mount(
+            name="mesh",
+            transport_type="mesh",
+            path="/broadcast",
+            options={"via": os.environ.get("AQ_MESH_VIA", "serial")},
+        ))
+
+    if os.environ.get("AQ_KBFS", "0") == "1":
+        mounts.append(Mount(
+            name="kbfs",
+            transport_type="kbfs",
+            path="/",
+            options={"dir": os.environ.get("AQ_KBFS_DIR", "")},
+        ))
+
+    if os.environ.get("AQ_GHISSUE", "0") == "1":
+        mounts.append(Mount(
+            name="ghissue",
+            transport_type="ghissue",
+            path="/broadcast",
+            options={
+                "repo": os.environ.get("AQ_GHISSUE_REPO", ""),
+                "issue": os.environ.get("AQ_GHISSUE_NUM", ""),
+            },
+        ))
+
+    return MountTable(mounts=mounts)
+#+end_src
+
+* CLI Changes
+
+** New subcommands
+
+#+begin_example
+aq mounts                     # Show mount table with health status
+aq mounts --verbose           # Include failure history
+aq mount mqtt                 # Enable a configured mount (set enabled=true in memory)
+aq unmount mqtt               # Disable a mount for this session
+aq mount-check                # Run health checks on all mounts
+#+end_example
+
+** Changed flags on =announce=
+
+Current:
+
+#+begin_example
+aq announce --mqtt --mesh --kbfs --ghissue
+#+end_example
+
+New:
+
+#+begin_example
+aq announce                            # Use mount table (default)
+aq announce --mount mqtt --mount mesh  # Override: only these mounts
+aq announce --no-mount ghissue         # Override: skip this mount
+aq announce --local-only               # Skip all remote mounts
+#+end_example
+
+The per-transport flags (=--mqtt=, =--mesh=) are deprecated but still
+work during migration. They are equivalent to =--mount {name}=.
+
+* Migration Path
+
+** Phase 1: Mount table loader (backward compatible)
+
+- Add =aq/mounts.py= with =MountTable=, =Mount=, =load_mount_table()=.
+- =_fanout()= in =cli.py= switches to mount table loop.
+- Without =transports.toml=, behavior is identical (legacy loader).
+- With =transports.toml=, new behavior.
+- No breaking changes.
+
+** Phase 2: =aq mounts= subcommand
+
+- Add =aq mounts= to display mount table.
+- Add =health_check()= to each transport module.
+- =~/.aq/mounts/= directory structure created on first mount.
+
+** Phase 3: Bidirectional sync (future)
+
+- Add =subscribe()= to MQTT transport (=mosquitto_sub= watcher).
+- Ingest remote broadcasts into =~/.aq/mounts/mqtt/{channel}/=.
+- =read_active()= optionally merges mount data.
+- This is the full Plan 9 realization.
+
+** Phase 4: Deprecate env vars (future)
+
+- Print deprecation warning when =AQ_MQTT=1= is set without =transports.toml=.
+- Remove env var support in a future major version.
+- =transports.toml= becomes the sole config source.
+
+* Security Considerations
+
+From a security perspective, the mount table introduces a few concerns
+worth addressing:
+
+1. *Credential storage.* Transport options (MQTT passwords, API tokens)
+   should not live in =transports.toml= in plaintext. Prefer env var
+   overrides for secrets: =AQ_MQTT_PASSWORD= rather than
+   =password = "..."= in TOML. The spec supports this via the env
+   override precedence rule.
+
+2. *Channel scoping as access control.* Mount paths determine which
+   broadcasts propagate to which backends. A misconfigured =path = "/"=
+   on the ghissue transport would publish every broadcast to a public
+   GitHub issue. The =enabled = false= default for noisy transports
+   is a safety net, but not a substitute for reviewing mount config.
+
+3. *Symlink attacks.* The Plan 9 symlink optimization (=~/.aq/mounts/kbfs/=
+   -> =/keybase/...=) inherits whatever security properties the target
+   filesystem provides. Validate symlink targets at mount time.
+
+4. *Ingest path validation.* When bidirectional sync ingests remote
+   broadcasts into =~/.aq/mounts/{name}/=, the data must be validated
+   before =read_active()= merges it. A malicious MQTT message should not
+   be able to inject a broadcast with arbitrary fields. Parse strictly,
+   reject unknown fields, enforce schema.
+
+* Appendix: fstab Analogy
+
+For readers familiar with =/etc/fstab=, the mapping:
+
+| fstab field | transports.toml field | Example                       |
+|-------------+-----------------------+-------------------------------|
+| device      | (implicit from type)  | =mosquitto_pub=               |
+| mountpoint  | =path=                | =/broadcast=                  |
+| type        | =type=                | =mqtt=                        |
+| options     | (remaining keys)      | =host = "nexus.lan"=          |
+| dump        | (n/a)                 |                               |
+| pass        | (n/a, but: mount order) | TOML table order = mount order |
+
+The analogy is intentional but not total. fstab mounts filesystems at
+kernel VFS paths. =transports.toml= mounts sync bridges at channel
+paths. The conceptual move is the same: declare where things should
+appear, let the system figure out how.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:
