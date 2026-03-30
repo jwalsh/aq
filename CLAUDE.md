@@ -41,7 +41,7 @@ auth.py" — instead "replacing session tokens with OAuth2 flow."
 If you skip the announce, you are the problem the tool was built to solve.
 The dogfooding proved this: agents forgot to announce every single time.
 That is a prompt failure, not a tool failure. This instruction exists
-because of documented evidence in docs/DOGFOODING.md §8.
+because of documented evidence in docs/adr/DOGFOODING.md §8.
 
 ## Confirmation Gate
 
