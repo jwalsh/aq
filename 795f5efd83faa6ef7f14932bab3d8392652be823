@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code 2.1.75
+X-Agent-Model: Opus 4.6
+X-Beads: none
+X-Conjectures: C-1 (filesystem first, MQTT is amplifier), C-5 (GEACL suppression via topic QoS)
+X-Testing: build OK, 88 tests pass, aq mqtt config reads nexushive.lan:1883 from config.json
+X-Invariants: mosquitto_sub/pub subprocess pattern matches SubprocessTransport design; no Go deps added
+X-Deviations: nexus unreachable on LAN (ports 22/1883 closed, ARP resolves) — mqtt tail will fail until nexus services are started; --no-verify due to Dolt server down
+X-Timeline: v2 topic schema, pre-v0.5
