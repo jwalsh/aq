@@ -39,6 +39,36 @@ arXiv 2508.01531 and 2512.03285 (Dec 2025) formally propose GEACL
 =aq= is a concrete implementation of that research agenda.
 =ag= was taken by a Ruby gem (Silver Surfer). =aq= it is.
 
+* Physical Proximity Hierarchy
+
+  Transports are collaboration tools first. Monitoring is a read-only
+  side effect. The tier numbering reflects proximity range, not quality:
+  closer range = less infrastructure.
+
+  | Range                     | Transport           | Discovery       | Infrastructure          |
+  |---------------------------+---------------------+-----------------+-------------------------|
+  | Same process / host       | FIFO, file, IPC     | filesystem      | none                    |
+  | Same room (1-10m)         | ggwave (audio)      | tone detection  | speaker + microphone    |
+  | Same building (10-100m)   | Bluetooth LE        | GATT advertise  | BLE radio (most laptops)|
+  | LAN                       | mDNS, UDP multicast | DNS-SD          | network interface       |
+  | Building / neighbourhood  | Meshtastic LoRa     | mesh flood      | dedicated radio         |
+  | WAN                       | MQTT, KBFS, git     | broker / remote | internet + broker       |
+
+  None of these need to know about dashboards. An agent finding a peer
+  via ggwave audio tones or mDNS doesn't emit to =agents/#= because
+  Grafana is watching — it emits because that's how it announces itself,
+  and monitoring happens to listen.
+
+  MQTT is at Tier 3 (not Tier 1) precisely because file and FIFO are
+  faster and simpler for local collaboration. MQTT just happens to be
+  the easiest transport for a broker to fan out to dashboards.
+
+  ggwave is the most interesting case: the only transport that crosses
+  an air gap between devices with no pairing, no network, no shared
+  infrastructure. An agent detecting another agent's tone and switching
+  to audio negotiation is pure L1.5 gossip. The dashboard never sees
+  it unless there's a bridge.
+
 * Transport Scoring
 
 Scores are 0–100 against L1.5 requirements. Higher = better fit.
