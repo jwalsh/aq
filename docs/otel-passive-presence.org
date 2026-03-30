@@ -1,0 +1,193 @@
+#+TITLE: Claude Code OTEL as Passive Presence Signal for aq
+#+DATE: 2026-03-30
+#+PROPERTY: header-args :mkdirp t
+#+STARTUP: overview
+#+TAGS: otel cprr transport presence claudecode
+#+DESCRIPTION: Claude Code emits OTEL telemetry natively. This document
+#+              frames that emission as a passive, zero-cooperation L1.5
+#+              presence signal — a gossip tap that predates aq and solves
+#+              the bootstrap paradox as a side effect.
+
+* Core Thesis
+  :PROPERTIES:
+  :LAYER:  L1.5 (presence) — passive tap path
+  :STATUS: [C] Conjecture C-015, untested against multi-worktree scenario
+  :END:
+
+  Claude Code agents emit OTEL telemetry as a side effect of normal
+  operation. Every tool call, file path touched, session ID, and
+  ~prompt.id~ is broadcast to a collector before any ~aq~-aware code
+  runs. This is not observability bolted on — it is gossip that already
+  exists, waiting to be tapped.
+
+  The implication: rather than requiring agents to write to ~AQ_HOME~
+  or publish to an MQTT topic, a bridge process can read OTEL log events
+  off the collector and re-emit them as ~aq~-compatible NDJSON presence
+  records. The agent cooperates with nothing. The bootstrap paradox
+  (F-1) dissolves — the OTEL emission precedes ~aq~ initialization.
+
+#+begin_src mermaid :tangle docs/otel-aq-tap.mmd
+flowchart LR
+  subgraph "Agent (no aq awareness required)"
+    CC[Claude Code session]
+    CC -->|OTLP grpc :4317| OTEL
+  end
+  subgraph "Collector"
+    OTEL[OTel Collector]
+    OTEL -->|pipeline| LOKI[Loki / logs]
+    OTEL -->|pipeline| PROM[Prometheus / metrics]
+    OTEL -->|tap pipeline| BRIDGE[otel-aq-bridge]
+  end
+  subgraph "aq transport layer"
+    BRIDGE -->|NDJSON| AQ[AQ_HOME / MQTT agents/#]
+    AQ -->|subscribe| GRAFANA[Grafana MQTT panel]
+    AQ -->|subscribe| ANDROID[IoT MQTT Panel]
+  end
+  style BRIDGE fill:#f90,color:#000
+  style CC fill:#dfd
+#+end_src
+
+* Claude Code OTEL: What Is Actually Emitted
+  :PROPERTIES:
+  :SOURCE: Claude Code monitoring docs (verified 2026-03-30)
+  :END:
+
+** Enabling Telemetry
+
+#+begin_src sh
+#!/bin/sh
+# Minimal config for aq presence tap
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# Tighten log export interval for <2s lag (default 5s)
+export OTEL_LOGS_EXPORT_INTERVAL=2000
+
+# Optional: enable tool details for worktree claim inference
+# WARNING: may include file paths with sensitive names
+export OTEL_LOG_TOOL_DETAILS=1
+
+# Tag sessions with agent identity for aq routing
+export OTEL_RESOURCE_ATTRIBUTES="agent.id=unknown,worktree=unknown"
+#+end_src
+
+** Emitted Events (as aq presence signals)
+
+  Claude Code emits structured log events via the OTEL logs protocol —
+  *not* as OTel metrics. Events arrive in ~otel_logs~, not ~otel_metrics~.
+
+  | Event name                   | aq-relevant attributes                        | Presence signal derived       |
+  |------------------------------+-----------------------------------------------+-------------------------------|
+  | ~claude_code.user_prompt~    | ~session.id~, ~prompt.id~, prompt length      | session alive, agent identity |
+  | ~claude_code.api_request~    | ~model~, token counts, cost, duration         | active processing             |
+  | ~claude_code.tool_result~    | tool name, ~tool_input~ (paths), success      | *implicit worktree claim*     |
+  | ~claude_code.tool_decision~  | ~decision_type~ accept/reject                 | permission boundary events    |
+  | ~claude_code.api_error~      | error type, model                             | agent degraded signal         |
+
+  Key insight: ~claude_code.tool_result~ with ~OTEL_LOG_TOOL_DETAILS=1~
+  includes ~tool_input~ with file paths. A ~Write~/~Edit~ tool event is
+  a soft claim; a ~commit.count~ event with a ~git_commit_id~ is a
+  *durable, named claim*.
+
+** Metrics Emitted (time-series)
+
+  | Metric (canonical name)                  | Type    | aq use                            |
+  |------------------------------------------+---------+-----------------------------------|
+  | ~claude_code.session.count~              | counter | active session count              |
+  | ~claude_code.lines_of_code.count~        | counter | work rate proxy                   |
+  | ~claude_code.token.usage~                | counter | agent activity intensity          |
+  | ~claude_code.cost.usage~                 | counter | budget / throttle signal (USD)    |
+  | ~claude_code.commit.count~               | counter | *durable worktree claim*          |
+  | ~claude_code.pull_request.count~         | counter | branch completion signal          |
+  | ~claude_code.code_edit_tool.decision~    | counter | Edit/Write accept/reject          |
+
+* The Bootstrap Paradox Resolution
+  :PROPERTIES:
+  :FAILURE-REF: F-1 (DOGFOODING.md)
+  :CONJECTURE: C-015
+  :END:
+
+  F-1 states: ~aq~ needs ~aq~ to announce ~aq~. No agent can broadcast
+  its own presence before the presence layer is initialized.
+
+  The OTEL tap sidesteps this entirely:
+
+#+begin_src mermaid :tangle docs/bootstrap-resolution.mmd
+sequenceDiagram
+  participant A as Agent (Claude Code)
+  participant O as OTel Collector
+  participant B as otel-aq-bridge
+  participant Q as AQ_HOME / MQTT
+
+  Note over A: Session starts (no aq awareness)
+  A->>O: claude_code.user_prompt (session.id, ts)
+  Note over O: Collector running independently
+  O->>B: log event stream
+  B->>Q: agents/{session.id}/presence NDJSON
+  Note over Q: aq consumers see presence
+  Note over A: aq never initialized on agent side
+#+end_src
+
+  The agent need not know ~aq~ exists. The collector is shared
+  infrastructure. The bridge is a single always-on process.
+
+  [C-015] *Claude Code OTEL spans, tapped via collector bridge,
+  constitute a passive L1.5 presence signal requiring zero agent-side
+  aq instrumentation, resolving F-1 bootstrap paradox.*
+
+* Mapping OTEL Signals to aq Semantics
+
+  | OTEL signal                              | aq concept          | TTL logic                        |
+  |------------------------------------------+---------------------+----------------------------------|
+  | ~session.id~ first seen                  | agent announce      | start TTL on first event         |
+  | ~user_prompt~ events continuing          | presence heartbeat  | reset TTL on each event          |
+  | ~tool_result~ Write/Edit + path          | soft worktree claim | claim until session end          |
+  | ~commit.count~ + ~git_commit_id~         | *durable claim*     | named, SHA-addressable           |
+  | ~pull_request.count~                     | branch complete     | implicit withdraw from branch    |
+  | ~tool_result~ Read + path                | soft interest       | no claim; gossip only            |
+  | ~api_error~ event                        | agent degraded      | presence continues; state=error  |
+  | session idle (no events > N sec)         | implicit withdraw   | TTL expiry; LWT analog           |
+
+* Privacy and Sensitivity
+
+  - By default: file contents never included; prompt text not logged;
+    only prompt *length* is recorded.
+  - ~OTEL_LOG_USER_PROMPTS=1~: includes full prompt text. Do not enable
+    on shared collector without access control. Not needed for aq presence.
+  - ~OTEL_LOG_TOOL_DETAILS=1~: includes file paths and bash command strings.
+    Required for worktree claim inference. May expose sensitive paths.
+    Enable only on personal/homelab collector.
+  - ~OTEL_RESOURCE_ATTRIBUTES~ formatting: comma-separated ~key=value~,
+    *no spaces allowed* in values. Use underscores or percent-encode.
+  - OTEL Web (claude.ai/code): not yet supported in sandbox environment.
+    CLI and VS Code extension only.
+
+* Conjectures
+
+  | ID    | Conjecture                                               | Stage       |
+  |-------+----------------------------------------------------------+-------------|
+  | C-015 | Claude Code OTEL tap resolves F-1 bootstrap paradox;     | CONJECTURED |
+  |       | zero agent-side aq instrumentation required              |             |
+  | C-016 | commit.count + git_commit_id are sufficient as durable   | CONJECTURED |
+  |       | worktree claims; lower false positive than path inference |            |
+  | C-017 | otel-aq-bridge tail latency + MQTT publish is <2s        | UNTESTED    |
+  |       | end-to-end at OTEL_LOGS_EXPORT_INTERVAL=2000             |             |
+  | C-018 | OTEL session.id is stable across a single worktree       | UNTESTED    |
+  |       | session and can serve as aq agent_id without collision   |             |
+  | C-019 | OTEL tap + MQTT LWT together provide TTL-bounded         | CONJECTURED |
+  |       | presence without aq re-announce loop                     |             |
+
+* References
+
+  - Claude Code monitoring docs (canonical)
+  - Claude Code monitoring guide (Docker Compose reference stack)
+  - OTel events in logs protocol, not metrics (issue #15417)
+  - OTEL not supported on Web / claude.ai/code (issue #32364)
+  - ColeMurray/claude-code-otel (reference stack)
+  - Detection Engineering for Claude Code (schema / threat model)
+  - VictoriaMetrics vibe-coding-observability (temporality / naming)
+  - aq DOGFOODING.md
+  - aq observability-landscape.org (companion doc)
