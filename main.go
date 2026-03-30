@@ -1326,17 +1326,19 @@ Creates the channel directories, agent registry, and logs.
 		return 1
 	}
 
-	// Write config.json.
+	// Write config.json (only if it doesn't exist — never overwrite).
 	configPath := filepath.Join(aqHome(), "config.json")
-	config := map[string]interface{}{
-		"version":         "0.1.0",
-		"default_channel": DefaultChannel,
-		"default_ttl":     DefaultTTL,
-	}
-	data, _ := json.MarshalIndent(config, "", "  ")
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		config := map[string]interface{}{
+			"config_version":  1,
+			"default_channel": DefaultChannel,
+			"default_ttl":     DefaultTTL,
+		}
+		data, _ := json.MarshalIndent(config, "", "  ")
+		if err := os.WriteFile(configPath, data, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
 	}
 
 	fmt.Printf("aq initialized at %s\n", aqHome())
@@ -1430,11 +1432,81 @@ Verifies AQ_HOME, channels, config, broadcasts, and tools.
 	}
 
 	configPath := filepath.Join(home, "config.json")
+	shouldMigrate := false
+	for _, a := range args {
+		if a == "--migrate" {
+			shouldMigrate = true
+		}
+	}
 	if _, err := os.Stat(configPath); err != nil {
-		fmt.Printf("warn  config     missing\n")
+		fmt.Printf("warn  config     missing (run: aq init)\n")
 		warns++
 	} else {
-		fmt.Printf("ok    config     present\n")
+		// Validate config_version
+		configData, readErr := os.ReadFile(configPath)
+		if readErr != nil {
+			fmt.Printf("warn  config     unreadable: %v\n", readErr)
+			warns++
+		} else {
+			var raw map[string]interface{}
+			if json.Unmarshal(configData, &raw) != nil {
+				fmt.Printf("FAIL  config     invalid JSON\n")
+				errs++
+			} else {
+				currentSchemaVersion := 1
+				configVer, hasVer := raw["config_version"]
+				oldVer, hasOldVer := raw["version"]
+
+				switch {
+				case hasVer:
+					if v, ok := configVer.(float64); ok && int(v) == currentSchemaVersion {
+						fmt.Printf("ok    config     v%d\n", int(v))
+					} else if v, ok := configVer.(float64); ok && int(v) > currentSchemaVersion {
+						fmt.Printf("FAIL  config     v%d (newer than this binary, upgrade aq)\n", int(v))
+						errs++
+					} else if v, ok := configVer.(float64); ok && int(v) < currentSchemaVersion {
+						fmt.Printf("warn  config     v%d (outdated, run: aq doctor --migrate)\n", int(v))
+						warns++
+					} else {
+						fmt.Printf("warn  config     config_version not an integer\n")
+						warns++
+					}
+				case hasOldVer && !hasVer:
+					fmt.Printf("warn  config     unversioned (has legacy 'version: %v', run: aq doctor --migrate)\n", oldVer)
+					warns++
+					if shouldMigrate {
+						delete(raw, "version")
+						raw["config_version"] = currentSchemaVersion
+						if ttl, ok := raw["default_ttl"].(float64); ok && ttl < 3600 {
+							raw["default_ttl"] = 3600
+						}
+						migrated, _ := json.MarshalIndent(raw, "", "  ")
+						if err := os.WriteFile(configPath, migrated, 0o644); err != nil {
+							fmt.Printf("FAIL  migrate    write failed: %v\n", err)
+							errs++
+						} else {
+							fmt.Printf("ok    migrate    config_version set to %d, default_ttl >= 3600\n", currentSchemaVersion)
+						}
+					}
+				default:
+					fmt.Printf("warn  config     no config_version field (run: aq doctor --migrate)\n")
+					warns++
+					if shouldMigrate {
+						raw["config_version"] = currentSchemaVersion
+						if ttl, ok := raw["default_ttl"].(float64); ok && ttl < 3600 {
+							raw["default_ttl"] = 3600
+						}
+						migrated, _ := json.MarshalIndent(raw, "", "  ")
+						if err := os.WriteFile(configPath, migrated, 0o644); err != nil {
+							fmt.Printf("FAIL  migrate    write failed: %v\n", err)
+							errs++
+						} else {
+							fmt.Printf("ok    migrate    config_version set to %d\n", currentSchemaVersion)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Broadcasts.
