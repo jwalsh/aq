@@ -6,6 +6,13 @@
         "tool_name": "Edit|Write"
       },
       "command": "aq announce -c \"${AQ_CONJECTURE:-C-0}\" --claim \"editing\" --phase proof -f \"$(echo $CLAUDE_TOOL_PARAMS | jq -r '.file_path // .file_name' 2>/dev/null || echo 'unknown')\" --status prosecuting 2>/dev/null || true"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool_name": "Bash"
+      },
+      "command": "if echo \"$CLAUDE_TOOL_PARAMS\" | grep -q 'git commit'; then REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); CONJECTURE=${AQ_CONJECTURE:-C-0}; FILES=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | paste -sd, -); CLAIM=$(git log --format=%s -1 HEAD 2>/dev/null | head -c80); aq announce -c \"$CONJECTURE\" --claim \"$CLAIM\" --phase proof -f \"$FILES\" --status done 2>/dev/null; \"${REPO_ROOT}/bin/aq-fanout.sh\" \"$CONJECTURE\" proof \"$FILES\" \"$CLAIM\" 2>/dev/null; fi || true"
     }
   ]
 }
