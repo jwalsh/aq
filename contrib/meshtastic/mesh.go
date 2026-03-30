@@ -401,7 +401,7 @@ func main() {
 	via := flag.String("via", "mqtt", "Transport mode: serial or mqtt")
 	serialPort := flag.String("port", "/dev/ttyUSB0", "Serial port for Meshtastic device")
 	mqttHost := flag.String("mqtt-host", "mqtt.meshtastic.org", "MQTT broker host for bridge mode")
-	channelIndex := flag.Int("channel", 0, "Meshtastic channel index")
+	channelIndex := flag.Int("channel", 1, "Meshtastic channel index (default 1; channel 0 is reserved for primary mesh use)")
 
 	// Broadcast content flags.
 	agent := flag.String("agent", "", "Agent address (e.g., jwalsh/feat-auth)")
@@ -417,6 +417,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "specify -publish or -subscribe\n\n")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if *channelIndex == 0 {
+		log.Fatal("channel 0 is reserved for primary mesh use; aq uses channel >= 1")
 	}
 
 	switch {

@@ -97,7 +97,7 @@ These are then visible to `aq status` and `aq check` on the local machine.
 | `-via`        | `mqtt`                 | Transport: `serial` or `mqtt`              |
 | `-port`       | `/dev/ttyUSB0`         | Serial port for Meshtastic device          |
 | `-mqtt-host`  | `mqtt.meshtastic.org`  | MQTT broker host                           |
-| `-channel`    | `0`                    | Meshtastic channel index                   |
+| `-channel`    | `1`                    | Meshtastic channel index (0 is rejected)   |
 | `-agent`      | (required for publish) | Agent address (e.g., `jwalsh/feat-auth`)   |
 | `-conjecture` | `C-0`                  | Conjecture ID                              |
 | `-claim`      | (empty)                | Conjecture claim / intent                  |

@@ -1,0 +1,11 @@
+{
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool_name": "Edit|Write"
+      },
+      "command": "aq announce -c \"${AQ_CONJECTURE:-C-0}\" --claim \"editing\" --phase proof -f \"$(echo $CLAUDE_TOOL_PARAMS | jq -r '.file_path // .file_name' 2>/dev/null || echo 'unknown')\" --status prosecuting 2>/dev/null || true"
+    }
+  ]
+}
