@@ -200,26 +200,44 @@ func broadcastDir() string {
 }
 
 // writeBroadcast serializes a Broadcast to JSON and writes it to the
-// requests directory as aq-{ts}-{id}.json.
+// requests directory as aq-{ts}-{id}.json. Uses atomic write (temp + rename)
+// to prevent readers from seeing partial files.
 func writeBroadcast(b Broadcast) error {
 	dir := broadcastDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
+		return fmt.Errorf("[irc] RX: mkdir %s: %w", dir, err)
 	}
 
 	filename := fmt.Sprintf("aq-%d-%s.json", time.Now().UnixMilli(), b.ID)
-	path := filepath.Join(dir, filename)
+	finalPath := filepath.Join(dir, filename)
 
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return fmt.Errorf("[irc] RX: marshal: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	// Atomic write: write to temp file, then rename.
+	tmpFile, err := os.CreateTemp(dir, ".aq-tmp-*.json")
+	if err != nil {
+		return fmt.Errorf("[irc] RX: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("[irc] RX: write temp %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[irc] RX: close temp %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[irc] RX: rename %s -> %s: %w", tmpPath, finalPath, err)
 	}
 
-	log.Printf("wrote %s", path)
+	log.Printf("[irc] RX: wrote %s", finalPath)
 	return nil
 }
 
@@ -342,7 +360,7 @@ func publish(address, channel, nick string, broadcast Broadcast) error {
 		return fmt.Errorf("privmsg: %w", err)
 	}
 
-	log.Printf("sent to %s: %s", channel, payload)
+	log.Printf("[irc] TX: sent to %s: %s", channel, payload)
 
 	if err := conn.quit("aq broadcast complete"); err != nil {
 		return fmt.Errorf("quit: %w", err)
@@ -394,7 +412,7 @@ func subscribe(address, channel, nick string, shutdown <-chan struct{}) error {
 		return fmt.Errorf("join: %w", err)
 	}
 
-	log.Printf("joined %s on %s — listening for broadcasts", channel, address)
+	log.Printf("[irc] RX: joined %s on %s — listening for broadcasts", channel, address)
 
 	// Main read loop with shutdown awareness
 	errChan := make(chan error, 1)
@@ -414,7 +432,7 @@ func subscribe(address, channel, nick string, shutdown <-chan struct{}) error {
 	for {
 		select {
 		case <-shutdown:
-			log.Println("shutting down subscriber")
+			log.Println("[irc] RX: shutting down subscriber")
 			conn.quit("aq subscriber shutdown")
 			return nil
 
@@ -426,7 +444,7 @@ func subscribe(address, channel, nick string, shutdown <-chan struct{}) error {
 			if strings.HasPrefix(line, "PING") {
 				pongPayload := strings.TrimPrefix(line, "PING ")
 				if err := conn.send("PONG %s", pongPayload); err != nil {
-					log.Printf("pong failed: %v", err)
+					log.Printf("[irc] RX: pong failed: %v", err)
 				}
 				continue
 			}
@@ -448,23 +466,25 @@ func subscribe(address, channel, nick string, shutdown <-chan struct{}) error {
 				continue
 			}
 
-			log.Printf("received from %s: %s", senderNick, message)
+			log.Printf("[irc] RX: received from %s: %s", senderNick, message)
 
 			// Dedup check
 			if isDuplicate(broadcast) {
-				log.Printf("skipping duplicate: %s", dedupKey(broadcast))
+				log.Printf("[irc] RX: skipping duplicate: %s", dedupKey(broadcast))
 				continue
 			}
 
 			// Materialize to filesystem
 			if err := writeBroadcast(broadcast); err != nil {
-				log.Printf("write failed: %v", err)
+				log.Printf("[irc] RX: write failed: %v", err)
 			}
 		}
 	}
 }
 
 func main() {
+	log.SetOutput(os.Stderr)
+
 	server := flag.String("server", "localhost:6999", "IRC server address (host:port)")
 	channel := flag.String("channel", "#aq-presence", "IRC channel to join")
 	nick := flag.String("nick", "", "IRC nickname (default: aq-{pid})")
@@ -526,7 +546,7 @@ func main() {
 
 		go func() {
 			<-sig
-			fmt.Println("\nreceived signal, shutting down...")
+			fmt.Fprintln(os.Stderr, "\n[irc] received signal, shutting down...")
 			close(shutdown)
 		}()
 
@@ -545,7 +565,7 @@ func main() {
 			default:
 			}
 
-			log.Printf("disconnected: %v — reconnecting in 5s", err)
+			log.Printf("[irc] RX: disconnected: %v — reconnecting in 5s", err)
 			select {
 			case <-shutdown:
 				return

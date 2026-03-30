@@ -28,9 +28,17 @@ import subprocess
 import sys
 import time
 
-import ggwave
-import numpy as np
-import sounddevice as sd
+try:
+    import ggwave
+    import numpy as np
+    import sounddevice as sd
+except ImportError as _import_err:
+    print(
+        f"[ggwave-tx] missing dependency: {_import_err}\n"
+        f"  install with: pip install ggwave sounddevice numpy",
+        file=sys.stderr,
+    )
+    sys.exit(2)  # permanent failure: missing dependency
 
 SAMPLE_RATE = 48000
 
@@ -101,35 +109,47 @@ def transmit(payload: str, protocol_name: str = "ultrasonic", volume: int = 50) 
     payload_bytes = len(payload.encode("utf-8"))
     protocol_id = PROTOCOLS.get(protocol_name)
     if protocol_id is None:
-        print(f"unknown protocol: {protocol_name}", file=sys.stderr)
-        print(f"available: {', '.join(PROTOCOLS.keys())}", file=sys.stderr)
+        print(f"[ggwave-tx] unknown protocol: {protocol_name}", file=sys.stderr)
+        print(f"[ggwave-tx] available: {', '.join(PROTOCOLS.keys())}", file=sys.stderr)
         sys.exit(1)
 
     # Ultrasonic limit check
     if "ultrasonic" in protocol_name and payload_bytes > 25:
-        print(f"warn: payload is {payload_bytes} bytes, ultrasonic max is ~25", file=sys.stderr)
+        print(f"[ggwave-tx] warn: payload is {payload_bytes} bytes, ultrasonic max is ~25", file=sys.stderr)
         print(f"  payload: {payload}", file=sys.stderr)
         print(f"  consider: --protocol audible", file=sys.stderr)
 
     # ggwave 0.4.x API: encode(payload, protocolId=, volume=)
     # Returns bytes of 16-bit signed integer PCM samples
-    waveform = ggwave.encode(payload, protocolId=protocol_id, volume=volume)
+    try:
+        waveform = ggwave.encode(payload, protocolId=protocol_id, volume=volume)
+    except Exception as exc:
+        print(f"[ggwave-tx] TX: ggwave encode failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     if waveform is None or len(waveform) == 0:
-        print("ggwave encode returned empty waveform", file=sys.stderr)
+        print("[ggwave-tx] TX: ggwave encode returned empty waveform", file=sys.stderr)
         sys.exit(1)
 
     # Convert from int16 PCM to float32 for sounddevice
     samples = np.frombuffer(waveform, dtype=np.int16).astype(np.float32) / 32768.0
     duration_seconds = len(samples) / SAMPLE_RATE
 
-    print(f"tx: {payload}")
-    print(f"    protocol={protocol_name}, {payload_bytes}B, {duration_seconds:.1f}s, vol={volume}")
+    print(f"[ggwave-tx] TX: {payload}", file=sys.stderr)
+    print(f"[ggwave-tx] TX: protocol={protocol_name}, {payload_bytes}B, {duration_seconds:.1f}s, vol={volume}", file=sys.stderr)
 
-    sd.play(samples, samplerate=SAMPLE_RATE)
-    sd.wait()
+    try:
+        sd.play(samples, samplerate=SAMPLE_RATE)
+        sd.wait()
+    except sd.PortAudioError as exc:
+        print(f"[ggwave-tx] TX: audio hardware error: {exc}", file=sys.stderr)
+        print("[ggwave-tx] TX: check that an audio output device is available", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"[ggwave-tx] TX: playback failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"    done")
+    print("[ggwave-tx] TX: done", file=sys.stderr)
 
 
 def main() -> int:

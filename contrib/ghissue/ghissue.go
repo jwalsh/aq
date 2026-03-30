@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,6 +32,18 @@ import (
 	"syscall"
 	"time"
 )
+
+// subprocessTimeout is the default timeout for gh CLI calls.
+const subprocessTimeout = 60 * time.Second
+
+// checkGhBinary verifies the gh CLI is installed.
+func checkGhBinary() error {
+	_, err := exec.LookPath("gh")
+	if err != nil {
+		return fmt.Errorf("[ghissue] gh binary not found in PATH: install from https://cli.github.com/")
+	}
+	return nil
+}
 
 // Broadcast is the aq broadcast payload. Same schema as main.go.
 type Broadcast struct {
@@ -61,6 +74,7 @@ func broadcastDir() (string, error) {
 }
 
 // writeBroadcast writes a broadcast to the local aq channel as aq-<id>.json.
+// Uses atomic write (temp + rename) to prevent readers from seeing partial files.
 func writeBroadcast(b Broadcast) error {
 	dir, err := broadcastDir()
 	if err != nil {
@@ -69,45 +83,77 @@ func writeBroadcast(b Broadcast) error {
 
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal broadcast: %w", err)
+		return fmt.Errorf("[ghissue] RX: marshal broadcast: %w", err)
 	}
 
-	filename := filepath.Join(dir, fmt.Sprintf("aq-%s.json", b.ID))
-	if err := os.WriteFile(filename, data, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", filename, err)
+	finalPath := filepath.Join(dir, fmt.Sprintf("aq-%s.json", b.ID))
+
+	// Atomic write: temp file + rename.
+	tmpFile, err := os.CreateTemp(dir, ".aq-tmp-*.json")
+	if err != nil {
+		return fmt.Errorf("[ghissue] RX: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("[ghissue] RX: write temp %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[ghissue] RX: close temp %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[ghissue] RX: rename %s -> %s: %w", tmpPath, finalPath, err)
 	}
 
-	log.Printf("wrote %s", filename)
+	log.Printf("[ghissue] RX: wrote %s", finalPath)
 	return nil
 }
 
 // ghComment posts a comment on the given issue via `gh issue comment`.
 func ghComment(repo string, issue int, body string) error {
-	cmd := exec.Command("gh", "issue", "comment",
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gh", "issue", "comment",
 		fmt.Sprintf("%d", issue),
 		"-R", repo,
 		"--body", body,
 	)
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("[ghissue] TX: gh issue comment timed out after %v", subprocessTimeout)
+		}
+		return fmt.Errorf("[ghissue] TX: gh issue comment %s#%d: %w", repo, issue, err)
+	}
+	return nil
 }
 
 // ghFetchComments retrieves all comments from the issue via `gh api`.
 // Returns the raw JSON array of comment objects.
 func ghFetchComments(repo string, issue int) ([]json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+
 	// Use pagination — gh api handles it with --paginate.
 	// Each comment object has a "body" field containing the comment text.
-	cmd := exec.Command("gh", "api",
+	cmd := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, issue),
 		"--paginate",
 	)
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("gh api failed: %s", string(exitErr.Stderr))
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("[ghissue] RX: gh api repos/%s/issues/%d/comments timed out after %v", repo, issue, subprocessTimeout)
 		}
-		return nil, fmt.Errorf("gh api: %w", err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("[ghissue] RX: gh api failed: %s", string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("[ghissue] RX: gh api: %w", err)
 	}
 
 	// gh --paginate for JSON arrays concatenates multiple arrays.
@@ -120,7 +166,7 @@ func ghFetchComments(repo string, issue int) ([]json.RawMessage, error) {
 		// Fallback: try to split on "][\n" boundaries.
 		fixed := strings.ReplaceAll(string(out), "]\n[", ",")
 		if err2 := json.Unmarshal([]byte(fixed), &comments); err2 != nil {
-			return nil, fmt.Errorf("parse comments: %w (original: %v)", err2, err)
+			return nil, fmt.Errorf("[ghissue] RX: parse comments: %w (original: %v)", err2, err)
 		}
 	}
 
@@ -181,11 +227,11 @@ func parseBroadcastsFromComments(comments []json.RawMessage) []Broadcast {
 func publish(repo string, issue int, broadcast Broadcast) error {
 	data, err := json.MarshalIndent(broadcast, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal broadcast: %w", err)
+		return fmt.Errorf("[ghissue] TX: marshal broadcast: %w", err)
 	}
 
 	body := string(data)
-	log.Printf("publishing broadcast %s to %s#%d", broadcast.ID, repo, issue)
+	log.Printf("[ghissue] TX: publishing broadcast %s to %s#%d", broadcast.ID, repo, issue)
 	return ghComment(repo, issue, body)
 }
 
@@ -195,17 +241,17 @@ func subscribe(repo string, issue int, pollInterval time.Duration) error {
 
 	// Initial fetch to populate the seen set without writing (avoids
 	// replaying the entire history on first run).
-	log.Printf("fetching existing comments from %s#%d...", repo, issue)
+	log.Printf("[ghissue] RX: fetching existing comments from %s#%d...", repo, issue)
 	comments, err := ghFetchComments(repo, issue)
 	if err != nil {
-		return fmt.Errorf("initial fetch: %w", err)
+		return fmt.Errorf("[ghissue] RX: initial fetch: %w", err)
 	}
 
 	existing := parseBroadcastsFromComments(comments)
 	for _, broadcast := range existing {
 		seen[broadcast.ID] = true
 	}
-	log.Printf("found %d existing broadcasts, starting poll (interval %s)", len(existing), pollInterval)
+	log.Printf("[ghissue] RX: found %d existing broadcasts, starting poll (interval %s)", len(existing), pollInterval)
 
 	// Set up signal handling for graceful shutdown.
 	sigChan := make(chan os.Signal, 1)
@@ -217,13 +263,13 @@ func subscribe(repo string, issue int, pollInterval time.Duration) error {
 	for {
 		select {
 		case <-sigChan:
-			log.Println("shutting down subscriber")
+			log.Println("[ghissue] RX: shutting down subscriber")
 			return nil
 
 		case <-ticker.C:
 			comments, err := ghFetchComments(repo, issue)
 			if err != nil {
-				log.Printf("poll error: %v (will retry)", err)
+				log.Printf("[ghissue] RX: poll error: %v (will retry)", err)
 				continue
 			}
 
@@ -236,7 +282,7 @@ func subscribe(repo string, issue int, pollInterval time.Duration) error {
 				seen[broadcast.ID] = true
 				newCount++
 
-				fmt.Printf("[%s] %s conjecture=%s phase=%s status=%s files=%v\n",
+				log.Printf("[ghissue] RX: [%s] %s conjecture=%s phase=%s status=%s files=%v",
 					time.Now().Format("15:04:05"),
 					broadcast.Agent,
 					broadcast.ConjectureID,
@@ -246,18 +292,20 @@ func subscribe(repo string, issue int, pollInterval time.Duration) error {
 				)
 
 				if err := writeBroadcast(broadcast); err != nil {
-					log.Printf("write error: %v", err)
+					log.Printf("[ghissue] RX: write error: %v", err)
 				}
 			}
 
 			if newCount > 0 {
-				log.Printf("received %d new broadcast(s)", newCount)
+				log.Printf("[ghissue] RX: received %d new broadcast(s)", newCount)
 			}
 		}
 	}
 }
 
 func main() {
+	log.SetOutput(os.Stderr)
+
 	repo := flag.String("repo", "", "GitHub repository (owner/repo)")
 	issue := flag.Int("issue", 0, "Issue number for the aq gossip thread")
 	doPublish := flag.Bool("publish", false, "Publish a broadcast as an issue comment")
@@ -279,6 +327,12 @@ func main() {
 	if *issue == 0 {
 		fmt.Fprintf(os.Stderr, "error: -issue is required\n")
 		os.Exit(1)
+	}
+
+	// Check for gh binary before attempting any operations.
+	if err := checkGhBinary(); err != nil {
+		log.Printf("%v", err)
+		os.Exit(2) // permanent failure: missing binary
 	}
 
 	switch {
@@ -314,7 +368,7 @@ func main() {
 		if err := publish(*repo, *issue, broadcast); err != nil {
 			log.Fatalf("publish failed: %v", err)
 		}
-		log.Printf("broadcast %s published to %s#%d", broadcast.ID, *repo, *issue)
+		log.Printf("[ghissue] TX: broadcast %s published to %s#%d", broadcast.ID, *repo, *issue)
 
 	case *doSubscribe:
 		interval := time.Duration(*pollInterval) * time.Second

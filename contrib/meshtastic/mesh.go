@@ -27,6 +27,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -43,6 +44,9 @@ import (
 	"syscall"
 	"time"
 )
+
+// subprocessTimeout is the default timeout for meshtastic/mosquitto CLI calls.
+const subprocessTimeout = 30 * time.Second
 
 // ---------- Broadcast payload (matches main.go) ----------
 
@@ -230,23 +234,37 @@ func compactDecode(payload string) (Broadcast, error) {
 
 // ---------- Transport: serial via meshtastic CLI ----------
 
+// checkBinary verifies a CLI binary is installed, returning a descriptive error if not.
+func checkBinary(name, installHint string) error {
+	_, err := exec.LookPath(name)
+	if err != nil {
+		return fmt.Errorf("[mesh] %s binary not found in PATH: %s", name, installHint)
+	}
+	return nil
+}
+
 // publishSerial sends a compact payload via the meshtastic CLI over serial.
 // Shells out to: meshtastic --port <port> --sendtext '<payload>' --ch-index <ch>
 func publishSerial(payload string, serialPort string, channelIndex int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+
 	channelStr := strconv.Itoa(channelIndex)
-	cmd := exec.Command("meshtastic",
+	cmd := exec.CommandContext(ctx, "meshtastic",
 		"--port", serialPort,
 		"--sendtext", payload,
 		"--ch-index", channelStr,
 	)
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	log.Printf("TX serial: meshtastic --port %s --sendtext '%s' --ch-index %s",
+	log.Printf("[mesh] TX: meshtastic --port %s --sendtext '%s' --ch-index %s",
 		serialPort, payload, channelStr)
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("meshtastic send failed: %w", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("[mesh] TX: meshtastic send timed out after %v", subprocessTimeout)
+		}
+		return fmt.Errorf("[mesh] TX: meshtastic send failed: %w", err)
 	}
 	return nil
 }
@@ -266,20 +284,25 @@ func meshMQTTWildcard() string {
 
 // publishMQTT sends a compact payload via mosquitto_pub to the MQTT bridge.
 func publishMQTT(payload string, mqttHost string, channelIndex int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+
 	topic := meshMQTTTopic(channelIndex)
-	cmd := exec.Command("mosquitto_pub",
+	cmd := exec.CommandContext(ctx, "mosquitto_pub",
 		"-h", mqttHost,
 		"-t", topic,
 		"-m", payload,
 	)
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	log.Printf("TX mqtt: mosquitto_pub -h %s -t '%s' -m '%s'",
+	log.Printf("[mesh] TX: mosquitto_pub -h %s -t '%s' -m '%s'",
 		mqttHost, topic, payload)
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mosquitto_pub failed: %w", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("[mesh] TX: mosquitto_pub timed out after %v", subprocessTimeout)
+		}
+		return fmt.Errorf("[mesh] TX: mosquitto_pub failed: %w", err)
 	}
 	return nil
 }
@@ -296,20 +319,20 @@ func subscribeMQTT(mqttHost string, shutdown <-chan struct{}) error {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("pipe stdout: %w", err)
+		return fmt.Errorf("[mesh] RX: pipe stdout: %w", err)
 	}
 	cmd.Stderr = os.Stderr
 
-	log.Printf("RX mqtt: mosquitto_sub -h %s -t '%s'", mqttHost, topic)
+	log.Printf("[mesh] RX: mosquitto_sub -h %s -t '%s'", mqttHost, topic)
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("mosquitto_sub start: %w", err)
+		return fmt.Errorf("[mesh] RX: mosquitto_sub start: %w", err)
 	}
 
 	// Ensure subprocess is cleaned up.
 	go func() {
 		<-shutdown
-		log.Println("shutting down mosquitto_sub...")
+		log.Println("[mesh] RX: shutting down mosquitto_sub...")
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}()
 
@@ -330,21 +353,21 @@ func subscribeMQTT(mqttHost string, shutdown <-chan struct{}) error {
 
 		broadcast, decodeErr := compactDecode(messagePayload)
 		if decodeErr != nil {
-			log.Printf("decode error: %v (payload: %q)", decodeErr, messagePayload)
+			log.Printf("[mesh] RX: decode error: %v (payload: %q)", decodeErr, messagePayload)
 			continue
 		}
 
 		if writeErr := writeBroadcast(broadcast); writeErr != nil {
-			log.Printf("write error: %v", writeErr)
+			log.Printf("[mesh] RX: write error: %v", writeErr)
 			continue
 		}
 
 		broadcastJSON, _ := json.Marshal(broadcast)
-		fmt.Printf("[%s] RX %s\n", time.Now().Format("15:04:05"), string(broadcastJSON))
+		log.Printf("[mesh] RX: [%s] %s", time.Now().Format("15:04:05"), string(broadcastJSON))
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil && scanErr != io.EOF {
-		log.Printf("scanner error: %v", scanErr)
+		log.Printf("[mesh] RX: scanner error: %v", scanErr)
 	}
 
 	return cmd.Wait()
@@ -367,7 +390,8 @@ func aqRequestsDir() (string, error) {
 }
 
 // writeBroadcast writes a reconstructed Broadcast as aq-<id>.json to
-// the local requests directory.
+// the local requests directory. Uses atomic write (temp + rename)
+// to prevent readers from seeing partial files.
 func writeBroadcast(broadcast Broadcast) error {
 	requestsDir, err := aqRequestsDir()
 	if err != nil {
@@ -376,23 +400,42 @@ func writeBroadcast(broadcast Broadcast) error {
 
 	data, err := json.MarshalIndent(broadcast, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal broadcast: %w", err)
+		return fmt.Errorf("[mesh] RX: marshal broadcast: %w", err)
 	}
 
 	filename := fmt.Sprintf("aq-%s.json", broadcast.ID)
-	outputPath := filepath.Join(requestsDir, filename)
+	finalPath := filepath.Join(requestsDir, filename)
 
-	if writeErr := os.WriteFile(outputPath, data, 0644); writeErr != nil {
-		return fmt.Errorf("write %s: %w", outputPath, writeErr)
+	// Atomic write: temp file + rename.
+	tmpFile, tmpErr := os.CreateTemp(requestsDir, ".aq-tmp-*.json")
+	if tmpErr != nil {
+		return fmt.Errorf("[mesh] RX: create temp file: %w", tmpErr)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, writeErr := tmpFile.Write(data); writeErr != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("[mesh] RX: write temp %s: %w", tmpPath, writeErr)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[mesh] RX: close temp %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[mesh] RX: rename %s -> %s: %w", tmpPath, finalPath, err)
 	}
 
-	log.Printf("wrote %s", outputPath)
+	log.Printf("[mesh] RX: wrote %s", finalPath)
 	return nil
 }
 
 // ---------- main ----------
 
 func main() {
+	log.SetOutput(os.Stderr)
+
 	// Mode flags.
 	doPublish := flag.Bool("publish", false, "TX: send compact payload via Meshtastic")
 	doSubscribe := flag.Bool("subscribe", false, "RX: listen via MQTT bridge, write aq-*.json locally")
@@ -423,10 +466,32 @@ func main() {
 		log.Fatal("channel 0 is reserved for primary mesh use; aq uses channel >= 1")
 	}
 
+	// Check for required binaries based on transport mode.
+	switch *via {
+	case "serial":
+		if err := checkBinary("meshtastic", "pip install meshtastic"); err != nil {
+			log.Printf("%v", err)
+			os.Exit(2)
+		}
+	case "mqtt":
+		if *doPublish {
+			if err := checkBinary("mosquitto_pub", "install mosquitto-clients"); err != nil {
+				log.Printf("%v", err)
+				os.Exit(2)
+			}
+		}
+		if *doSubscribe {
+			if err := checkBinary("mosquitto_sub", "install mosquitto-clients"); err != nil {
+				log.Printf("%v", err)
+				os.Exit(2)
+			}
+		}
+	}
+
 	switch {
 	case *doPublish:
 		if *agent == "" {
-			log.Fatal("-agent required for publish mode")
+			log.Fatal("[mesh] -agent required for publish mode")
 		}
 
 		// Derive worktree from agent.
@@ -458,7 +523,7 @@ func main() {
 			log.Fatalf("compact encode: %v", err)
 		}
 
-		fmt.Printf("compact (%d bytes): %s\n", len(payload), payload)
+		log.Printf("[mesh] TX: compact (%d bytes): %s", len(payload), payload)
 
 		switch *via {
 		case "serial":
@@ -473,7 +538,7 @@ func main() {
 			log.Fatalf("unknown -via mode: %s (use serial or mqtt)", *via)
 		}
 
-		fmt.Println("TX ok")
+		log.Println("[mesh] TX: ok")
 
 	case *doSubscribe:
 		if *via != "mqtt" {
@@ -487,18 +552,18 @@ func main() {
 		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			sig := <-signalChan
-			log.Printf("received %v, shutting down...", sig)
+			log.Printf("[mesh] RX: received %v, shutting down...", sig)
 			close(shutdownChan)
 		}()
 
-		fmt.Printf("listening for mesh broadcasts via MQTT (%s)...\n", *mqttHost)
-		fmt.Println("broadcasts will be written to ~/.aq/channels/broadcast/requests/")
-		fmt.Println("press Ctrl-C to stop")
+		log.Printf("[mesh] RX: listening for mesh broadcasts via MQTT (%s)...", *mqttHost)
+		log.Println("[mesh] RX: broadcasts will be written to ~/.aq/channels/broadcast/requests/")
+		log.Println("[mesh] RX: press Ctrl-C to stop")
 
 		if err := subscribeMQTT(*mqttHost, shutdownChan); err != nil {
-			log.Printf("subscribe ended: %v", err)
+			log.Printf("[mesh] RX: subscribe ended: %v", err)
 		}
 
-		fmt.Println("shutdown complete")
+		log.Println("[mesh] RX: shutdown complete")
 	}
 }

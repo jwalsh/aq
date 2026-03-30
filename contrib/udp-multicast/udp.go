@@ -107,12 +107,12 @@ func frameDecode(datagram []byte) ([]byte, bool) {
 	}
 	// Check version
 	if datagram[2] != frameVersion {
-		log.Printf("unknown frame version: 0x%02x", datagram[2])
+		log.Printf("[udp] RX: unknown frame version: 0x%02x", datagram[2])
 		return nil, false
 	}
 	// Check format (only JSON supported)
 	if datagram[3] != frameJSON {
-		log.Printf("unsupported frame format: 0x%02x", datagram[3])
+		log.Printf("[udp] RX: unsupported frame format: 0x%02x", datagram[3])
 		return nil, false
 	}
 	return datagram[4:], true
@@ -135,7 +135,8 @@ func broadcastDir() (string, error) {
 }
 
 // writeBroadcast serializes a Broadcast to JSON and writes it to the
-// requests directory as aq-{ts}-{id}.json.
+// requests directory as aq-{ts}-{id}.json. Uses atomic write (temp + rename)
+// to prevent readers from seeing partial files.
 func writeBroadcast(broadcast Broadcast) error {
 	requestsDir, err := broadcastDir()
 	if err != nil {
@@ -144,17 +145,34 @@ func writeBroadcast(broadcast Broadcast) error {
 
 	data, err := json.MarshalIndent(broadcast, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal broadcast: %w", err)
+		return fmt.Errorf("[udp] RX: marshal broadcast: %w", err)
 	}
 
 	filename := fmt.Sprintf("aq-%d-%s.json", time.Now().UnixMilli(), broadcast.ID)
-	outputPath := filepath.Join(requestsDir, filename)
+	finalPath := filepath.Join(requestsDir, filename)
 
-	if writeErr := os.WriteFile(outputPath, data, 0o644); writeErr != nil {
-		return fmt.Errorf("write %s: %w", outputPath, writeErr)
+	// Atomic write: temp file + rename.
+	tmpFile, tmpErr := os.CreateTemp(requestsDir, ".aq-tmp-*.json")
+	if tmpErr != nil {
+		return fmt.Errorf("[udp] RX: create temp file: %w", tmpErr)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, writeErr := tmpFile.Write(data); writeErr != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("[udp] RX: write temp %s: %w", tmpPath, writeErr)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[udp] RX: close temp %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("[udp] RX: rename %s -> %s: %w", tmpPath, finalPath, err)
 	}
 
-	log.Printf("wrote %s", outputPath)
+	log.Printf("[udp] RX: wrote %s", finalPath)
 	return nil
 }
 
@@ -214,7 +232,7 @@ func publish(group string, port int, ttlHops int, ifaceName string, broadcast Br
 	datagram := frameEncode(jsonPayload)
 
 	if len(datagram) > 1472 {
-		log.Printf("warning: datagram is %d bytes, may fragment on Ethernet (MTU 1500)", len(datagram))
+		log.Printf("[udp] TX: warning: datagram is %d bytes, may fragment on Ethernet (MTU 1500)", len(datagram))
 	}
 
 	groupAddr := fmt.Sprintf("%s:%d", group, port)
@@ -263,7 +281,7 @@ func publish(group string, port int, ttlHops int, ifaceName string, broadcast Br
 		return fmt.Errorf("write: %w", err)
 	}
 
-	log.Printf("TX %d bytes to %s (id=%s agent=%s conjecture=%s phase=%s)",
+	log.Printf("[udp] TX: %d bytes to %s (id=%s agent=%s conjecture=%s phase=%s)",
 		n, groupAddr, broadcast.ID, broadcast.Agent, broadcast.ConjectureID, broadcast.Phase)
 	return nil
 }
@@ -287,7 +305,7 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 		if err != nil {
 			return fmt.Errorf("interface %s: %w", ifaceName, err)
 		}
-		log.Printf("binding to interface %s", ifaceName)
+		log.Printf("[udp] RX: binding to interface %s", ifaceName)
 	}
 
 	conn, err := net.ListenMulticastUDP("udp4", iface, gaddr)
@@ -298,9 +316,9 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 
 	conn.SetReadBuffer(65536)
 
-	log.Printf("joined multicast group %s -- listening for broadcasts", groupAddr)
+	log.Printf("[udp] RX: joined multicast group %s -- listening for broadcasts", groupAddr)
 	if selfAgent != "" {
-		log.Printf("self-exclusion: filtering broadcasts from agent %q", selfAgent)
+		log.Printf("[udp] RX: self-exclusion: filtering broadcasts from agent %q", selfAgent)
 	}
 
 	dedup := newDedupCache()
@@ -331,12 +349,12 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 	for {
 		select {
 		case <-shutdown:
-			log.Println("shutting down subscriber")
+			log.Println("[udp] RX: shutting down subscriber")
 			return nil
 
 		case result := <-results:
 			if result.err != nil {
-				return fmt.Errorf("read: %w", result.err)
+				return fmt.Errorf("[udp] RX: read: %w", result.err)
 			}
 
 			// Decode the frame header
@@ -349,7 +367,7 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 			// Parse the broadcast JSON
 			var broadcast Broadcast
 			if jsonErr := json.Unmarshal(jsonPayload, &broadcast); jsonErr != nil {
-				log.Printf("invalid JSON from %s: %v", result.src, jsonErr)
+				log.Printf("[udp] RX: invalid JSON from %s: %v", result.src, jsonErr)
 				continue
 			}
 
@@ -361,7 +379,7 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 			// Check TTL expiry
 			now := float64(time.Now().Unix())
 			if broadcast.TTL > 0 && now > broadcast.Ts+float64(broadcast.TTL) {
-				log.Printf("expired broadcast from %s (age=%.0fs, ttl=%d)",
+				log.Printf("[udp] RX: expired broadcast from %s (age=%.0fs, ttl=%d)",
 					broadcast.Agent, now-broadcast.Ts, broadcast.TTL)
 				continue
 			}
@@ -371,12 +389,12 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 				continue
 			}
 
-			log.Printf("RX from %s: agent=%s conjecture=%s phase=%s files=%v",
+			log.Printf("[udp] RX: from %s: agent=%s conjecture=%s phase=%s files=%v",
 				result.src, broadcast.Agent, broadcast.ConjectureID, broadcast.Phase, broadcast.Files)
 
 			// Materialize to filesystem
 			if writeErr := writeBroadcast(broadcast); writeErr != nil {
-				log.Printf("write failed: %v", writeErr)
+				log.Printf("[udp] RX: write failed: %v", writeErr)
 			}
 		}
 	}
@@ -385,6 +403,8 @@ func subscribe(group string, port int, ifaceName string, selfAgent string, shutd
 // ---------- main ----------
 
 func main() {
+	log.SetOutput(os.Stderr)
+
 	// Mode flags
 	doPublish := flag.Bool("publish", false, "TX: send a broadcast to the multicast group")
 	doSubscribe := flag.Bool("subscribe", false, "RX: listen for broadcasts, write to filesystem")
@@ -461,21 +481,21 @@ func main() {
 		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			sig := <-signalChan
-			log.Printf("received %v, shutting down...", sig)
+			log.Printf("[udp] RX: received %v, shutting down...", sig)
 			close(shutdownChan)
 		}()
 
 		// Use agent flag for self-exclusion if provided
 		selfAgent := *agent
 
-		fmt.Printf("listening on %s:%d (TTL=%d)\n", *group, *port, *ttlHops)
-		fmt.Println("broadcasts will be written to ~/.aq/channels/broadcast/requests/")
-		fmt.Println("press Ctrl-C to stop")
+		log.Printf("[udp] RX: listening on %s:%d (TTL=%d)", *group, *port, *ttlHops)
+		log.Println("[udp] RX: broadcasts will be written to ~/.aq/channels/broadcast/requests/")
+		log.Println("[udp] RX: press Ctrl-C to stop")
 
 		if err := subscribe(*group, *port, *ifaceName, selfAgent, shutdownChan); err != nil {
-			log.Printf("subscribe ended: %v", err)
+			log.Printf("[udp] RX: subscribe ended: %v", err)
 		}
 
-		fmt.Println("shutdown complete")
+		log.Println("[udp] RX: shutdown complete")
 	}
 }

@@ -168,19 +168,40 @@ def ingest_broadcast(broadcast_dict: dict) -> Path:
     """Write a decoded broadcast to the filesystem as a JSON file.
 
     The file lands in ~/.aq/channels/broadcast/requests/ where the
-    standard read_active() picks it up.
+    standard read_active() picks it up. Uses atomic write (temp + rename)
+    to prevent readers from seeing partial files.
     """
+    import tempfile
+
     requests_directory = _aq_home() / "channels" / "broadcast" / "requests"
     requests_directory.mkdir(parents=True, exist_ok=True)
 
     timestamp_padded = format(int(broadcast_dict["ts"]), "014d")
     broadcast_id = broadcast_dict["id"]
     filename = f"aq-{timestamp_padded}-{broadcast_id}.json"
-    file_path = requests_directory / filename
+    final_path = requests_directory / filename
 
-    file_path.write_text(json.dumps(broadcast_dict) + "\n")
+    # Atomic write: write to temp file in same directory, then rename.
+    tmp_path = None
+    try:
+        fd, tmp_path_str = tempfile.mkstemp(
+            prefix=".aq-tmp-", suffix=".json", dir=str(requests_directory)
+        )
+        tmp_path = Path(tmp_path_str)
+        with os.fdopen(fd, "w") as tmp_file:
+            tmp_file.write(json.dumps(broadcast_dict) + "\n")
+        tmp_path.rename(final_path)
+    except OSError:
+        # Clean up temp file on failure.
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
     logger.info("ingested: %s -> %s", broadcast_dict["conjecture_id"], filename)
-    return file_path
+    return final_path
 
 
 # --- ggwave RX Loop ---
@@ -209,13 +230,23 @@ def listen_once(
         sample_count = int(listen_duration * SAMPLE_RATE)
         logger.debug("recording %d samples (%.1fs)...", sample_count, listen_duration)
 
-        recording = sd.rec(
-            sample_count,
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-        )
-        sd.wait()
+        try:
+            recording = sd.rec(
+                sample_count,
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+            )
+            sd.wait()
+        except sd.PortAudioError as exc:
+            logger.error(
+                "[ggwave-rx] RX: audio hardware error: %s — check that a microphone is available",
+                exc,
+            )
+            return None
+        except Exception as exc:
+            logger.error("[ggwave-rx] RX: audio capture failed: %s", exc)
+            return None
 
         raw_bytes = recording.tobytes()
         result = ggwave.decode(instance, raw_bytes)
@@ -335,6 +366,7 @@ def main() -> int:
         level=log_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
+        stream=sys.stderr,
     )
 
     stop_event = Event()
