@@ -1,0 +1,330 @@
+#+TITLE: AQ Observability Landscape: Industry State vs. Gossip Architecture
+#+AUTHOR: jw
+#+DATE: 2026-03-30
+#+PROPERTY: header-args :mkdirp t
+#+STARTUP: overview
+#+TAGS: cprr landscape comparison roadmap
+#+DESCRIPTION: Peer document for aq roadmap agents. Situates aq L1.5 gossip
+#+              against the March 2026 industry convergence on OTel-style
+#+              command-and-control agentic monitoring. Identifies gaps,
+#+              complements, and conjectures for the transport registry.
+
+* Purpose
+  :PROPERTIES:
+  :AUDIENCE:  aq roadmap agents, jw, sjg
+  :STATUS:    [H] hypothesis-grounded, empirical validation pending
+  :LAYER:     L1.5 (aq / presence) — cross-cut to L4 (elenctic-spec / validation)
+  :END:
+
+  This document is a peer reference for the ~aq~ gossip/presence protocol
+  roadmap. It characterizes the March 2026 industry state in agentic
+  observability (IBM, Microsoft, Azure, Grafana, and the OTel ecosystem),
+  contrasts the dominant command-and-control model against ~aq~'s gossip
+  architecture, and surfaces conjectures for the transport registry and
+  monitoring layer.
+
+  Agents consuming this document should treat it as a terministic screen
+  (Burke): the vocabulary chosen here shapes which problems are visible.
+  The industry uses "observability," "tracing," "telemetry." ~aq~ uses
+  "presence," "gossip," "TTL." These are not synonyms. The distinction
+  is load-bearing.
+
+* As-Is: aq Current State
+  :PROPERTIES:
+  :REPO:     github.com/jwalsh/aq
+  :VERSION:  pre-1.0, active development
+  :END:
+
+** Architecture
+   ~aq~ sits at L1.5 of the Seven Concerns agentic stack — between L1
+   (Work / ~bd~ beads, authoritative state) and L2 (Memory / ~JITIR~,
+   retrieval). Its purpose is ambient presence broadcast: not "what is
+   true" but "what is currently being attempted, by whom, where."
+
+#+begin_src mermaid :tangle docs/aq-stack-position.mmd
+graph TD
+  L7[L7 Coordination / organon]
+  L6[L6 Instrumentation / pitcrew]
+  L5[L5 Control / SEFACA]
+  L4[L4 Validation / elenctic-spec]
+  L3[L3 Reasoning / CPRR]
+  L2[L2 Memory / JITIR]
+  L15[L1.5 Presence / aq ← HERE]
+  L1[L1 Work / bd beads]
+
+  L7 --> L6 --> L5 --> L4 --> L3 --> L2 --> L15 --> L1
+
+  style L15 fill:#f90,color:#000
+#+end_src
+
+** Transport Registry (Current)
+   | Tier | Transport     | Fit Score | QoS    | Notes                        |
+   |------+---------------+-----------+--------+------------------------------|
+   | 1    | NDJSON / file | canonical | 0      | AQ_HOME, TRAMP-addressable   |
+   | 2    | FIFO / IPC    | high      | 0      | same-host, low latency       |
+   | 3    | MQTT          | 55–65     | 0/1    | broker required; LAN viable  |
+   | 3.5  | Meshtastic    | 55–65     | 0      | L1.5 fit, range/bandwidth ↓  |
+   | 4    | IRC / BBS     | moderate  | 0      | historical precedent; fun    |
+   | —    | HTTP/REST     | poor      | 1      | too structured; kills gossip |
+   | —    | A2A / MCP     | poor      | 2      | command-and-control anti-fit |
+
+** Known Failure Modes (Empirical)
+   From ~DOGFOODING.md~ — do not regress:
+
+   | ID  | Failure              | Root Cause                        | Status       |
+   |-----+----------------------+-----------------------------------+--------------|
+   | F-1 | Bootstrap paradox    | aq needs aq to announce aq        | open         |
+   | F-2 | TTL cliff            | no re-announcement; entries stale | mitigated    |
+   | F-3 | 100% false positives | single-file repo saturation       | open         |
+   | F-4 | Worktree instability | address changes on branch switch  | open         |
+
+   MQTT LWT partially addresses F-2: broker broadcasts offline payload on
+   client disconnect, providing TTL-like expiry without agent cooperation.
+
+** Current Monitoring (As-Is)
+   - ~hydra~ (FreeBSD 14.3): Mosquitto broker, InfluxDB, Grafana
+   - Telegraf consumer input: ~msh/US/2/+/+~ (Meshtastic), not yet ~agents/#~
+   - Android: IoT MQTT Panel, connection ~nexus~ → ~192.168.86.100:1883~,
+     dashboard ~collab~ created, tiles not yet provisioned
+   - Grafana MQTT datasource plugin: *not yet installed*
+
+* Industry State: March 2026
+  :PROPERTIES:
+  :SOURCES:  IBM Think, Microsoft Security Blog, Azure Blog, Grafana Labs,
+             Dynatrace, LogicMonitor, Maxim AI — all March 2026
+  :END:
+
+** Dominant Model: Command-and-Control + OTel Traces
+
+   The industry has converged on a single architecture for agentic
+   monitoring in Q1 2026:
+
+#+begin_src mermaid :tangle docs/industry-model.mmd
+graph LR
+  subgraph "Agent (instrumented)"
+    direction LR
+    SDK[OTel SDK / LangSmith / Langfuse]
+    AGENT[Agent logic]
+    AGENT --> SDK
+  end
+  subgraph "Collector"
+    OTEL[OTel Collector]
+    SDK -->|push traces| OTEL
+  end
+  subgraph "Backend"
+    INFLUX[InfluxDB / Prometheus]
+    LOKI[Loki / Jaeger]
+    OTEL --> INFLUX
+    OTEL --> LOKI
+  end
+  subgraph "Dashboard"
+    GRAFANA[Grafana / Datadog / Dynatrace]
+    INFLUX --> GRAFANA
+    LOKI --> GRAFANA
+  end
+#+end_src
+
+   The model requires: (1) SDK instrumentation of every agent, (2)
+   a collector process, (3) a persistent backend, (4) a query layer.
+   All four must be operational before a single presence signal is visible.
+
+** IBM (March 2026)
+
+   IBM's 2026 observability framing centers on agents ingesting MELT
+   telemetry (metrics, events, logs, traces) to remediate issues
+   autonomously — agents consuming observability rather than producing
+   gossip. IBM BeeAI, LangChain, LangGraph, and AutoGen are cited as
+   the common SDK layer. Token usage, tool interactions, and agent
+   decision paths are the new signals added to standard MELT.
+
+   IBM Consulting Advantage (ICA), announced January 19 2026 on Azure,
+   adds an A2A gateway and MCP server management layer — structured
+   command-and-control over agent coordination. Observability and
+   traceability are listed as features of the coordination layer, not
+   a separate concern.
+
+   *Relevance to aq:* IBM BeeAI is open-source; could emit aq-style
+   NDJSON gossip payloads as a side-channel alongside OTel traces.
+   A2A is structurally equivalent to SOAP/WS-* (see ~TRANSPORTS.org~);
+   ~aq~ sits below this layer and does not compete with it.
+
+** Microsoft / Azure (February–March 2026)
+
+   Microsoft's security blog (March 18 2026) frames AI observability
+   as a security requirement: traditional health metrics stay green
+   during agent compromise. Their example — a research agent poisoned
+   by hidden page instructions passing bad context to an email agent —
+   illustrates a failure mode that OTel traces would catch post-hoc
+   but ~aq~ presence broadcast would not prevent.
+
+   Azure Copilot's observability agent (announced at Ignite, live Feb 2026)
+   provides full-stack visibility with every agent action reviewable,
+   traceable, and auditable. Governance is the primary design goal;
+   autonomy is constrained by RBAC at every layer.
+
+   *Relevance to aq:* Azure's model is the opposite of ~aq~. Where Azure
+   requires every action to honor policy and remain auditable, ~aq~ is
+   lossy-ok and TTL-bounded by design. The threat model is different:
+   Azure guards against agent compromise; ~aq~ guards against merge
+   conflicts and work duplication. These are complementary failure modes,
+   not competing ones.
+
+** Grafana MQTT Datasource (March 2 2026)
+
+   Grafana's official ~grafana-mqtt-datasource~ plugin shipped v1.3.1
+   on March 2 2026 (Go 1.26, CVE fix). It connects directly to a
+   Mosquitto broker and streams topic messages into dashboard panels
+   in real time — no Telegraf intermediary required for live view.
+
+   Constraints relevant to ~aq~:
+   - Live data only; no historical queries. Panels show data received
+     while open. Historical path requires InfluxDB (already present).
+   - All subscriptions use QoS 0 only. Claim events (QoS 1 in ~aq~
+     transport spec) require the Telegraf → InfluxDB path for durability.
+   - MQTT v3.1.x only; no v5.
+   - Provisioning-as-code supported via YAML datasource config and
+     Terraform provider.
+
+   Install path for ~hydra~:
+#+begin_src sh :tangle deploy/install-grafana-mqtt.sh
+#!/bin/sh
+# Install Grafana MQTT datasource on hydra
+grafana-cli plugins install grafana-mqtt-datasource
+# restart grafana service
+service grafana restart
+#+end_src
+
+   Provisioning config (tangle to Grafana provisioning dir):
+#+begin_src yaml :tangle deploy/grafana-provisioning/datasources/mqtt-agents.yaml
+apiVersion: 1
+datasources:
+  - name: MQTT-agents
+    type: grafana-mqtt-datasource
+    jsonData:
+      uri: tcp://localhost:1883
+      clientID: grafana-hydra-aq
+    isDefault: false
+#+end_src
+
+** OTel Ecosystem: AgentOps, Langfuse, Arize, Maxim
+
+   The emerging platform layer (benchmarked January 2026 against 100
+   identical queries through a multi-agent travel planning system):
+
+   | Platform  | Overhead | Approach               | SDK required? |
+   |-----------+----------+------------------------+---------------|
+   | Laminar   | ~5%      | lightweight tracing    | yes           |
+   | LangSmith | ~8%      | LangChain-native       | yes           |
+   | AgentOps  | ~12%     | decoupled integration  | yes           |
+   | Langfuse  | ~15%     | step-level depth       | yes           |
+
+   All require SDK instrumentation. None support a gossip/presence
+   model. None address the bootstrap paradox (the agent must be
+   running and instrumented before it can report it is running).
+
+* Contrast: Gossip vs. Trace
+
+#+begin_src mermaid :tangle docs/gossip-vs-trace.mmd
+graph TD
+  subgraph "Industry (OTel/Trace)"
+    direction LR
+    A1[Agent] -->|instrument| SDK1[SDK]
+    SDK1 -->|push| COL[Collector]
+    COL -->|store| BACK[Backend]
+    BACK -->|query| DASH[Dashboard]
+    NOTE1[Requires: SDK + Collector + Backend + Dashboard\nAll must be running before first signal]
+  end
+
+  subgraph "aq (Gossip/Presence)"
+    direction LR
+    A2[Agent] -->|broadcast NDJSON| FILE[AQ_HOME file / MQTT topic]
+    FILE -->|subscribe| ANY[Any listener]
+    NOTE2[Requires: write access to AQ_HOME\nFirst signal on first write\nNo coordinator, no SDK]
+  end
+
+  style NOTE1 fill:#fdd
+  style NOTE2 fill:#dfd
+#+end_src
+
+  | Dimension          | Industry OTel model         | aq gossip model              |
+  |--------------------+-----------------------------+------------------------------|
+  | Bootstrap          | collector must be running   | no bootstrap required        |
+  | Agent cooperation  | SDK instrumentation needed  | write to AQ_HOME only        |
+  | Delivery guarantee | at-least-once (OTel gRPC)   | lossy-ok, QoS 0 default      |
+  | Historical data    | stored in backend           | TTL-bounded, ephemeral       |
+  | Conflict detection | post-hoc trace correlation  | real-time presence broadcast |
+  | Failure mode       | silent on compromise        | silent on partition          |
+  | Governance model   | RBAC + audit log            | none (by design)             |
+  | Overhead           | 5–15% per benchmark         | near-zero (file write / pub) |
+
+  The gossip model trades auditability and governance for speed and
+  zero-coordination bootstrapping. This is the correct trade-off at L1.5.
+  Governance belongs at L5 (SEFACA). Audit logs belong at L6 (pitcrew).
+  Presence broadcast does not need to carry that weight.
+
+* Gap Analysis: What aq Does Not Cover
+  :PROPERTIES:
+  :STATUS: [P] partially addressed by higher layers
+  :END:
+
+  These are not bugs in ~aq~; they are correct absences. The table
+  names the layer that should address each gap.
+
+  | Gap                         | aq position    | Correct layer          |
+  |-----------------------------+----------------+------------------------|
+  | Post-hoc trace correlation  | out of scope   | L4 elenctic-spec / OTel|
+  | Agent compromise detection  | out of scope   | L5 SEFACA              |
+  | Token / cost tracking       | out of scope   | L6 pitcrew             |
+  | Durable audit log           | out of scope   | L6 pitcrew             |
+  | Historical presence queries | partial (InfluxDB path) | L2 JITIR      |
+  | Cross-network gossip        | Meshtastic T3.5| L1.5 transport registry|
+
+* Conjectures for Roadmap
+  :PROPERTIES:
+  :CPRR: active
+  :END:
+
+  | ID    | Conjecture                                              | Stage       |
+  |-------+---------------------------------------------------------+-------------|
+  | C-010 | Grafana MQTT datasource on hydra provides live presence | CONJECTURED |
+  |       | view with <2s lag, zero Telegraf dependency for L1.5   |             |
+  | C-011 | MQTT LWT mitigates F-2 (TTL cliff) without agent-side  | CONJECTURED |
+  |       | re-announcement logic                                  |             |
+  | C-012 | IBM BeeAI agent can emit aq-compatible NDJSON gossip   | UNTESTED    |
+  |       | as sidecar alongside OTel traces                       |             |
+  | C-013 | aq gossip + OTel traces are complementary, not         | CONJECTURED |
+  |       | competing: aq at L1.5, OTel at L4+                    |             |
+  | C-014 | Bootstrap paradox (F-1) is unsolvable at L1.5 alone;  | CONJECTURED |
+  |       | requires L1 (bd) to seed initial presence              |             |
+
+* Immediate Actions (for agents consuming this doc)
+  :PROPERTIES:
+  :PRIORITY: ordered
+  :END:
+
+  1. Install ~grafana-mqtt-datasource~ on ~hydra~ (see tangle targets above).
+  2. Add Grafana MQTT datasource pointing at ~tcp://localhost:1883~.
+  3. Create ~agents~ dashboard with panels: ~agents/+/presence~,
+     ~worktrees/+/+/claim~, ~agents/+/gossip~, ~concerns/+/events~.
+  4. Validate C-010 and C-011 with a two-agent worktree scenario.
+  5. Update ~DOGFOODING.md~ with results; promote C-010/C-011 to
+     SUPPORTED or REFUTED accordingly.
+  6. Evaluate IBM BeeAI as test bed for C-012 (FreeBSD compat check first).
+
+* References
+  :PROPERTIES:
+  :UPDATED: 2026-03-30
+  :END:
+
+  - IBM Think: Observability Trends 2026
+  - IBM: Why observability is essential for AI agents
+  - IBM Consulting Enterprise Advantage (2026-01-19)
+  - Microsoft Security Blog: Observability for AI Systems (2026-03-18)
+  - Azure: Agentic Cloud Operations (2026-02)
+  - Grafana MQTT datasource v1.3.1 (2026-03-02)
+  - Top 5 AI Agent Observability Platforms 2026 (Maxim AI)
+  - 15 AI Agent Observability Tools 2026 (AIM Multiple / benchmark)
+  - Dynatrace: Six Observability Predictions 2026
+  - aq transport registry / TRANSPORTS.org: github.com/jwalsh/aq
+  - aq DOGFOODING.md: github.com/jwalsh/aq
+  - Grafana & Friends Boston notes (2026-03-19)
