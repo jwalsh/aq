@@ -1,0 +1,328 @@
+#+TITLE: aq Gossip Protocol Specification
+#+DATE: 2026-03-30
+#+PROPERTY: header-args :mkdirp t
+#+STARTUP: overview
+#+TAGS: spec cprr gossip protocol transport mesh
+#+DESCRIPTION: Normative spec for the aq L1.5 presence/gossip protocol.
+#+              Gossip is for agents, not monitoring. Monitoring is a
+#+              read-only side effect of agents talking to each other.
+
+* Preamble
+
+  ~aq~ is a gossip/presence protocol at L1.5 of the Seven Concerns stack.
+  Its purpose is ambient situational awareness between agents operating
+  in parallel worktrees. It answers one question:
+
+  #+begin_quote
+  Does anyone know what is happening right now?
+  #+end_quote
+
+  Agents are the primary consumers. Dashboards, Grafana panels, and
+  mobile MQTT clients are *secondary observers* — they read the same
+  bus but do not participate in the protocol. The protocol is not
+  designed around monitoring convenience. If monitoring is hard, fix
+  the payload; do not fix the protocol.
+
+* Scope and Non-Goals
+
+  In scope:
+  - Presence broadcast (announce / withdraw / degrade)
+  - Worktree claim assertion and conflict detection
+  - Gossip message format and TTL semantics
+  - Transport registry and tier assignments
+  - Compact wire format for constrained transports (Meshtastic)
+
+  Out of scope:
+  - Durable audit logs → L6 (pitcrew)
+  - Permission enforcement → L5 (SEFACA)
+  - Task state management → L1 (bd/beads)
+  - Orchestration → L7 (organon)
+  - Monitoring dashboards → side effect only
+
+* Vocabulary
+
+  | Term       | Definition                                                  |
+  |------------+-------------------------------------------------------------|
+  | agent      | Any process running Claude Code in a worktree               |
+  | peer       | Another agent visible on the same aq bus                    |
+  | presence   | A record asserting an agent is alive and what it is doing   |
+  | claim      | A presence record asserting ownership of a worktree path    |
+  | gossip     | A lossy ambient message not requiring acknowledgement       |
+  | TTL        | Time-to-live: seconds until a presence record is stale      |
+  | withdraw   | An explicit presence record cancelling a prior announce     |
+  | LWT        | Last Will and Testament — broker-side implicit withdraw     |
+  | AQ_HOME    | Filesystem path where aq writes NDJSON presence records     |
+
+* Message Format
+
+** Standard (NDJSON over MQTT / file)
+
+  All messages are single-line JSON objects (NDJSON). One record per line.
+  No trailing commas. UTF-8. No binary.
+
+*** Presence record
+
+#+begin_src json
+{
+  "v":        1,
+  "type":     "presence",
+  "agent_id": "claude-worktree-auth",
+  "ts":       1743310800.123,
+  "ttl":      30,
+  "action":   "announce",
+  "host":     "workstation.local",
+  "worktree": "aq",
+  "branch":   "feat/transport-registry",
+  "source":   "aq"
+}
+#+end_src
+
+  | Field      | Type    | Required | Values                              |
+  |------------+---------+----------+-------------------------------------|
+  | ~v~        | integer | yes      | protocol version, currently ~1~     |
+  | ~type~     | string  | yes      | ~"presence"~                        |
+  | ~agent_id~ | string  | yes      | unique per agent instance           |
+  | ~ts~       | float   | yes      | unix epoch seconds, float           |
+  | ~ttl~      | integer | yes      | seconds; 0 = withdraw immediately   |
+  | ~action~   | string  | yes      | ~announce~ / ~withdraw~ / ~degrade~ |
+  | ~host~     | string  | no       | hostname for debugging              |
+  | ~worktree~ | string  | no       | repo name                           |
+  | ~branch~   | string  | no       | git branch                          |
+  | ~source~   | string  | no       | transport that emitted this record  |
+
+*** Claim record
+
+#+begin_src json
+{
+  "v":        1,
+  "type":     "claim",
+  "agent_id": "claude-worktree-auth",
+  "ts":       1743310800.456,
+  "repo":     "aq",
+  "branch":   "feat/transport-registry",
+  "path":     "src/transport.go",
+  "action":   "announce",
+  "commit":   null
+}
+#+end_src
+
+  | Field      | Type    | Required | Values                                    |
+  |------------+---------+----------+-------------------------------------------|
+  | ~v~        | integer | yes      | ~1~                                       |
+  | ~type~     | string  | yes      | ~"claim"~                                 |
+  | ~agent_id~ | string  | yes      |                                           |
+  | ~ts~       | float   | yes      |                                           |
+  | ~repo~     | string  | yes      | repository name                           |
+  | ~branch~   | string  | yes      | git branch                                |
+  | ~path~     | string  | no       | file or directory being claimed            |
+  | ~action~   | string  | yes      | ~announce~ / ~withdraw~ / ~conflict~      |
+  | ~commit~   | string  | no       | SHA if claim is post-commit (durable)     |
+
+*** Gossip record
+
+#+begin_src json
+{
+  "v":        1,
+  "type":     "gossip",
+  "agent_id": "claude-worktree-auth",
+  "ts":       1743310800.789,
+  "msg":      "scanning for conflicts on feat/transport-registry",
+  "level":    "info"
+}
+#+end_src
+
+  | Field      | Type    | Required | Values                          |
+  |------------+---------+----------+---------------------------------|
+  | ~v~        | integer | yes      | ~1~                             |
+  | ~type~     | string  | yes      | ~"gossip"~                      |
+  | ~agent_id~ | string  | yes      |                                 |
+  | ~ts~       | float   | yes      |                                 |
+  | ~msg~      | string  | yes      | free text, max 256 chars        |
+  | ~level~    | string  | no       | ~info~ / ~warn~ / ~error~       |
+
+** Compact Wire Format (Meshtastic / constrained transports)
+
+  Standard NDJSON is ~150-300 bytes per record. Meshtastic LONG_FAST
+  channel MTU is 237 bytes. Compact format targets ≤80 bytes.
+
+  Encoding: fixed-position pipe-delimited ASCII. No JSON parser required.
+
+#+begin_src text
+  <v>|<type_code>|<agent_short>|<ts_delta>|<action_code>[|<payload>]
+#+end_src
+
+  | Field         | Width   | Encoding                                  |
+  |---------------+---------+-------------------------------------------|
+  | ~v~           | 1 char  | protocol version, ~1~                     |
+  | ~type_code~   | 1 char  | ~p~=presence, ~c~=claim, ~g~=gossip       |
+  | ~agent_short~ | ≤12     | truncated agent_id or 4-char hash         |
+  | ~ts_delta~    | ≤6      | seconds since epoch mod 86400 (day-local) |
+  | ~action_code~ | 1 char  | ~a~=announce, ~w~=withdraw, ~d~=degrade,  |
+  |               |         | ~x~=conflict                              |
+  | ~payload~     | ≤50     | optional; repo/branch for claims, msg for |
+  |               |         | gossip (truncated)                         |
+
+  Examples:
+#+begin_src text
+  # presence announce
+  1|p|cc-wt-auth|52800|a
+
+  # claim announce on aq/feat/transport-registry
+  1|c|cc-wt-auth|52801|a|aq/feat/transport
+
+  # gossip
+  1|g|cc-wt-auth|52802|a|conflict on auth.ts
+#+end_src
+
+  Compact format is Tier 3.5 transport only (Meshtastic). All other
+  tiers use standard NDJSON. A bridge process translates compact →
+  standard before publishing to the MQTT ~agents/#~ namespace.
+
+* MQTT Topic Schema
+
+  All topics use MQTT wildcard-compatible structure. Agents subscribe
+  to ~agents/+/presence~ to see all peers. The ~+~ wildcard matches
+  exactly one level; ~#~ matches all remaining levels.
+
+  | Topic                        | QoS | Retained | Publisher       | Payload type |
+  |------------------------------+-----+----------+-----------------+--------------|
+  | ~agents/{id}/presence~       | 0   | yes      | agent / LWT     | presence     |
+  | ~agents/{id}/gossip~         | 0   | no       | agent           | gossip       |
+  | ~agents/{id}/state~          | 1   | yes      | agent           | raw string   |
+  | ~worktrees/{repo}/{b}/claim~ | 1   | no       | agent           | claim        |
+  | ~worktrees/{repo}/{b}/fault~ | 1   | no       | agent / bridge  | fault        |
+  | ~concerns/{1-7}/events~      | 0   | no       | any layer tool  | concern evt  |
+
+  QoS policy:
+  - QoS 0 :: gossip, presence heartbeats (lossy-ok)
+  - QoS 1 :: claims, faults (at-least-once)
+  - QoS 2 :: not used in aq (too slow for L1.5)
+
+* TTL and Expiry Semantics
+
+  Agents MUST re-announce presence before TTL expires. Recommended
+  re-announce interval: ~TTL / 2~.
+
+  Default TTL: 30 seconds.
+
+  Implicit withdraw mechanisms (in priority order):
+  1. Agent publishes ~action: "withdraw"~ explicitly (clean shutdown)
+  2. MQTT broker fires LWT on disconnect (ungraceful shutdown)
+  3. Consumer marks presence stale after ~ts + ttl < now~ (no broker LWT)
+
+  The bootstrap paradox (F-1): an agent cannot announce before aq is
+  initialized. Mitigation: OTEL tap (see C-015) provides a pre-aq
+  presence signal from Claude Code telemetry. Not aq's problem to solve
+  at L1.5; resolved at L6 (instrumentation).
+
+* Transport Registry
+
+  | Tier | Transport       | Format   | Fit  | Notes                           |
+  |------+-----------------+----------+------+---------------------------------|
+  | 1    | NDJSON file     | standard | 100  | AQ_HOME canonical; TRAMP-aware  |
+  | 2    | FIFO / IPC      | standard | 85   | same-host, low latency          |
+  | 2.5  | Claude Code OTEL| derived  | 75   | passive tap; solves F-1         |
+  | 3    | MQTT            | standard | 65   | broker required; LAN viable     |
+  | 3.5  | Meshtastic LoRa | compact  | 55   | range transport; 80-byte limit  |
+  | 4    | IRC / BBS       | standard | 40   | historical; fun; not production |
+
+  TRAMP principle: any path TRAMP understands is a valid ~AQ_HOME~.
+  This includes remote paths over SSH, making Tier 1 viable across
+  machines without a broker.
+
+* Conflict Detection
+
+  A conflict occurs when two agents hold an ~announce~ claim on the same
+  ~{repo}/{branch}/{path}~ tuple with overlapping time windows.
+
+  Detection algorithm (on consumer side):
+
+#+begin_src python
+"""
+Minimal conflict detector: watches claim stream, emits conflict signal
+when two agents hold announce claims on the same path simultaneously.
+"""
+import time
+from collections import defaultdict
+
+# claims[(repo, branch, path)] = {agent_id: (ts, ttl)}
+claims = defaultdict(dict)
+
+def on_claim(record: dict) -> list[dict]:
+    """Process incoming claim record. Returns list of conflict events."""
+    key = (record["repo"], record.get("branch",""), record.get("path",""))
+    agent_id = record["agent_id"]
+    now = time.time()
+
+    # expire stale claims
+    claims[key] = {a: (ts, ttl) for a, (ts, ttl) in claims[key].items()
+                   if ts + ttl > now}
+
+    if record["action"] == "withdraw":
+        claims[key].pop(agent_id, None)
+        return []
+
+    if record["action"] == "announce":
+        conflicts = []
+        for peer, (peer_ts, _) in claims[key].items():
+            if peer != agent_id:
+                conflicts.append({
+                    "v": 1, "type": "fault",
+                    "fault": "conflict_signal",
+                    "severity": "error",
+                    "agents": [agent_id, peer],
+                    "repo": key[0], "branch": key[1], "path": key[2],
+                    "ts": now
+                })
+        claims[key][agent_id] = (record["ts"], record.get("ttl", 30))
+        return conflicts
+
+    return []
+#+end_src
+
+  Acceptance test (C-001): two agents broadcasting on the same path in
+  ~proof~ phase → ~aq watch~ must emit ~conflict_signal~ with
+  ~severity: error~ within 500ms.
+
+* Failure Modes
+
+  From ~docs/adr/DOGFOODING.md~:
+
+  | ID  | Failure                 | Mitigation                              | Status   |
+  |-----+-------------------------+-----------------------------------------+----------|
+  | F-1 | Bootstrap paradox       | OTEL tap pre-seeds presence (C-015)     | open     |
+  | F-2 | TTL cliff               | MQTT LWT mitigates ungraceful exits     | mitigated|
+  | F-3 | 100% false positives    | Compact format uses path field; C-016   | open     |
+  | F-4 | Worktree addr instability| Re-announce on branch switch           | open     |
+
+* Conjectures
+
+  | ID    | Conjecture                                               | Stage       |
+  |-------+----------------------------------------------------------+-------------|
+  | C-001 | Conflict detection <500ms on overlapping announce claims  | CONJECTURED |
+  | C-015 | OTEL tap resolves F-1 bootstrap paradox                  | CONJECTURED |
+  | C-016 | commit+SHA claim stronger than file-path inference        | CONJECTURED |
+  | C-023 | Compact wire format fits Meshtastic MTU (≤80 bytes)       | CONJECTURED |
+  | C-024 | Bridge compact→standard translation adds <500ms           | UNTESTED    |
+  | C-025 | Compact format is parseable without JSON library          | CONJECTURED |
+
+* Monitoring (Side Effect Only)
+
+  The MQTT topic schema above is the agent protocol. Monitoring tools
+  observe it as a side effect:
+
+  - IoT MQTT Panel (Android) → subscribe ~agents/+/presence~, etc.
+  - Grafana MQTT datasource → same topics, live panels
+  - Telegraf → consume into InfluxDB for historical queries
+
+  Agents MUST NOT alter payload format to accommodate monitoring.
+  Monitoring MUST adapt to the protocol, not vice versa.
+
+* References
+  - aq repo: github.com/jwalsh/aq
+  - docs/adr/DOGFOODING.md — empirical failure mode catalog
+  - docs/TRANSPORTS.org — transport scoring and evaluation
+  - docs/research/observability-landscape.org — industry context
+  - docs/research/otel-passive-presence.org — OTEL tap / C-015
+  - Meshtastic LONG_FAST MTU: 237 bytes
+  - Seven Concerns stack: L1 Work → L7 Coordination
