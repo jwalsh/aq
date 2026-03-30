@@ -1,0 +1,213 @@
+#+TITLE: Android MQTT Multi-Agent Monitor — Build Order
+#+AUTHOR: jw
+#+DATE: 2026-03-30
+#+PROPERTY: header-args :mkdirp t
+#+STARTUP: overview
+
+* Conjecture
+  [C-001] An Android MQTT client can provide ambient situational
+  awareness of the Seven Concerns agentic stack with <2s lag,
+  consuming ~aq~ NDJSON payloads via broker topics.
+
+* Topic Schema
+  :PROPERTIES:
+  :LAYER: L1.5 (aq / presence)
+  :END:
+
+#+begin_src mermaid :tangle docs/topic-schema.mmd
+graph TD
+  subgraph "agents/{id}/"
+    P[presence]
+    S[state]
+    G[gossip]
+    C[claim]
+  end
+  subgraph "concerns/{1..7}/"
+    E[events]
+    M[metrics]
+  end
+  subgraph "worktrees/{repo}/{branch}/"
+    W[claim]
+    F[fault]
+  end
+  subgraph "mesh/"
+    N[nodes]
+    T[telemetry]
+  end
+#+end_src
+
+** Topic Conventions
+   - QoS 0 :: presence / gossip (lossy-ok, TTL-bounded)
+   - QoS 1 :: state / claim (at-least-once)
+   - QoS 2 :: fault / security events (exactly-once)
+   - Retained :: ~agents/{id}/presence~ (last-will on disconnect)
+
+* Phase 1 — Broker (hydra)
+  :PROPERTIES:
+  :STATUS: [H] hydra/mosquitto exists; extend config
+  :END:
+
+#+begin_src conf :tangle deploy/mosquitto-agents.conf
+# /etc/mosquitto/conf.d/agents.conf
+listener 1883
+protocol mqtt
+
+listener 8883
+protocol mqtt
+cafile   /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/hydra.crt
+keyfile  /etc/mosquitto/certs/hydra.key
+require_certificate false
+
+# Agent namespace ACL
+acl_file /etc/mosquitto/agents.acl
+
+# Bridge to InfluxDB via telegraf (existing)
+# retain: presence topics only
+#+end_src
+
+#+begin_src text :tangle deploy/mosquitto-agents.acl
+# agents.acl
+topic readwrite agents/#
+topic readwrite concerns/#
+topic readwrite worktrees/#
+topic read      mesh/#
+#+end_src
+
+* Phase 2 — aq MQTT Transport (L1.5 bridge)
+  :PROPERTIES:
+  :STATUS: [C] Conjecture — aq transport registry accepts MQTT tier
+  :END:
+
+#+begin_src python :tangle src/aq_mqtt_transport.py
+"""
+aq MQTT transport — Tier 3 (lossy, pub/sub, no ack)
+Fits L1.5: presence broadcast, NDJSON payload, TTL via broker retain.
+"""
+import json, time, os
+import paho.mqtt.client as mqtt
+
+BROKER   = os.getenv("AQ_MQTT_BROKER", "hydra.local")
+PORT     = int(os.getenv("AQ_MQTT_PORT", 8883))
+AGENT_ID = os.getenv("AQ_AGENT_ID", "unknown")
+BASE     = f"agents/{AGENT_ID}"
+
+
+def publish_presence(client: mqtt.Client, ttl: int = 30) -> None:
+    payload = json.dumps({
+        "agent_id": AGENT_ID,
+        "ts":       time.time(),
+        "ttl":      ttl,
+        "host":     os.uname().nodename,
+    })
+    client.publish(f"{BASE}/presence", payload, qos=0, retain=True)
+
+
+def publish_gossip(client: mqtt.Client, msg: dict) -> None:
+    client.publish(f"{BASE}/gossip", json.dumps(msg), qos=0)
+
+
+def publish_claim(client: mqtt.Client, repo: str, branch: str, action: str) -> None:
+    payload = json.dumps({
+        "agent_id": AGENT_ID,
+        "repo":     repo,
+        "branch":   branch,
+        "action":   action,  # announce | withdraw | conflict
+        "ts":       time.time(),
+    })
+    client.publish(f"worktrees/{repo}/{branch}/claim", payload, qos=1)
+
+
+def connect(on_message=None) -> mqtt.Client:
+    c = mqtt.Client(client_id=AGENT_ID, clean_session=False)
+    c.tls_set()  # uses system CA; override for self-signed
+    lwt = json.dumps({"agent_id": AGENT_ID, "status": "offline"})
+    c.will_set(f"{BASE}/presence", lwt, qos=1, retain=True)
+    if on_message:
+        c.on_message = on_message
+    c.connect(BROKER, PORT, keepalive=60)
+    return c
+#+end_src
+
+* Phase 3 — Telegraf → InfluxDB bridge
+  :PROPERTIES:
+  :STATUS: [H] telegraf on hydra — add MQTT consumer input
+  :END:
+
+#+begin_src toml :tangle deploy/telegraf-agents.conf
+[[inputs.mqtt_consumer]]
+  servers         = ["tcp://localhost:1883"]
+  topics          = ["agents/#", "worktrees/#", "concerns/#"]
+  data_format     = "json"
+  json_time_key   = "ts"
+  json_time_format = "unix"
+  tag_keys        = ["agent_id", "repo", "branch"]
+
+[[outputs.influxdb_v2]]
+  urls         = ["http://localhost:8086"]
+  token        = "$INFLUX_TOKEN"
+  organization = "jw"
+  bucket       = "agents"
+#+end_src
+
+* Phase 4 — Android Client
+  :PROPERTIES:
+  :STATUS: [C] to build/configure
+  :END:
+
+** Option A — IoT MQTT Panel (no-code, fastest)
+   1. Install [[https://play.google.com/store/apps/details?id=snr.lab.iotmqttpanel.prod][IoT MQTT Panel]]
+   2. Broker: ~hydra.local:8883~, TLS on, no client cert
+   3. Dashboard tiles:
+
+   | Tile type   | Topic                    | Purpose               |
+   |-------------+--------------------------+-----------------------|
+   | Text        | ~agents/+/presence~      | Active agent list     |
+   | Text        | ~worktrees/+/+/claim~    | Current work claims   |
+   | Text        | ~agents/+/gossip~        | Gossip stream         |
+   | LED/bool    | ~agents/+/state~         | Online/offline        |
+   | Log         | ~concerns/+/events~      | Layer event log       |
+   | Gauge       | ~mesh/nodes~             | Meshtastic node count |
+
+** Option B — MQTT Explorer (debug layer, Android via F-Droid)
+   - Topic tree visualization
+   - Good for schema validation during Phase 2 bringup
+
+** Option C — Custom React Native app (if A insufficient)
+   See §5 below.
+
+* Phase 5 — Custom App (if needed)
+  :PROPERTIES:
+  :STATUS: [I] Idea — build only if IoT MQTT Panel insufficient
+  :END:
+
+  Stack: React Native + ~react-native-mqtt~ or ~MQTT.js~ via websocket.
+
+  Core views:
+  - *Swarm view*: agent_id grid, presence TTL countdown, claim badges
+  - *Claim log*: worktree claims sorted by ts, conflict highlights
+  - *Concern bus*: L1–L7 event stream, color-coded by layer
+  - *Fault view*: QoS 2 fault/security events, ack required
+
+* Measurement Targets
+  | Conjecture | Metric                        | Target  |
+  |------------+-------------------------------+---------|
+  | C-001      | presence publish → Android    | <2s     |
+  | C-001      | claim conflict detection      | <500ms  |
+  | C-002      | broker reconnect after drop   | <10s    |
+  | C-003      | Android battery drain (idle)  | <2%/hr  |
+
+* Refutation Hooks
+  - If Mosquitto on hydra not reachable from Android (Tailscale required?)
+    → fallback: ~mqtt.meshtastic.org~ as public broker for dev
+  - If paho TLS fails on self-signed CA
+    → option: disable TLS on :1883 for LAN-only dev
+  - If IoT MQTT Panel can't handle NDJSON
+    → pre-process in telegraf with ~json_query~ plugin
+
+* CPRR Status
+  | ID    | Stage       | Note                        |
+  |-------+-------------+-----------------------------|
+  | C-001 | CONJECTURED | awaiting Phase 1 deploy     |
+  | C-002 | UNTESTED    | broker HA not scoped        |
+  | C-003 | UNTESTED    | battery measurement tooling |

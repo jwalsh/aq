@@ -1630,6 +1630,211 @@ Options:
 	return 0
 }
 
+// ---------- MQTT subscribe ----------
+
+// mqttConfig holds MQTT connection settings from config.json or env.
+type mqttConfig struct {
+	Host  string `json:"host"`
+	Port  int    `json:"port"`
+	Topic string `json:"topic"`
+}
+
+// loadMQTTConfig reads MQTT settings from config.json and env overrides.
+func loadMQTTConfig() mqttConfig {
+	cfg := mqttConfig{Host: "localhost", Port: 1883, Topic: "aq"}
+
+	// Read from config.json
+	configPath := filepath.Join(aqHome(), "config.json")
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(data, &raw) == nil {
+			if mqttRaw, ok := raw["mqtt"]; ok {
+				var mqttSection struct {
+					Host  string `json:"host"`
+					Port  int    `json:"port"`
+					Topic string `json:"topic"`
+				}
+				if json.Unmarshal(mqttRaw, &mqttSection) == nil {
+					if mqttSection.Host != "" {
+						cfg.Host = mqttSection.Host
+					}
+					if mqttSection.Port != 0 {
+						cfg.Port = mqttSection.Port
+					}
+					if mqttSection.Topic != "" {
+						cfg.Topic = mqttSection.Topic
+					}
+				}
+			}
+		}
+	}
+
+	// Env overrides
+	if h := os.Getenv("AQ_MQTT_HOST"); h != "" {
+		cfg.Host = h
+	}
+	if p := os.Getenv("AQ_MQTT_PORT"); p != "" {
+		var pv int
+		if _, err := fmt.Sscanf(p, "%d", &pv); err == nil && pv > 0 {
+			cfg.Port = pv
+		}
+	}
+	if t := os.Getenv("AQ_MQTT_TOPIC"); t != "" {
+		cfg.Topic = t
+	}
+
+	return cfg
+}
+
+func cmdMqtt(args []string) int {
+	// Parse subcommand
+	subcmd := "tail"
+	topics := []string{}
+	showHelp := false
+	verbose := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			showHelp = true
+		case "-v", "--verbose":
+			verbose = true
+		case "-t", "--topic":
+			if i+1 < len(args) {
+				i++
+				topics = append(topics, args[i])
+			}
+		default:
+			if i == 0 && (args[i] == "tail" || args[i] == "pub" || args[i] == "config" || args[i] == "topics") {
+				subcmd = args[i]
+			}
+		}
+	}
+
+	if showHelp {
+		fmt.Print(`aq mqtt — interact with the configured MQTT broker
+
+Usage: aq mqtt [subcommand] [options]
+
+Subcommands:
+  tail       Subscribe and print messages (default)
+  pub        Publish a test message
+  config     Show MQTT configuration
+  topics     Subscribe to all aq topics (wildcard)
+
+Options:
+  -t, --topic <topic>   Additional topic to subscribe (repeatable)
+  -v, --verbose         Show topic + timestamp per message
+
+Default topics (v2 channel layout):
+  agents/+/presence     Agent presence broadcasts
+  agents/+/gossip       L1.5 gossip stream
+  worktrees/+/+/claim   Worktree ownership claims
+  concerns/+/events     Seven Concerns event bus (L1-L7)
+
+Requires: mosquitto_sub on PATH
+`)
+		return 0
+	}
+
+	cfg := loadMQTTConfig()
+
+	switch subcmd {
+	case "config":
+		if jsonOutput {
+			data, _ := json.MarshalIndent(cfg, "", "  ")
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("host:  %s\n", cfg.Host)
+			fmt.Printf("port:  %d\n", cfg.Port)
+			fmt.Printf("topic: %s\n", cfg.Topic)
+			// Check connectivity
+			if _, err := exec.LookPath("mosquitto_sub"); err != nil {
+				fmt.Println("warn:  mosquitto_sub not found")
+			}
+		}
+		return 0
+
+	case "pub":
+		if _, err := exec.LookPath("mosquitto_pub"); err != nil {
+			fmt.Fprintln(os.Stderr, "error: mosquitto_pub not found")
+			return 1
+		}
+		sb := detectSandbox()
+		payload := fmt.Sprintf(`{"agent":"%s","ts":%d,"type":"heartbeat"}`, sb.AgentAddress, time.Now().Unix())
+		topic := fmt.Sprintf("agents/%s/presence", sb.Branch)
+		cmd := exec.Command("mosquitto_pub",
+			"-h", cfg.Host,
+			"-p", fmt.Sprintf("%d", cfg.Port),
+			"-t", topic,
+			"-m", payload,
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "mqtt pub failed: %v\n", err)
+			return 1
+		}
+		fmt.Printf("published to %s: %s\n", topic, payload)
+		return 0
+
+	case "tail", "topics":
+		if _, err := exec.LookPath("mosquitto_sub"); err != nil {
+			fmt.Fprintln(os.Stderr, "error: mosquitto_sub not found")
+			fmt.Fprintln(os.Stderr, "install: brew install mosquitto  (or apt install mosquitto-clients)")
+			return 1
+		}
+
+		// v2 channel topics
+		defaultTopics := []string{
+			"agents/+/presence",
+			"agents/+/gossip",
+			"agents/+/state",
+			"worktrees/+/+/claim",
+			"concerns/+/events",
+			cfg.Topic + "/announce",
+			cfg.Topic + "/session/#",
+		}
+
+		if subcmd == "topics" {
+			// Wildcard everything under the aq namespace
+			defaultTopics = []string{"agents/#", "worktrees/#", "concerns/#", cfg.Topic + "/#"}
+		}
+
+		// Merge user-specified topics
+		allTopics := append(defaultTopics, topics...)
+
+		cmdArgs := []string{
+			"-h", cfg.Host,
+			"-p", fmt.Sprintf("%d", cfg.Port),
+		}
+		if verbose {
+			cmdArgs = append(cmdArgs, "-v") // mosquitto_sub -v prints topic + payload
+		}
+		for _, t := range allTopics {
+			cmdArgs = append(cmdArgs, "-t", t)
+		}
+
+		fmt.Fprintf(os.Stderr, "mqtt: connecting to %s:%d\n", cfg.Host, cfg.Port)
+		for _, t := range allTopics {
+			fmt.Fprintf(os.Stderr, "  sub: %s\n", t)
+		}
+		fmt.Fprintln(os.Stderr, "  (ctrl-c to stop)")
+
+		cmd := exec.Command("mosquitto_sub", cmdArgs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "mqtt tail failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	return 0
+}
+
 // ---------- Global flag parsing ----------
 
 func parseGlobalFlags(args []string) []string {
@@ -1680,6 +1885,8 @@ func main() {
 		code = cmdQuickstart(args[1:])
 	case "validate":
 		code = cmdValidate(args[1:])
+	case "mqtt":
+		code = cmdMqtt(args[1:])
 	case "version", "--version", "-v":
 		fmt.Printf("aq %s (commit: %s, built: %s)\n", Version, GitCommit, BuildDate)
 	case "help", "--help", "-h":
@@ -1723,6 +1930,12 @@ Examples:
   aq whisper -c C-1 -f "readme.md"
   aq check -c C-2 -f "auth.py"
   aq status --json
+
+MQTT:
+  mqtt config        Show MQTT broker settings
+  mqtt tail          Subscribe to aq topics (default)
+  mqtt topics        Subscribe to all aq topics (wildcard)
+  mqtt pub           Publish a heartbeat
 
 Gossip, not coordination. Broadcasts expire. Silence is normal.
 `)
