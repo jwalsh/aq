@@ -1,6 +1,5 @@
 #+TITLE: aq File-Watcher RX Adapter
 #+SUBTITLE: Closing the Loop on "Disk is the Universal Bus"
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-28
 #+PROPERTY: header-args :eval no
 #+STARTUP: overview

@@ -1,6 +1,5 @@
 #+TITLE: Gossip is Harder Than You Thought
 #+SUBTITLE: Lessons from Building L1.5
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-13
 #+STARTUP: overview
 #+DESCRIPTION: One machine. Four agents. Eight failures. Zero network.

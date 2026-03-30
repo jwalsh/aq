@@ -26,8 +26,8 @@ We test the system, not the theory.
 | C11 | Run 2 brokers simultaneously | "flock prevents dual-broker" | SRE | high |
 | C12 | Send 201-byte AMTP message | "parser rejects oversized" | protocol | low |
 | C13 | Send from unprivileged user | "Unix socket ACL" | UNIX | medium |
-| C14 | Reboot mini mid-conversation | "KBFS+git carry backlog" | CRDT | high |
-| C15 | Partition: disable WiFi on mini | "LoRa still works" | architecture | medium |
+| C14 | Reboot <workstation> mid-conversation | "KBFS+git carry backlog" | CRDT | high |
+| C15 | Partition: disable WiFi on <workstation> | "LoRa still works" | architecture | medium |
 
 * 2. Test Scripts
 
@@ -108,7 +108,7 @@ ps aux | grep "am.broker" | grep -v grep | wc -l
 # If both run: LAMBDA's "flock is unsound" claim validated
 #+end_src
 
-** C14: Mini reboot mid-conversation
+** C14: Workstation reboot mid-conversation
 
 #+begin_src bash
 # On laptop: send a burst of messages
@@ -117,23 +117,23 @@ for i in $(seq 88 95); do
     sleep 1
 done
 
-# On mini: sudo reboot (mid-burst)
+# On <workstation>: sudo reboot (mid-burst)
 
-# After mini boots:
+# After <workstation> boots:
 # Check KBFS: are all messages in /keybase/private/<user1>,<user2>/aq/?
 # Check git: git pull shows peer's commits?
-# CRDT claim: convergent multicast means mini catches up from any transport
+# CRDT claim: convergent multicast means <workstation> catches up from any transport
 #+end_src
 
 ** C15: WiFi partition (LoRa only)
 
 #+begin_src bash
-# On mini: disable WiFi
+# On <workstation>: disable WiFi
 networksetup -setairportpower en0 off
 
 # Send messages from both sides
 # Laptop: am send "@AGENT|NOTE|96|wifi-off test"
-# Mini: am send "@PEER|NOTE|X|wifi-off ack"
+# <workstation>: am send "@PEER|NOTE|X|wifi-off ack"
 
 # Expected: LoRa carries messages (no MQTT, no git, no KBFS)
 # This tests the actual value prop of the radio transport
@@ -188,10 +188,10 @@ echo "Results: $PASS passed, $FAIL failed"
 
 | What to watch | How | Location |
 |---------------+-----+----------|
-| Serial port holders | =lsof /dev/cu.usbmodem*= | laptop/mini |
-| Broker PID | =cat .claude/state/serial.pid= | laptop/mini |
-| AMTP message log | =cat .claude/state/amtp-log.jsonl= | laptop/mini |
-| Circuit breaker state | =cat .claude/state/serial-breaker.txt= | laptop/mini |
+| Serial port holders | =lsof /dev/cu.usbmodem*= | laptop/<workstation> |
+| Broker PID | =cat .claude/state/serial.pid= | laptop/<workstation> |
+| AMTP message log | =cat .claude/state/amtp-log.jsonl= | laptop/<workstation> |
+| Circuit breaker state | =cat .claude/state/serial-breaker.txt= | laptop/<workstation> |
 | KBFS message count | =keybase fs ls /keybase/.../amtp/= | either |
 | Git divergence | =git log HEAD..origin/main --oneline= | either |
 | GH issue comments | =gh api .../issues/5/comments --jq length= | either |

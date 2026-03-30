@@ -1,6 +1,5 @@
 #+TITLE: aq Transport Options
 #+SUBTITLE: Appendix A — Alternatives Considered for the L1.5 Presence Layer
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-13
 #+PROPERTY: header-args :eval no
 #+STARTUP: overview

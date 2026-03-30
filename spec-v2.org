@@ -1,6 +1,5 @@
 #+TITLE: aq Specification v2
 #+SUBTITLE: Self-contained rebuild spec for the ambient agent queue
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-14
 #+STARTUP: overview
 #+OPTIONS: toc:3 num:t
@@ -268,7 +267,7 @@ WebDAV mounts are transparent to =Publish()= and =Active()=. Point
 =AQ_HOME= at the mount:
 
 #+begin_src bash
-AQ_HOME=/mnt/nexus-aq aq announce -c C-1 -f "auth.py"
+AQ_HOME=/mnt/shared-aq aq announce -c C-1 -f "auth.py"
 #+end_src
 
 * 4. Conflict Detection
@@ -726,7 +725,7 @@ Beyond the design philosophy, TRAMP is also a literal Tier 0.5
 transport. Any TRAMP path works as =AQ_HOME=:
 
 #+begin_src elisp
-(setenv "AQ_HOME" "/ssh:nexus:/home/jasonwalsh/.aq")
+(setenv "AQ_HOME" "/ssh:<broker-host>:/home/<user>/.aq")
 (setenv "AQ_HOME" "/docker:aq-agent-1:/tmp/.aq")
 (setenv "AQ_HOME" "/bastille:agent-alpha:/root/.aq")
 #+end_src

@@ -1,6 +1,5 @@
 #+TITLE: Agent Protocol Landscape
 #+SUBTITLE: Where aq sits relative to MCP, A2A, AMTP, ANP, and ACP
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-28
 #+STARTUP: overview
 #+OPTIONS: toc:2 num:t

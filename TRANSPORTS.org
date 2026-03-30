@@ -1,6 +1,5 @@
 #+TITLE: aq Transport Options
 #+SUBTITLE: Appendix A — Alternatives Considered for the L1.5 Presence Layer
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-13
 #+PROPERTY: header-args :eval no
 #+STARTUP: overview
@@ -31,7 +30,7 @@ The requirements that determine transport fitness:
 | Zero orchestrator | No central coordinator; conflict signal emerges from stream |
 | TTL semantics   | Stale entries must expire without manual cleanup       |
 | Zero/low deps   | Must work in a fresh FreeBSD jail or macOS             |
-| Cross-platform  | nexus (FreeBSD/ZFS) + mini (macOS M4) + worktrees      |
+| Cross-platform  | <broker-host> (FreeBSD/ZFS) + <workstation> (macOS) + worktrees |
 | Latency < 500ms | Pre-push conflict detection; not real-time but not mail |
 
 The "funny name" connection: this is the agentic gossip layer.
@@ -101,14 +100,14 @@ Single 20MB binary. Telnet-able protocol. Sub-millisecond.
 - *FreeBSD*: yes — single static binary
 - *macOS*: yes
 
-Verdict: Best "real" option for sub-10ms or nexus↔mini coordination.
+Verdict: Best "real" option for sub-10ms or broker↔workstation coordination.
 A daemon is the only cost. Right upgrade path from filesystem when
 multi-machine presence matters.
 
 ** MQTT / Mosquitto — IOT PUB/SUB
 :PROPERTIES:
 :FIT: 65
-:STATUS: viable; deployed on nexus.lan (mosquitto)
+:STATUS: viable; deployed on <broker-host> (mosquitto)
 :TAGS: broker pub/sub qos iot retain
 :END:
 
@@ -130,12 +129,12 @@ smaller footprint than NATS.
 ** Meshtastic/LoRa (via MQTT bridge) — PROXIMITY-SCOPED GOSSIP
 :PROPERTIES:
 :FIT: 55
-:STATUS: deployed; Godot + hydra as MQTT gateways
+:STATUS: deployed; Meshtastic nodes as MQTT gateways
 :TAGS: radio lora mesh proximity physics gossip
 :END:
 
 LoRa radio (906.875 MHz, AES-256-CTR) bridged to MQTT via WiFi-capable
-nodes (Heltec V3 "hydra", Heltec V4 "Godot"). Encrypted payloads
+nodes (Heltec V3, Heltec V4). Encrypted payloads
 transit MQTT; the radio provides physical-proximity scoping.
 
 - *Path*: =aq announce --mesh= → =am send= → serial/MQTT → LoRa radio → peer radio → =am mon= → =aq check=
@@ -178,7 +177,7 @@ radio via USB serial.
 - *Failure modes*: port lock, BLE contention, USB disconnect, background task cascade (8 natural failures observed in one session)
 
 Lower fit than MQTT bridge because the serial contention problem adds
-operational complexity. The MQTT bridge path (Godot/hydra → broker → peer)
+operational complexity. The MQTT bridge path (node → broker → peer)
 avoids serial entirely for remote agents.
 
 Practical choice: use serial for local nodes with dedicated devices.
@@ -215,7 +214,7 @@ this working with miniircd locally.
 :TAGS: federated json-inbox presence operational-transform
 :END:
 
-Had this running on nexus at =localhost:9898=. Inbox API confirmed working:
+Previously ran at =localhost:9898=. Inbox API confirmed working:
 =curl http://localhost:9898/api/inbox= returns digest + creator + unread.
 
 - *Protocol*: Wave protocol — wavelets, blips, inbox API
@@ -318,7 +317,7 @@ Unlimited scale, millisecond delivery. $0.40 per million.
 
 Verdict: SNS fan-out to SQS queues is exactly the topology =aq= needs.
 Problem: 100–500ms to AWS, internet dependency, cost. Fine if your agents
-are already in AWS. Absurd if they're in a FreeBSD jail on nexus.
+are already in AWS. Absurd if they're in a FreeBSD jail on the broker host.
 
 ** ggwave — OUT-OF-BAND AUDIO
 :PROPERTIES:
@@ -369,7 +368,7 @@ subject, or a Mosquitto topic.
 
 #+begin_src
 Tier 0 (default):   filesystem (~/.aq/)      — works everywhere, no deps
-Tier 1 (local net): NATS                     — when nexus↔mini matters
+Tier 1 (local net): NATS                     — when broker↔workstation matters
 Tier 2 (hybrid):    MQTT (Mosquitto)         — already deployed for Meshtastic
 Tier 3 (monitor):   IRC (#aq-presence)       — human+agent hybrid view
 Tier ∞ (ceremony):  BBS echomail             — daily CPRR digest

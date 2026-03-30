@@ -1,6 +1,5 @@
 #+TITLE: aq Transport Mounts
 #+SUBTITLE: Declarative Transport Configuration via fstab-style Mount Table
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-28
 #+PROPERTY: header-args :eval no
 #+STARTUP: overview
@@ -177,7 +176,7 @@ path = "/"
 [mounts.mqtt]
 type = "mqtt"
 path = "/"
-host = "broker.local"          # e.g. nexus.lan, hydra.local
+host = "broker.local"
 port = 1883
 topic = "aq"
 # Syncs all channels to MQTT broker.

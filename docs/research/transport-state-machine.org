@@ -1,6 +1,5 @@
 #+TITLE: aq Transport Layer State Machine Architecture
 #+SUBTITLE: TX/RX Paths, Fanout Controller, and Health Monitor
-#+AUTHOR: Alex Morgan (L7 Engineer) / Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-28
 #+STARTUP: overview
 #+OPTIONS: toc:3 num:t

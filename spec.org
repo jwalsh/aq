@@ -1,6 +1,5 @@
 #+TITLE: aq — Ambient Agent Queue
 #+SUBTITLE: Specification v0.1.0
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-13
 #+PROPERTY: header-args :mkdirp t :eval no
 #+PROPERTY: header-args:python :tangle yes

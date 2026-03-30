@@ -1,6 +1,5 @@
 #+TITLE: aq --- Ambient Agent Queue
 #+SUBTITLE: Gossip layer (L1.5) for multi-agent development
-#+AUTHOR: Jason Walsh <j@wal.sh>
 #+DATE: 2026-03-13
 #+STARTUP: overview
 #+OPTIONS: toc:2 num:nil
@@ -191,7 +190,7 @@ NFS, SMB, and WebDAV mounts are transparent to =announce()= and
 Point =AQ_HOME= at the mount and it works:
 
 #+begin_src bash
-AQ_HOME=/mnt/nexus-aq aq announce -c C-1 --claim "proving filesystem transport"
+AQ_HOME=/mnt/shared-aq aq announce -c C-1 --claim "proving filesystem transport"
 #+end_src
 
 Full evaluation of all transports (including the TRAMP design philosophy
@@ -429,7 +428,7 @@ tried to build =aq= using =aq=. Highlights:
   well under the 500ms refutation threshold. Filesystem transport is
   not the bottleneck; subprocess overhead (~60ms per =aq announce=) is.
 
-Full account: [[file:docs/JOURNEY.md][docs/JOURNEY.md]].
+Full account: [[file:docs/adr/JOURNEY.md][docs/adr/JOURNEY.md]].
 
 ** End-to-end acceptance test
 
