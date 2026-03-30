@@ -1,0 +1,130 @@
+time=2026-03-13T20:30:43.279-04:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=false !BADKEY=false
+time=2026-03-13T20:30:43.280-04:00 level=INFO msg="using database" path=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/beads.db
+time=2026-03-13T20:30:43.310-04:00 level=INFO msg="database opened" path=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/beads.db backend=sqlite freshness_checking=true
+time=2026-03-13T20:30:43.310-04:00 level=INFO msg="upgrading .beads/.gitignore"
+time=2026-03-13T20:30:43.310-04:00 level=WARN msg="failed to upgrade .gitignore" error="open .beads/.gitignore: no such file or directory"
+time=2026-03-13T20:30:43.328-04:00 level=INFO msg="Repository fingerprint validated: %s" !BADKEY=c98b8085
+time=2026-03-13T20:30:43.329-04:00 level=INFO msg="starting RPC server" socket=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/bd.sock
+time=2026-03-13T20:30:43.329-04:00 level=INFO msg="RPC server ready (socket listening)"
+time=2026-03-13T20:30:43.338-04:00 level=INFO msg="registered in global registry"
+time=2026-03-13T20:30:43.338-04:00 level=INFO msg="Starting %s..." !BADKEY="sync cycle"
+time=2026-03-13T20:30:43.339-04:00 level=INFO msg="Exported to JSONL"
+time=2026-03-13T20:30:43.378-04:00 level=INFO msg="Imported from JSONL"
+time=2026-03-13T20:30:43.394-04:00 level=INFO msg="Sync cycle complete"
+time=2026-03-13T20:30:43.394-04:00 level=INFO msg="monitoring parent process" pid=0
+time=2026-03-13T20:30:43.394-04:00 level=INFO msg="using event-driven mode"
+time=2026-03-13T20:30:43.395-04:00 level=INFO msg="Auto-pull disabled: use 'git pull' manually to sync remote changes"
+time=2026-03-13T20:30:43.463-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-77n
+time=2026-03-13T20:30:43.973-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:43.973-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:43.974-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:45.138-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-2ew
+time=2026-03-13T20:30:45.639-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:45.647-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:45.648-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:46.521-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-33b
+time=2026-03-13T20:30:47.030-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:47.031-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:47.033-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:47.793-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-9by
+time=2026-03-13T20:30:48.295-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:48.298-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:48.299-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:48.689-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-4ts
+time=2026-03-13T20:30:49.194-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:49.194-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:49.196-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:50.016-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-3nh
+time=2026-03-13T20:30:50.520-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:50.521-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:50.522-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:51.086-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-mlr
+time=2026-03-13T20:30:51.587-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:51.587-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:51.587-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:30:55.206-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-2ew
+time=2026-03-13T20:30:55.276-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-33b
+time=2026-03-13T20:30:55.350-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-9by
+time=2026-03-13T20:30:55.426-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-4ts
+time=2026-03-13T20:30:55.499-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-3nh
+time=2026-03-13T20:30:55.573-04:00 level=INFO msg="Mutation detected: %s %s" update=aq-mlr
+time=2026-03-13T20:30:56.074-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:30:56.075-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:30:56.077-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:31:43.244-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:31:43.295-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:31:43.295-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:31:44.297-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:31:44.298-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:31:44.299-04:00 level=INFO msg="JSONL content changed, proceeding with %s..." !BADKEY=auto-import
+time=2026-03-13T20:31:44.353-04:00 level=INFO msg="Imported from JSONL"
+time=2026-03-13T20:31:44.354-04:00 level=INFO msg="Auto-import complete"
+time=2026-03-13T20:32:33.641-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:32:33.692-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:32:33.692-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:32:34.694-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:32:34.697-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:32:34.707-04:00 level=INFO msg="Skipping %s: JSONL content unchanged" !BADKEY=auto-import
+time=2026-03-13T20:48:18.165-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-8q2
+time=2026-03-13T20:48:18.666-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:48:18.666-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:48:18.676-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:48:18.677-04:00 level=INFO msg="Exported to JSONL"
+time=2026-03-13T20:48:18.677-04:00 level=INFO msg="Export complete"
+time=2026-03-13T20:48:18.731-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:48:18.731-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:48:19.733-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:48:19.734-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:48:19.735-04:00 level=INFO msg="JSONL content changed, proceeding with %s..." !BADKEY=auto-import
+time=2026-03-13T20:48:19.778-04:00 level=INFO msg="⚠️  WARNING: Uncommitted local changes detected in %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:48:19.778-04:00 level=INFO msg="   Pulling from remote may overwrite local unpushed changes."
+time=2026-03-13T20:48:19.778-04:00 level=INFO msg="   Consider running 'bd sync' to commit and push your changes first."
+time=2026-03-13T20:48:20.310-04:00 level=INFO msg="Pulled from remote"
+time=2026-03-13T20:48:20.312-04:00 level=INFO msg="Imported from JSONL"
+time=2026-03-13T20:48:20.312-04:00 level=INFO msg="Auto-import complete"
+time=2026-03-13T20:48:21.506-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-os0
+time=2026-03-13T20:48:22.011-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:48:22.011-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:48:22.021-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:48:24.792-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-78a
+time=2026-03-13T20:48:25.293-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:48:25.294-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:48:25.305-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:48:27.461-04:00 level=INFO msg="Mutation detected: %s %s" create=aq-2qg
+time=2026-03-13T20:48:27.962-04:00 level=INFO msg="Export triggered by mutation events"
+time=2026-03-13T20:48:27.962-04:00 level=INFO msg="Starting %s..." !BADKEY=export
+time=2026-03-13T20:48:27.962-04:00 level=INFO msg="Pre-export validation failed: %v" !BADKEY="refusing to export: JSONL content has changed since last import (import first to avoid data loss)"
+time=2026-03-13T20:49:21.937-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:49:21.988-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:49:21.988-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:49:22.991-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:49:22.995-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:49:22.997-04:00 level=INFO msg="JSONL content changed, proceeding with %s..." !BADKEY=auto-import
+time=2026-03-13T20:49:23.509-04:00 level=INFO msg="Pulled from remote"
+time=2026-03-13T20:49:23.513-04:00 level=INFO msg="Imported from JSONL"
+time=2026-03-13T20:49:23.514-04:00 level=INFO msg="Auto-import complete"
+time=2026-03-13T20:54:53.818-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:54:53.869-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:54:53.869-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:54:54.872-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:54:54.873-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:54:54.874-04:00 level=INFO msg="Skipping %s: JSONL content unchanged" !BADKEY=auto-import
+time=2026-03-13T20:55:09.453-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T20:55:09.504-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T20:55:09.504-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T20:55:10.507-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T20:55:10.511-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T20:55:10.513-04:00 level=INFO msg="Skipping %s: JSONL content unchanged" !BADKEY=auto-import
+time=2026-03-13T21:07:16.934-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T21:07:16.986-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T21:07:16.986-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T21:07:17.989-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T21:07:17.990-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T21:07:17.995-04:00 level=INFO msg="Skipping %s: JSONL content unchanged" !BADKEY=auto-import
+time=2026-03-13T21:12:40.827-04:00 level=INFO msg="JSONL removed/renamed, re-establishing watch"
+time=2026-03-13T21:12:40.878-04:00 level=INFO msg="Successfully re-established JSONL watch after %v" !BADKEY=50ms
+time=2026-03-13T21:12:40.878-04:00 level=INFO msg="JSONL file created: %s" !BADKEY=/Users/jasonwalsh/ghq/github.com/jwalsh/aq/.beads/issues.jsonl
+time=2026-03-13T21:12:41.881-04:00 level=INFO msg="Import triggered by file change"
+time=2026-03-13T21:12:41.881-04:00 level=INFO msg="Starting %s..." !BADKEY=auto-import
+time=2026-03-13T21:12:41.881-04:00 level=INFO msg="Skipping %s: JSONL content unchanged" !BADKEY=auto-import
+time=2026-03-28T11:30:44.321-04:00 level=INFO msg="Received signal %v, shutting down..." !BADKEY=terminated
