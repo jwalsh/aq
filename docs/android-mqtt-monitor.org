@@ -1,5 +1,4 @@
 #+TITLE: Android MQTT Multi-Agent Monitor — Build Order
-#+AUTHOR: jw
 #+DATE: 2026-03-30
 #+PROPERTY: header-args :mkdirp t
 #+STARTUP: overview
@@ -42,9 +41,9 @@ graph TD
    - QoS 2 :: fault / security events (exactly-once)
    - Retained :: ~agents/{id}/presence~ (last-will on disconnect)
 
-* Phase 1 — Broker (hydra)
+* Phase 1 — Broker
   :PROPERTIES:
-  :STATUS: [H] hydra/mosquitto exists; extend config
+  :STATUS: [H] extend existing Mosquitto config
   :END:
 
 #+begin_src conf :tangle deploy/mosquitto-agents.conf
@@ -55,14 +54,14 @@ protocol mqtt
 listener 8883
 protocol mqtt
 cafile   /etc/mosquitto/certs/ca.crt
-certfile /etc/mosquitto/certs/hydra.crt
-keyfile  /etc/mosquitto/certs/hydra.key
+certfile /etc/mosquitto/certs/broker.crt
+keyfile  /etc/mosquitto/certs/broker.key
 require_certificate false
 
 # Agent namespace ACL
 acl_file /etc/mosquitto/agents.acl
 
-# Bridge to InfluxDB via telegraf (existing)
+# Bridge to InfluxDB via telegraf
 # retain: presence topics only
 #+end_src
 
@@ -87,8 +86,8 @@ Fits L1.5: presence broadcast, NDJSON payload, TTL via broker retain.
 import json, time, os
 import paho.mqtt.client as mqtt
 
-BROKER   = os.getenv("AQ_MQTT_BROKER", "hydra.local")
-PORT     = int(os.getenv("AQ_MQTT_PORT", 8883))
+BROKER   = os.getenv("AQ_MQTT_BROKER", "localhost")
+PORT     = int(os.getenv("AQ_MQTT_PORT", "1883"))
 AGENT_ID = os.getenv("AQ_AGENT_ID", "unknown")
 BASE     = f"agents/{AGENT_ID}"
 
@@ -131,7 +130,7 @@ def connect(on_message=None) -> mqtt.Client:
 
 * Phase 3 — Telegraf → InfluxDB bridge
   :PROPERTIES:
-  :STATUS: [H] telegraf on hydra — add MQTT consumer input
+  :STATUS: [H] add MQTT consumer input to existing Telegraf
   :END:
 
 #+begin_src toml :tangle deploy/telegraf-agents.conf
@@ -146,7 +145,7 @@ def connect(on_message=None) -> mqtt.Client:
 [[outputs.influxdb_v2]]
   urls         = ["http://localhost:8086"]
   token        = "$INFLUX_TOKEN"
-  organization = "jw"
+  organization = "$INFLUX_ORG"
   bucket       = "agents"
 #+end_src
 
@@ -157,7 +156,7 @@ def connect(on_message=None) -> mqtt.Client:
 
 ** Option A — IoT MQTT Panel (no-code, fastest)
    1. Install [[https://play.google.com/store/apps/details?id=snr.lab.iotmqttpanel.prod][IoT MQTT Panel]]
-   2. Broker: ~hydra.local:8883~, TLS on, no client cert
+   2. Broker: ~<broker-host>:8883~, TLS on, no client cert
    3. Dashboard tiles:
 
    | Tile type   | Topic                    | Purpose               |
@@ -198,8 +197,8 @@ def connect(on_message=None) -> mqtt.Client:
   | C-003      | Android battery drain (idle)  | <2%/hr  |
 
 * Refutation Hooks
-  - If Mosquitto on hydra not reachable from Android (Tailscale required?)
-    → fallback: ~mqtt.meshtastic.org~ as public broker for dev
+  - If Mosquitto not reachable from Android (VPN/Tailscale required?)
+    → fallback: public broker for dev
   - If paho TLS fails on self-signed CA
     → option: disable TLS on :1883 for LAN-only dev
   - If IoT MQTT Panel can't handle NDJSON

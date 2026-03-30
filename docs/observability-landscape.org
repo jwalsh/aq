@@ -1,5 +1,4 @@
 #+TITLE: AQ Observability Landscape: Industry State vs. Gossip Architecture
-#+AUTHOR: jw
 #+DATE: 2026-03-30
 #+PROPERTY: header-args :mkdirp t
 #+STARTUP: overview
@@ -11,7 +10,7 @@
 
 * Purpose
   :PROPERTIES:
-  :AUDIENCE:  aq roadmap agents, jw, sjg
+  :AUDIENCE:  aq roadmap agents
   :STATUS:    [H] hypothesis-grounded, empirical validation pending
   :LAYER:     L1.5 (aq / presence) — cross-cut to L4 (elenctic-spec / validation)
   :END:
@@ -31,7 +30,6 @@
 
 * As-Is: aq Current State
   :PROPERTIES:
-  :REPO:     github.com/jwalsh/aq
   :VERSION:  pre-1.0, active development
   :END:
 
@@ -82,11 +80,10 @@ graph TD
    client disconnect, providing TTL-like expiry without agent cooperation.
 
 ** Current Monitoring (As-Is)
-   - ~hydra~ (FreeBSD 14.3): Mosquitto broker, InfluxDB, Grafana
-   - Telegraf consumer input: ~msh/US/2/+/+~ (Meshtastic), not yet ~agents/#~
-   - Android: IoT MQTT Panel, connection ~nexus~ → ~192.168.86.100:1883~,
-     dashboard ~collab~ created, tiles not yet provisioned
-   - Grafana MQTT datasource plugin: *not yet installed*
+   Typical deployment: a broker host running Mosquitto, InfluxDB, Grafana.
+   Telegraf consumer ingests Meshtastic (~msh/US/2/+/+~), not yet ~agents/#~.
+   Mobile: IoT MQTT Panel connecting to the broker LAN address.
+   Grafana MQTT datasource plugin: available, not yet deployed.
 
 * Industry State: March 2026
   :PROPERTIES:
@@ -178,23 +175,22 @@ graph LR
 
    Constraints relevant to ~aq~:
    - Live data only; no historical queries. Panels show data received
-     while open. Historical path requires InfluxDB (already present).
+     while open. Historical path requires InfluxDB.
    - All subscriptions use QoS 0 only. Claim events (QoS 1 in ~aq~
      transport spec) require the Telegraf → InfluxDB path for durability.
    - MQTT v3.1.x only; no v5.
    - Provisioning-as-code supported via YAML datasource config and
      Terraform provider.
 
-   Install path for ~hydra~:
+   Install path for the broker host:
 #+begin_src sh :tangle deploy/install-grafana-mqtt.sh
 #!/bin/sh
-# Install Grafana MQTT datasource on hydra
+# Install Grafana MQTT datasource on the broker host
 grafana-cli plugins install grafana-mqtt-datasource
-# restart grafana service
 service grafana restart
 #+end_src
 
-   Provisioning config (tangle to Grafana provisioning dir):
+   Provisioning config:
 #+begin_src yaml :tangle deploy/grafana-provisioning/datasources/mqtt-agents.yaml
 apiVersion: 1
 datasources:
@@ -202,7 +198,7 @@ datasources:
     type: grafana-mqtt-datasource
     jsonData:
       uri: tcp://localhost:1883
-      clientID: grafana-hydra-aq
+      clientID: grafana-aq
     isDefault: false
 #+end_src
 
@@ -286,8 +282,8 @@ graph TD
 
   | ID    | Conjecture                                              | Stage       |
   |-------+---------------------------------------------------------+-------------|
-  | C-010 | Grafana MQTT datasource on hydra provides live presence | CONJECTURED |
-  |       | view with <2s lag, zero Telegraf dependency for L1.5   |             |
+  | C-010 | Grafana MQTT datasource provides live presence view     | CONJECTURED |
+  |       | with <2s lag, zero Telegraf dependency for L1.5         |             |
   | C-011 | MQTT LWT mitigates F-2 (TTL cliff) without agent-side  | CONJECTURED |
   |       | re-announcement logic                                  |             |
   | C-012 | IBM BeeAI agent can emit aq-compatible NDJSON gossip   | UNTESTED    |
@@ -302,14 +298,14 @@ graph TD
   :PRIORITY: ordered
   :END:
 
-  1. Install ~grafana-mqtt-datasource~ on ~hydra~ (see tangle targets above).
+  1. Install ~grafana-mqtt-datasource~ on the broker host (see tangle targets above).
   2. Add Grafana MQTT datasource pointing at ~tcp://localhost:1883~.
   3. Create ~agents~ dashboard with panels: ~agents/+/presence~,
      ~worktrees/+/+/claim~, ~agents/+/gossip~, ~concerns/+/events~.
   4. Validate C-010 and C-011 with a two-agent worktree scenario.
   5. Update ~DOGFOODING.md~ with results; promote C-010/C-011 to
      SUPPORTED or REFUTED accordingly.
-  6. Evaluate IBM BeeAI as test bed for C-012 (FreeBSD compat check first).
+  6. Evaluate IBM BeeAI as test bed for C-012.
 
 * References
   :PROPERTIES:
@@ -325,6 +321,3 @@ graph TD
   - Top 5 AI Agent Observability Platforms 2026 (Maxim AI)
   - 15 AI Agent Observability Tools 2026 (AIM Multiple / benchmark)
   - Dynatrace: Six Observability Predictions 2026
-  - aq transport registry / TRANSPORTS.org: github.com/jwalsh/aq
-  - aq DOGFOODING.md: github.com/jwalsh/aq
-  - Grafana & Friends Boston notes (2026-03-19)

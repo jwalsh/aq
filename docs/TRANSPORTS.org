@@ -31,7 +31,7 @@ The requirements that determine transport fitness:
 | Zero orchestrator | No central coordinator; conflict signal emerges from stream |
 | TTL semantics   | Stale entries must expire without manual cleanup       |
 | Zero/low deps   | Must work in a fresh FreeBSD jail or macOS             |
-| Cross-platform  | nexus (FreeBSD/ZFS) + mini (macOS M4) + worktrees      |
+| Cross-platform  | <broker-host> (FreeBSD/ZFS) + <workstation> (macOS M4) + worktrees |
 | Latency < 500ms | Pre-push conflict detection; not real-time but not mail |
 
 The "funny name" connection: this is the agentic gossip layer.
@@ -93,7 +93,7 @@ The structural parallel:
 
 TRAMP's key insight, articulated in 1998: *the consumer of file I/O
 should not change behavior based on where the file lives.* A =save-buffer=
-on =/ssh:nexus:/root/.aq/broadcasts/aq-123.json= is identical to a
+on =/ssh:<broker-host>:/root/.aq/broadcasts/aq-123.json= is identical to a
 =save-buffer= on =/root/.aq/broadcasts/aq-123.json=. Emacs doesn't know.
 The user doesn't care.
 
@@ -224,7 +224,7 @@ From Emacs, any path TRAMP understands is a valid =AQ_HOME=:
 
 #+begin_src elisp :eval no
 ;; These all work as aq channel roots
-(setenv "AQ_HOME" "/ssh:nexus:/home/jasonwalsh/.aq")
+(setenv "AQ_HOME" "/ssh:<broker-host>:/home/<user>/.aq")
 (setenv "AQ_HOME" "/docker:aq-agent-1:/tmp/.aq")
 (setenv "AQ_HOME" "/kubernetes:pod/aq-worker:/tmp/.aq")
 (setenv "AQ_HOME" "/bastille:agent-alpha:/root/.aq")
@@ -235,11 +235,11 @@ From shell/Python, the equivalent is FUSE — =sshfs=, =rclone mount=, =s3fs=.
 The principle: *any resource:location that can be expressed as a filesystem
 path is a valid aq transport with zero code changes.*
 
-TRAMP protocols relevant to the nexus+mini+k8s mesh:
+TRAMP protocols relevant to the <broker-host>+<workstation>+k8s mesh:
 
 | TRAMP method   | Underlying protocol | Use case                        |
 |----------------+---------------------+---------------------------------|
-| =/ssh:=        | SSH                 | nexus ↔ mini over Tailscale     |
+| =/ssh:=        | SSH                 | <broker-host> ↔ <workstation> over Tailscale |
 | =/sftp:=       | SFTP                | same, SFTP semantics            |
 | =/docker:=     | Docker exec         | agents in containers            |
 | =/podman:=     | Podman exec         | rootless containers             |
@@ -252,8 +252,8 @@ See [[https://github.com/aygp-dr/tramp-workshop][aygp-dr/tramp-workshop]] for th
 FreeBSD Bastille jails, ECS, GKE, and Compute Engine methods.
 
 This means the Elisp =emacs-mcp-maximalist= integration gets cross-machine
-=aq= for free — =aq-announce= from Emacs on mini can write to nexus's
-channel directory via TRAMP without any network transport code.
+=aq= for free -- =aq-announce= from Emacs on <workstation> can write to
+<broker-host>'s channel directory via TRAMP without any network transport code.
 
 * Transport Details
 
@@ -297,7 +297,7 @@ Single 20MB binary. Telnet-able protocol. Sub-millisecond.
 - *FreeBSD*: yes — single static binary
 - *macOS*: yes
 
-Verdict: Best "real" option for sub-10ms or nexus↔mini coordination.
+Verdict: Best "real" option for sub-10ms or cross-machine coordination.
 A daemon is the only cost. Right upgrade path from filesystem when
 multi-machine presence matters.
 
@@ -354,7 +354,7 @@ this working with miniircd locally.
 :TAGS: federated json-inbox presence operational-transform
 :END:
 
-Had this running on nexus at =localhost:9898=. Inbox API confirmed working:
+Had this running on <broker-host> at =localhost:9898=. Inbox API confirmed working:
 =curl http://localhost:9898/api/inbox= returns digest + creator + unread.
 
 - *Protocol*: Wave protocol — wavelets, blips, inbox API
@@ -457,7 +457,7 @@ Unlimited scale, millisecond delivery. $0.40 per million.
 
 Verdict: SNS fan-out to SQS queues is exactly the topology =aq= needs.
 Problem: 100–500ms to AWS, internet dependency, cost. Fine if your agents
-are already in AWS. Absurd if they're in a FreeBSD jail on nexus.
+are already in AWS. Absurd if they're in a FreeBSD jail on a local server.
 
 ** ggwave — OUT-OF-BAND AUDIO
 :PROPERTIES:
@@ -517,36 +517,36 @@ The relevant conjectures:
 :PROPERTIES:
 :FIT: 72
 :STATUS: viable; natural extension of filesystem backend
-:TAGS: network-fs multi-machine nexus mini zfs
+:TAGS: network-fs multi-machine zfs
 :END:
 
-Mount =nexus:/aq= on =mini= and both machines share =~/.aq/=.
+Mount =<broker-host>:/aq= on =<workstation>= and both machines share =~/.aq/=.
 
-- *Setup*: =nexus= exports =/aq= via NFS; =mini= mounts it via Tailscale
+- *Setup*: =<broker-host>= exports =/aq= via NFS; =<workstation>= mounts it via Tailscale
 - *Protocol*: NFSv4 (stateful, better locking than v3)
 - *Latency*: 1–20ms over Tailscale LAN; p99 degrades under load
 - *Locking*: NFSv4 supports byte-range locks; =aq= file-per-message
   avoids lock contention (each agent writes a distinct ULID filename)
 - *FreeBSD*: first-class NFS server/client; ZFS + NFS is the canonical
-  nexus storage export pattern
+  FreeBSD/ZFS storage export pattern
 - *macOS*: native NFS client (=mount_nfs=)
-- *Consistency*: close-to-open; a file written on nexus is visible on
-  mini after the open() on the read side. Sufficient for TTL-bounded
+- *Consistency*: close-to-open; a file written on <broker-host> is visible on
+  <workstation> after the open() on the read side. Sufficient for TTL-bounded
   presence (300s TTL >> NFS cache coherence window of ~3s).
 
 Verdict: The most natural multi-machine extension of the filesystem
 backend. No code changes to =aq= — just mount the directory. The
-Tailscale mesh already connects nexus and mini; NFS over Tailscale
+Tailscale mesh already connects the hosts; NFS over Tailscale
 is a one-line =fstab= entry. Primary risk: Tailscale blip = mount
 stalls. Mitigation: =soft= mount option + timeout, fall back to local
 =~/.aq/= if mount is unavailable.
 
 #+begin_src bash :eval no
-# nexus: /etc/exports
+# Example: broker host /etc/exports (e.g. nexus, hydra)
 /aq -network 100.64.0.0 -mask 255.192.0.0 -maproot=root
 
-# mini: /etc/fstab
-nexus.tail:/aq /Users/jasonwalsh/.aq nfs rw,soft,timeo=5,retrans=2 0 0
+# Example: workstation /etc/fstab
+broker.tail:/aq /Users/<user>/.aq nfs rw,soft,timeo=5,retrans=2 0 0
 #+end_src
 
 ** SMB / Samba — WINDOWS-COMPATIBLE SHARE
@@ -585,11 +585,11 @@ read/write presence entries.
 
 #+begin_src bash :eval no
 # Read all active broadcasts (WebDAV PROPFIND)
-curl -X PROPFIND http://nexus.tail:8080/aq/channels/broadcast/requests/ \
+curl -X PROPFIND http://broker.tail:8080/aq/channels/broadcast/requests/ \
      -H "Depth: 1"
 
 # Write a broadcast
-curl -T broadcast.json http://nexus.tail:8080/aq/channels/broadcast/requests/aq-$(date +%s)-test.json
+curl -T broadcast.json http://broker.tail:8080/aq/channels/broadcast/requests/aq-$(date +%s)-test.json
 #+end_src
 
 Verdict: The HTTP property makes this uniquely accessible — a shell
@@ -600,7 +600,7 @@ than NFS but acceptable for 300s TTL presence. Worth a spike.
 ** S3 / MinIO — OBJECT STORAGE
 :PROPERTIES:
 :FIT: 58
-:STATUS: viable; natural fit for distributed/cloud agents; mini runs MinIO
+:STATUS: viable; natural fit for distributed/cloud agents
 :TAGS: object-storage s3 minio k8s cloud
 :END:
 
@@ -610,8 +610,8 @@ Each presence entry = one object. Bucket = channel. ListObjects = read_active().
 - *Latency*: 5–50ms local MinIO; 20–200ms AWS S3
 - *Consistency*: S3 is eventual for ListObjects; MinIO with strong consistency
   mode provides read-after-write
-- *Install*: MinIO single binary (=minio server /data=); or use existing
-  MinIO on mini
+- *Install*: MinIO single binary (=minio server /data=); or use an existing
+  MinIO instance
 - *FreeBSD*: MinIO binary available; or =s3fs-fuse= for transparent mount
 - *macOS*: =s3fs= or =rclone mount=
 
@@ -619,7 +619,7 @@ Each presence entry = one object. Bucket = channel. ListObjects = read_active().
 # aq S3 transport sketch
 import boto3
 
-s3 = boto3.client('s3', endpoint_url='http://mini.tail:9000',
+s3 = boto3.client('s3', endpoint_url='http://workstation.tail:9000',  # example
                   aws_access_key_id='aq', aws_secret_access_key='aqsecret')
 
 def announce_s3(broadcast, bucket='aq-broadcast'):
@@ -634,7 +634,7 @@ def read_active_s3(bucket='aq-broadcast'):
     ) for o in resp.get('Contents', [])]
 #+end_src
 
-Verdict: MinIO on =mini= already exists (likely). The S3 API is the
+Verdict: If MinIO is already running on the local network, the S3 API is the
 best-supported object storage interface — every language has a client.
 ListObjectsV2 is the =ls= of the cloud. Prune-on-read (delete expired
 objects in =read_active=) handles TTL. The eventual consistency on
@@ -720,14 +720,15 @@ works immediately on any LAN segment.
 
 #+begin_src bash :eval no
 # Register aq presence service
-dns-sd -R "hydra-aq" _aq._tcp local 9999 \
-  agent=HYDR repo=aygp-dr/hydra-setup branch=main
+# Example: register an agent's presence service
+dns-sd -R "myhost-aq" _aq._tcp local 9999 \
+  agent=MYAG repo=<owner>/<repo> branch=main
 
 # Browse for aq services on local network
 dns-sd -B _aq._tcp local
 
 # Resolve a discovered service
-dns-sd -L "hydra-aq" _aq._tcp local
+dns-sd -L "myhost-aq" _aq._tcp local
 #+end_src
 
 #+begin_src python :eval no
@@ -753,7 +754,7 @@ def announce_mdns(broadcast):
 Verdict: Perfectly matches L1.5 requirements — zero deps, multicast fanout,
 lossy-ok, no orchestrator. The service discovery model (register → browse →
 resolve) maps cleanly to announce → read_active. Natural fit for local mesh
-presence: nexus, mini, pi all on same LAN see each other without any broker.
+presence: all hosts on the same LAN see each other without any broker.
 The 120s default TTL is appropriate for presence. Primary limit: single LAN
 segment only (mDNS doesn't cross routers without special config). Works
 alongside Tailscale for hosts on both physical LAN and overlay network.
@@ -865,7 +866,7 @@ subject, or a Mosquitto topic.
 Tier 0 (default):    filesystem (~/.aq/)      — works everywhere, no deps
 Tier 0.5 (mounted):  NFS / SMB / WebDAV       — same code, shared path (AQ_HOME=/mnt/...)
 Tier 0.7 (local):    mDNS / Bonjour          — zero-config LAN presence, no broker
-Tier 1 (local net):  NATS or Redis pub/sub    — when nexus↔mini latency matters
+Tier 1 (local net):  NATS or Redis pub/sub    — when cross-machine latency matters
 Tier 1.5 (object):   S3 / MinIO              — cloud or k8s-hosted agents
 Tier 2 (k8s):        etcd                    — already present if running k8s
 Tier 2.2 (gossip):   Serf / memberlist       — true SWIM gossip; semantics match aq's
@@ -878,7 +879,7 @@ Tier ∞ (ceremony):   BBS echomail            — daily CPRR digest
 Key insight: Tier 0 and Tier 0.5 share *identical* =aq= code. NFS/SMB/WebDAV
 mounts are transparent to =announce()= and =read_active()= — the only
 variable is latency and consistency. Point =AQ_HOME= at the mount:
-=AQ_HOME=/mnt/nexus-aq aq announce --conjecture C-1 ...=
+=AQ_HOME=/mnt/broker-aq aq announce --conjecture C-1 ...=
 
 Target conjecture for transport abstraction:
 =C-6: transport abstraction doesn't require API changes to announce() / read_active()=

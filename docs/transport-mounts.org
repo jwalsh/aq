@@ -177,7 +177,7 @@ path = "/"
 [mounts.mqtt]
 type = "mqtt"
 path = "/"
-host = "nexus.lan"
+host = "broker.local"          # e.g. nexus.lan, hydra.local
 port = 1883
 topic = "aq"
 # Syncs all channels to MQTT broker.
@@ -196,15 +196,15 @@ port = "/dev/cu.usbmodem2101"
 [mounts.kbfs]
 type = "kbfs"
 path = "/"
-dir = "/keybase/private/jwalsh,aygpdr/aq"
+dir = "/keybase/private/<user>,<collaborator>/aq"
 # Keybase filesystem. Could be a symlink instead of a sync daemon:
-#   ln -s /keybase/private/jwalsh,aygpdr/aq ~/.aq/mounts/kbfs
+#   ln -s /keybase/private/<user>,<collaborator>/aq ~/.aq/mounts/kbfs
 
 [mounts.ghissue]
 type = "ghissue"
 path = "/broadcast"
 enabled = false
-repo = "jwalsh/amigosmalla"
+repo = "<owner>/<repo>"
 issue = 5
 # POC only. Disabled by default. Noisy.
 
@@ -260,7 +260,7 @@ From highest to lowest:
       archive/
   mounts/
     mqtt/
-      .transport      # metadata: type=mqtt, host=nexus.lan, ...
+      .transport      # metadata: type=mqtt, host=broker.local, ...
       broadcast/      # mirror of channels/broadcast/ via MQTT sync
     mesh/
       .transport      # metadata: type=mesh, via=serial, ...
@@ -292,7 +292,7 @@ From highest to lowest:
 For KBFS and NFS, the mount can be a literal symlink:
 
 #+begin_src bash
-ln -s /keybase/private/jwalsh,aygpdr/aq/broadcast ~/.aq/mounts/kbfs/broadcast
+ln -s /keybase/private/<user>,<collaborator>/aq/broadcast ~/.aq/mounts/kbfs/broadcast
 #+end_src
 
 Writes to KBFS are writes to Keybase. Reads from KBFS are reads from
@@ -393,10 +393,10 @@ def health_check(options: dict) -> HealthStatus:
 $ aq mounts
 NAME      TYPE     PATH         STATUS    BACKEND
 local     local    /            healthy   ~/.aq/channels/
-mqtt      mqtt     /            healthy   nexus.lan:1883
+mqtt      mqtt     /            healthy   broker.local:1883
 mesh      mesh     /broadcast   degraded  /dev/cu.usbmodem2101 (not connected)
-kbfs      kbfs     /            healthy   /keybase/private/jwalsh,aygpdr/aq
-ghissue   ghissue  /broadcast   disabled  jwalsh/amigosmalla#5
+kbfs      kbfs     /            healthy   /keybase/private/<user>,<collaborator>/aq
+ghissue   ghissue  /broadcast   disabled  <owner>/<repo>#5
 mdns      mdns     /            disabled  _aq._tcp:5353
 #+end_example
 
@@ -405,7 +405,7 @@ mdns      mdns     /            disabled  _aq._tcp:5353
 | Current                  | New (transports.toml)                    |
 |--------------------------+------------------------------------------|
 | =AQ_MQTT=1=             | =[mounts.mqtt]= with =enabled = true=    |
-| =AQ_MQTT_HOST=nexus=    | =host = "nexus"= under =[mounts.mqtt]=   |
+| =AQ_MQTT_HOST=broker.local= | =host = "broker.local"= under =[mounts.mqtt]= |
 | =AQ_MESH=1=             | =[mounts.mesh]= with =enabled = true=    |
 | =AQ_KBFS=1=             | =[mounts.kbfs]= with =enabled = true=    |
 | =AQ_KBFS_DIR=/keybase/..= | =dir = "/keybase/..."= under =[mounts.kbfs]= |
@@ -844,7 +844,7 @@ For readers familiar with =/etc/fstab=, the mapping:
 | device      | (implicit from type)  | =mosquitto_pub=               |
 | mountpoint  | =path=                | =/broadcast=                  |
 | type        | =type=                | =mqtt=                        |
-| options     | (remaining keys)      | =host = "nexus.lan"=          |
+| options     | (remaining keys)      | =host = "broker.local"=       |
 | dump        | (n/a)                 |                               |
 | pass        | (n/a, but: mount order) | TOML table order = mount order |
 

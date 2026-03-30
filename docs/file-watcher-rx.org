@@ -170,7 +170,7 @@ This is the use case that motivates the entire module.
 ** Topology
 
 #+begin_example
-Machine A (nexus.lan)             Machine B (mini.local)
+Machine A (broker.local)          Machine B (workstation.local)
   ~/.aq/  <--- NFS export           ~/.aq/  <--- NFS mount of A
   |                                   |
   v                                   v
