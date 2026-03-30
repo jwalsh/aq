@@ -10,32 +10,32 @@ before they become merge conflicts. Not an orchestrator, not a broker — just g
 
 ## Current State
 
-- Python prototype exists in `src/aq/` (working, wire format is canonical)
-- Go port planned in `main.go` (bead `aq-os0`, P1)
-- 6 conjectures registered in `cprr`
-- 7+ beads in `bd` with dependency chain
+- **Go binary is the primary implementation** (`main.go`, ~1940 lines, 71 tests, all passing)
+- Commands: announce, whisper, check, status, init, doctor, validate, quickstart, mqtt
+- Python prototype in `src/aq/` has transport fanout (mesh, mqtt, kbfs, ghissue, irc)
+- Go binary has filesystem + MQTT (via mosquitto_sub subprocess); v0.5 adds transport registry
+- Known divergence: Go DefaultTTL=3600, Python DefaultTTL=300; Go skips status=done in conflicts, Python doesn't
+- 12+ conjectures in `cprr`; C-1 (filesystem sufficient) NOT refuted at 50 agents
 
 ## Priority Work
 
 ```bash
-bd ready              # See what's unblocked
+bd ready              # See what's unblocked (requires bd server)
 cprr list             # See open conjectures
 ```
 
-The Go port (`aq-os0`) is the primary deliverable. Pattern reference:
-- `../sb/main.go` — single-file Go CLI, stdlib only, manual dispatch
-- `../cprr/main.go` — same pattern, with JSON persistence
+Next milestone: v0.5 transport registry (pluggable transports in the Go binary).
 
 ## Build & Test
 
 ```bash
-# Go (target state)
-make build            # Build aq binary
-make test             # Run tests
-make install          # Install to ~/.local/bin
+# Go (primary)
+gmake build           # Build aq binary
+gmake test            # Run tests (71 tests)
+gmake install         # Install to ~/.local/bin
 
-# Python (prototype, for reference)
-PYTHONPATH=src python -c "from aq.protocol import Broadcast"
+# Python (prototype, transport reference)
+PYTHONPATH=src python3 -c "from aq.protocol import Broadcast"
 ```
 
 ## Quick Reference

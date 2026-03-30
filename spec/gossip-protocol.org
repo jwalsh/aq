@@ -1,11 +1,25 @@
-#+TITLE: aq Gossip Protocol Specification
+#+TITLE: aq Gossip Protocol Specification — v2 PROPOSAL
 #+DATE: 2026-03-30
 #+PROPERTY: header-args :mkdirp t
 #+STARTUP: overview
 #+TAGS: spec cprr gossip protocol transport mesh
-#+DESCRIPTION: Normative spec for the aq L1.5 presence/gossip protocol.
-#+              Gossip is for agents, not monitoring. Monitoring is a
-#+              read-only side effect of agents talking to each other.
+#+DESCRIPTION: PROPOSED v2 spec for the aq L1.5 presence/gossip protocol.
+#+              NOT YET IMPLEMENTED. The current Go binary and Python prototype
+#+              use the v1 format from spec.org (agent, conjecture_id, phase, etc).
+#+              This document describes the target wire format for a future version.
+
+* STATUS: v2 PROPOSAL — NOT IMPLEMENTED
+
+  *WARNING*: The message formats in this document are NOT what the current
+  code produces. The Go binary (~main.go~) and Python prototype (~src/aq/~)
+  both emit v1 payloads with fields: ~agent~, ~conjecture_id~, ~phase~,
+  ~status~, ~files~, ~ts~, ~ttl~, ~id~. See ~spec.org~ Section 4 and the
+  ~Broadcast~ struct in ~main.go~ for the actual wire format.
+
+  This document proposes a v2 format with typed records (~presence~,
+  ~claim~, ~gossip~) and explicit ~action~ semantics (~announce~,
+  ~withdraw~, ~degrade~). Migration path: v2 readers MUST accept v1
+  payloads; v2 writers SHOULD emit both formats during transition.
 
 * Preamble
 

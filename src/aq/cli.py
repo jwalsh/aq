@@ -108,7 +108,7 @@ def main() -> int:
                      choices=["conjecture", "proof", "refutation", "refinement"])
     ann.add_argument("--status", default="prosecuting",
                      choices=["prosecuting", "done", "blocked"])
-    ann.add_argument("--ttl", type=int, default=300)
+    ann.add_argument("--ttl", type=int, default=3600)
     ann.add_argument("--mesh", action="store_true",
                      help="also broadcast via Meshtastic radio")
     ann.add_argument("--mesh-via", default="serial",
