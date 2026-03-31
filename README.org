@@ -179,7 +179,8 @@ requirements.
 | 1     | NATS / Redis pub/sub   |    68--88 | When cross-machine latency matters      |
 | 1.5   | S3 / MinIO             |       58 | Cloud or k8s-hosted agents              |
 | 2     | etcd                   |       62 | Already present if running k8s          |
-| 3     | MQTT (Mosquitto)       |       65 | QoS 0 = gossip; RETAIN = presence; LWT = auto-done. Meshtastic bridge. |
+| 3     | MQTT (Mosquitto)       |       65 | QoS 0 = gossip; RETAIN = presence; LWT = auto-done |
+| 3.5   | Meshtastic (LoRa)      |       40 | 237B payload, multi-hop mesh, off-grid. AMTP compact format. |
 | 4     | IRC (#aq-presence)     |       55 | Human+agent hybrid monitoring           |
 | 5     | UDP broadcast          |       72 | LAN multicast, zero config, fire-and-forget |
 | 6     | Ultrasonic (ggwave)    |       30 | Data-over-sound, ~25B payload, 15-20kHz. Dogs will judge you. |
