@@ -21,4 +21,10 @@ $AQ announce \
   --status done \
   2>/dev/null || true
 
+# Fanout to enabled transports (ggwave, mesh, kbfs, mdns)
+FANOUT="$(git rev-parse --show-toplevel 2>/dev/null)/bin/aq-fanout.sh"
+if [ -x "$FANOUT" ]; then
+  "$FANOUT" "$CONJECTURE" proof "$FILES" "$MSG" &
+fi
+
 exit 0
