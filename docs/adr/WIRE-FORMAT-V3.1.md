@@ -84,22 +84,53 @@ Drop the claim. 22 bytes:
 aq1:jw:aq:1:pw:main.go
 ```
 
-### One Format, Every Transport
+### Grammar (BNF)
 
-The mesh frame IS the canonical wire format. If it fits LoRa (237B),
-it fits everything. No per-tier codecs, no translation layer.
+```bnf
+<broadcast> ::= "aq1" ":" <who> ":" <repo> ":" <conj> ":" <ps> ":" <files> ":" <claim>
+<who>       ::= ALPHA ALPHA           ; initials, tab-completable
+<repo>      ::= IDENT                 ; short repo name
+<conj>      ::= DIGIT+               ; conjecture number
+<ps>        ::= PHASE STATUS          ; 2 chars: phase + status
+<phase>     ::= "c" | "p" | "r" | "n" ; conjecture/proof/refutation/refinement
+<status>    ::= "w" | "d" | "b"       ; working/done/blocked
+<files>     ::= PATH ("," PATH)* | "-"
+<claim>     ::= TEXT                   ; everything after 6th colon (IRC trailing rule)
+```
 
-| Transport    | Wire Format           | Budget | Headroom |
-|--------------|-----------------------|--------|----------|
-| Meshtastic   | v3.1                  | 237B   | 85%      |
-| Audible      | v3.1                  | 140B   | 75%      |
-| UDP / MQTT   | v3.1                  | 1400B+ | 97%+     |
-| Ultrasonic   | v3.1 (claim dropped)  | 25B    | 12%      |
-| Filesystem   | v3.1 wrapped in JSON  | n/a    | n/a      |
+Parser: `split(":", 7)`. Last field absorbs colons in the claim.
+This is the IRC RFC 1459 trailing parameter rule, battle-tested
+for 33 years.
 
-Filesystem stores full JSON for schema completeness (`cat`-debuggable),
-but the `conjecture_claim` field IS the v3.1 string. One source of
-truth, one parser.
+### Multiple Contracts, Lossy Projection
+
+The canonical broadcast is a full struct (JSON on filesystem). Each
+fanout target receives a *projection* — lossy, downhill, and that's
+fine. Gossip tolerates lossy. The filesystem is always the lossless
+store. Received wire-format broadcasts get hydrated back to JSON on
+ingest.
+
+```
+Broadcast (canonical JSON)
+  │
+  ├─ filesystem:  full JSON             (lossless, cat-debuggable)
+  ├─ UDP/MQTT:    full JSON             (no constraint, jq-friendly)
+  ├─ LoRa/mesh:   v3.1 wire format     (35B, fits 237B frame)
+  ├─ audible:     v3.1 wire format     (35B, 4s at fastest)
+  └─ ultrasonic:  v3.1 sans claim      (22B, fits 25B budget)
+```
+
+Information flows downhill through the fanout, never up. Translation
+happens once in the Go binary: `Broadcast.ToWire()` /
+`Broadcast.FromWire()`. One codec, one place.
+
+| Transport    | Contract    | Budget | Projection loss            |
+|--------------+-------------+--------+----------------------------|
+| Filesystem   | Full JSON   | n/a    | None (canonical)           |
+| UDP / MQTT   | Full JSON   | 1400B+ | None                       |
+| Meshtastic   | v3.1 wire   | 237B   | Nested fields flattened    |
+| Audible      | v3.1 wire   | 140B   | Nested fields flattened    |
+| Ultrasonic   | v3.1 wire   | 25B    | Claim dropped, files maybe |
 
 ## Alternatives Rejected
 
