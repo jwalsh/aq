@@ -390,12 +390,12 @@ make demo-bench       # Run Go benchmarks
 
 The build is sequenced with acceptance gates. If a gate fails, stop.
 
-1. @@html:<s>@@Protocol and broadcast struct@@html:</s>@@ --- done (Go, =main.go=)
-2. @@html:<s>@@Unit tests for protocol@@html:</s>@@ --- done (=main_test.go=, =go test ./...=)
-3. @@html:<s>@@Conflict detection with CPRR phase severity@@html:</s>@@ --- done
-4. @@html:<s>@@CLI: announce, check, status, validate, doctor@@html:</s>@@ --- done
-5. @@html:<s>@@Transport fanout: mesh, ggwave, kbfs, mdns, UDP@@html:</s>@@ --- done (v0.4.0)
-6. @@html:<s>@@Wire format v3.1 with BNF grammar@@html:</s>@@ --- done (ADR accepted)
+1. +Protocol and broadcast struct+ --- done (Go, =main.go=)
+2. +Unit tests for protocol+ --- done (=main_test.go=, =go test ./...=)
+3. +Conflict detection with CPRR phase severity+ --- done
+4. +CLI: announce, check, status, validate, doctor+ --- done
+5. +Transport fanout: mesh, ggwave, kbfs, mdns, UDP+ --- done (v0.4.0)
+6. +Wire format v3.1 with BNF grammar+ --- done (ADR accepted)
 7. Integration: =sb detect= \to =aq announce= --- acceptance: auto-detect worktree
 8. Benchmark at scale --- acceptance: 10 agents, 100 msg/min, p99 < 500ms
 
