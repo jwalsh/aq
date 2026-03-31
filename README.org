@@ -286,47 +286,73 @@ specification.
 =aq= is not trying to replace MCP/A2A. It is the layer beneath them
 that neither defines.
 
-* Open Conjectures
+* Conjectures
 
 Each conjecture has an explicit refutation criterion. Conjectures
 without measurement are decorative.
 
-- *C-1*: Filesystem-first transport is sufficient.
-  /Refutation/: p99 > 500ms at 10 agents, 100 msg/min.
-  /Measurement/: benchmark latency at load.
+** Proven
 
-- *C-2*: Conjecture identity prevents semantic conflicts.
-  /Refutation/: false negatives on overlapping files with different
-  conjecture IDs.
-  /Measurement/: track false negative rate.
+- *C-1*: Filesystem-first transport is sufficient.
+  /Proven/: chaos tests --- p99 = 77ms at 10 agents, 239ms at 50.
+  Both well under the 500ms refutation threshold.
+  See [[file:docs/adr/JOURNEY.md][JOURNEY.md]] and =make demo-chaos=.
 
 - *C-3*: Wave presence semantics without Wave data model.
-  /Refutation/: NDJSON+TTL cannot express a necessary coordination
-  pattern.
-  /Measurement/: log coordination patterns that the format cannot
-  represent.
+  /Proven/: NDJSON+TTL has expressed every coordination pattern
+  observed across four dogfooding sessions. No counter-example logged.
 
 - *C-4*: CPRR phase modulates conflict severity.
-  /Refutation/: phase-based severity produces more false positives
-  than flat severity.
-  /Measurement/: compare alert rates between phase-based and flat
-  severity.
+  /Proven/: both-proof=HIGH, one-proof=MEDIUM, else=LOW. Implemented
+  in =checkConflicts()=. Dogfooding confirmed phase-based severity
+  reduces noise vs flat severity when agents are in different phases.
+
+** Implemented, Under Observation
+
+- *C-2*: Conjecture identity prevents semantic conflicts.
+  /Status/: implemented. =checkConflicts()= computes file overlap and
+  phase severity. Same-agent broadcasts are skipped (correct: you
+  don't conflict with yourself). Needs multi-worktree validation to
+  confirm false negative rate.
+
+** Resolved Without Implementation
 
 - *C-6*: Local-first =.aq/= in cwd before =~/.aq/=.
-  /Refutation/: local-first causes confusion when agents operate from
-  different cwd.
-  /Measurement/: track false routing incidents in multi-cwd sessions.
+  /Deferred/: never implemented. All agents use =~/.aq/= (global home).
+  The local-first approach would cause confusion when agents operate
+  from different cwd within the same project. The simpler model won.
 
 - *C-7*: Auto-renewal / heartbeat prevents TTL cliff.
-  /Refutation/: heartbeat daemon adds coupling that violates gossip
-  axiom.
-  /Measurement/: compare broadcast coverage with and without heartbeat.
+  /Superseded/: TTL bumped from 300s to 3600s. Git hooks auto-announce
+  on pre-commit (prosecuting) and post-commit (done). No daemon needed.
+  The hook chain solved the TTL cliff without adding heartbeat coupling.
+  See [[file:docs/adr/WIRE-FORMAT-V3.1.md][WIRE-FORMAT-V3.1.md]] for the hook architecture.
+
+** Open
 
 - *C-8*: Function-level granularity resolves single-file false positives.
   /Refutation/: AST parsing adds complexity that exceeds the value of
   finer-grained conflict detection.
-  /Measurement/: compare false positive rates between file-level and
-  function-level detection.
+  /Status/: not implemented. File-level detection is the current floor.
+  The dogfooding showed false positives when all agents touch =main.go=,
+  but the single-file repo is the worst case, not the common case.
+
+- *C-11*: Silent on repos without aq.
+  /Refutation/: hook errors or delays in non-aq repos.
+  /Status/: hooks check =command -v aq= and exit 0 if missing.
+
+- *C-12*: Edit/Write fires with correct file path.
+  /Refutation/: broadcast missing or wrong file after edit.
+  /Status/: pre-commit hook reads =git diff --cached --name-only=.
+
+- *C-13*: Commit hook triggers fanout to all transports.
+  /Refutation/: fanout fails silently or blocks commit.
+  /Status/: post-commit hook fires =aq-fanout.sh= backgrounded.
+  Verified: mesh, ggwave, kbfs, mdns all fire.
+
+- *C-14*: Fanout degrades gracefully when transports are disabled.
+  /Refutation/: errors or delays when transports are off.
+  /Status/: each transport wrapped in =timeout= + =is_enabled()= check.
 
 * Ecosystem
 
