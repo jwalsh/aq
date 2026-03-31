@@ -340,23 +340,25 @@ without measurement are decorative.
 | =JITIR= | L2   | Knowledge retrieval            |
 | =aq=   | L1.5  | Ambient presence gossip        |
 
-Pattern reference for the Go port: =sb= and =cprr= are single-file Go
-CLIs using stdlib only with manual dispatch. =aq= follows the same
-pattern.
+=sb=, =cprr=, and =aq= are single-file Go CLIs using stdlib only with
+manual dispatch.
 
 * Contrib Packages
 
 The =contrib/= directory contains optional extensions that are not part
 of the core binary:
 
-| Package     | Description                                          |
-|-------------+------------------------------------------------------|
-| =dashboard= | WebSocket-based live dashboard (localhost:8085)      |
-| =postgres=  | PostgreSQL transport (Tier 1 alternative to filesystem) |
-| =mdns=      | mDNS/Bonjour broadcast demo (macOS)                 |
-| =chaos=     | Chaos test suite --- 6 scenarios, subprocess-based   |
-| =tramp=     | Emacs TRAMP integration (=aq-tramp.el=)              |
-| =mqtt=      | MQTT transport (Tier 3, QoS 0 gossip, Meshtastic bridge) |
+| Package       | Description                                            |
+|---------------+--------------------------------------------------------|
+| =dashboard=   | WebSocket-based live dashboard (localhost:8085)        |
+| =postgres=    | PostgreSQL transport (Tier 1 alternative)              |
+| =mdns=        | mDNS/Bonjour broadcast demo (macOS)                   |
+| =chaos=       | Chaos test suite --- 6 scenarios, subprocess-based     |
+| =tramp=       | Emacs TRAMP integration (=aq-tramp.el=)                |
+| =mqtt=        | MQTT transport (Tier 3, QoS 0 gossip)                 |
+| =ggwave=      | Ultrasonic/audible audio transport (Python, ggwave)    |
+| =keybase=     | KBFS shared-directory transport                        |
+| =meshtastic=  | LoRa mesh transport (Tier 3.5, 237B frame)             |
 
 All contrib packages are optional. The core =aq= binary has zero
 dependencies beyond Go stdlib.
@@ -382,22 +384,20 @@ make demo-mdns        # mDNS broadcast demo (macOS)
 make demo-chaos       # Run chaos tests (~2 min)
 make demo-bench       # Run Go benchmarks
 
-# Python (prototype, wire format reference)
-PYTHONPATH=src python -c "from aq.protocol import Broadcast"
-PYTHONPATH=src python -m pytest tests/
 #+end_src
 
 ** Build order
 
 The build is sequenced with acceptance gates. If a gate fails, stop.
 
-1. Tangle source from =spec.org= --- acceptance: ~from aq.protocol import Broadcast~
-2. Unit tests for protocol --- acceptance: =pytest= passes with 5+ tests
-3. Unit tests for conflict detection --- acceptance: all severity levels covered
-4. CLI smoke test --- acceptance: =aq announce= writes, =aq status= reads
-5. Daemon with filesystem watch --- acceptance: trigger within 1s
-6. Integration: =sb detect= \to =aq announce= --- acceptance: auto-detect worktree
-7. Benchmark at scale --- acceptance: 10 agents, 100 msg/min, p99 < 500ms
+1. @@html:<s>@@Protocol and broadcast struct@@html:</s>@@ --- done (Go, =main.go=)
+2. @@html:<s>@@Unit tests for protocol@@html:</s>@@ --- done (=main_test.go=, =go test ./...=)
+3. @@html:<s>@@Conflict detection with CPRR phase severity@@html:</s>@@ --- done
+4. @@html:<s>@@CLI: announce, check, status, validate, doctor@@html:</s>@@ --- done
+5. @@html:<s>@@Transport fanout: mesh, ggwave, kbfs, mdns, UDP@@html:</s>@@ --- done (v0.4.0)
+6. @@html:<s>@@Wire format v3.1 with BNF grammar@@html:</s>@@ --- done (ADR accepted)
+7. Integration: =sb detect= \to =aq announce= --- acceptance: auto-detect worktree
+8. Benchmark at scale --- acceptance: 10 agents, 100 msg/min, p99 < 500ms
 
 ** Contributing
 
