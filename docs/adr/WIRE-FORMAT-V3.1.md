@@ -84,15 +84,22 @@ Drop the claim. 22 bytes:
 aq1:jw:aq:1:pw:main.go
 ```
 
-### Format Per Tier
+### One Format, Every Transport
 
-| Transport    | Wire Format           | Rationale                      |
-|--------------|-----------------------|--------------------------------|
-| Filesystem   | Full NDJSON           | Schema-complete, debuggable    |
-| UDP / MQTT   | Full JSON             | No constraint                  |
-| Meshtastic   | v3.1 with claim       | 35B fits 237B frame            |
-| Audible      | v3.1 with claim       | 35B ≈ 3.5s transmit           |
-| Ultrasonic   | v3.1 without claim    | 22B fits 25B budget           |
+The mesh frame IS the canonical wire format. If it fits LoRa (237B),
+it fits everything. No per-tier codecs, no translation layer.
+
+| Transport    | Wire Format           | Budget | Headroom |
+|--------------|-----------------------|--------|----------|
+| Meshtastic   | v3.1                  | 237B   | 85%      |
+| Audible      | v3.1                  | 140B   | 75%      |
+| UDP / MQTT   | v3.1                  | 1400B+ | 97%+     |
+| Ultrasonic   | v3.1 (claim dropped)  | 25B    | 12%      |
+| Filesystem   | v3.1 wrapped in JSON  | n/a    | n/a      |
+
+Filesystem stores full JSON for schema completeness (`cat`-debuggable),
+but the `conjecture_claim` field IS the v3.1 string. One source of
+truth, one parser.
 
 ## Alternatives Rejected
 
