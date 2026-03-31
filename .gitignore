@@ -1,17 +1,3 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-.mypy_cache/
-.pytest_cache/
-.venv/
-venv/
-
 # Go
 /aq
 aq-linux-*
