@@ -1754,9 +1754,10 @@ type transportConfig struct {
 }
 
 type udpConfig struct {
-	Enabled bool   `json:"enabled"`
-	Group   string `json:"group"`
-	Port    int    `json:"port"`
+	Enabled   bool   `json:"enabled"`
+	Group     string `json:"group"`
+	Port      int    `json:"port"`
+	Broadcast bool   `json:"broadcast,omitempty"` // use subnet broadcast instead of multicast
 }
 
 type mdnsConfig struct {
@@ -1788,8 +1789,9 @@ func loadTransportConfig() transportConfig {
 func fanoutBroadcast(b Broadcast) {
 	tc := loadTransportConfig()
 
-	// UDP multicast: on by default — zero deps, LAN gossip is the base case.
+	// UDP: on by default — zero deps, stdlib only, LAN gossip is the base case.
 	// Disable with {"udp":{"enabled":false}} in config.json.
+	// Set {"udp":{"broadcast":true,"group":"192.168.x.255"}} for subnet broadcast.
 	udpCfg := udpConfig{Enabled: true, Group: "239.192.65.81", Port: 4181}
 	if tc.UDP != nil {
 		if !tc.UDP.Enabled {
@@ -1801,6 +1803,7 @@ func fanoutBroadcast(b Broadcast) {
 		if tc.UDP.Port != 0 {
 			udpCfg.Port = tc.UDP.Port
 		}
+		udpCfg.Broadcast = tc.UDP.Broadcast
 	}
 	if udpCfg.Enabled {
 		go fanoutUDP(b, udpCfg)
@@ -1881,7 +1884,9 @@ func decodeFrame(datagram []byte) ([]byte, error) {
 	return datagram[4:], nil
 }
 
-// fanoutUDP sends a framed broadcast datagram to the UDP multicast group.
+// fanoutUDP sends a framed broadcast datagram via UDP.
+// When cfg.Broadcast is true, uses subnet broadcast (e.g. 192.168.86.255)
+// instead of RFC multicast. Simpler for a physical LAN — no IGMP joins.
 func fanoutUDP(b Broadcast, cfg udpConfig) {
 	payload, err := json.Marshal(b)
 	if err != nil {
@@ -1891,7 +1896,11 @@ func fanoutUDP(b Broadcast, cfg udpConfig) {
 
 	group := cfg.Group
 	if group == "" {
-		group = "239.192.65.81"
+		if cfg.Broadcast {
+			group = "255.255.255.255"
+		} else {
+			group = "239.192.65.81"
+		}
 	}
 	port := cfg.Port
 	if port == 0 {
@@ -2049,33 +2058,55 @@ func materializeBroadcast(b Broadcast, channel string, via string) {
 	fmt.Fprintf(os.Stderr, "listen[%s]: materialized %s from %s (%s)\n", via, b.ConjectureID, b.Agent, b.ID[:8])
 }
 
-// listenUDP joins the UDP multicast group and materializes incoming broadcasts.
+// listenUDP listens for UDP broadcasts or joins a multicast group,
+// then materializes incoming broadcasts to the filesystem.
 func listenUDP(cfg udpConfig, channel string, self string, dedup *rxDedupCache, stop <-chan struct{}) {
 	group := cfg.Group
 	if group == "" {
-		group = "239.192.65.81"
+		if cfg.Broadcast {
+			group = "255.255.255.255"
+		} else {
+			group = "239.192.65.81"
+		}
 	}
 	port := cfg.Port
 	if port == 0 {
 		port = 4181
 	}
 
-	addr := fmt.Sprintf("%s:%d", group, port)
-	gaddr, err := net.ResolveUDPAddr("udp4", addr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "listen[udp]: resolve %s: %v\n", addr, err)
-		return
-	}
-
-	conn, err := net.ListenMulticastUDP("udp4", nil, gaddr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "listen[udp]: join %s: %v\n", addr, err)
-		return
+	var conn *net.UDPConn
+	if cfg.Broadcast {
+		// Subnet broadcast: listen on 0.0.0.0:port for broadcast packets.
+		listenAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "listen[udp]: resolve: %v\n", err)
+			return
+		}
+		var listenErr error
+		conn, listenErr = net.ListenUDP("udp4", listenAddr)
+		if listenErr != nil {
+			fmt.Fprintf(os.Stderr, "listen[udp]: bind 0.0.0.0:%d: %v\n", port, listenErr)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "listen[udp]: broadcast on 0.0.0.0:%d\n", port)
+	} else {
+		// RFC multicast: join the multicast group.
+		addr := fmt.Sprintf("%s:%d", group, port)
+		gaddr, err := net.ResolveUDPAddr("udp4", addr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "listen[udp]: resolve %s: %v\n", addr, err)
+			return
+		}
+		var joinErr error
+		conn, joinErr = net.ListenMulticastUDP("udp4", nil, gaddr)
+		if joinErr != nil {
+			fmt.Fprintf(os.Stderr, "listen[udp]: join %s: %v\n", addr, joinErr)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "listen[udp]: joined %s\n", addr)
 	}
 	defer conn.Close()
 	conn.SetReadBuffer(65536)
-
-	fmt.Fprintf(os.Stderr, "listen[udp]: joined %s\n", addr)
 
 	buf := make([]byte, 65536)
 	type result struct {
@@ -2245,6 +2276,7 @@ Options:
 		if tc.UDP.Port != 0 {
 			udpCfg.Port = tc.UDP.Port
 		}
+		udpCfg.Broadcast = tc.UDP.Broadcast
 	}
 	if udpCfg.Enabled {
 		go listenUDP(udpCfg, channelName, sb.AgentAddress, dedup, stop)
