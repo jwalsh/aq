@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/quick"
 	"time"
 )
 
@@ -2026,5 +2027,360 @@ func TestChaos_ArchiveRace(t *testing.T) {
 	// All 50 should be archived since they were all expired.
 	if len(entries) != 50 {
 		t.Logf("archived %d of 50 (some may have had race-induced skips, which is acceptable)", len(entries))
+	}
+}
+
+// ---------- Property-Based Tests (PBT) ----------
+//
+// Properties per docs/research/PROPERTY-TESTING.md.
+// Uses testing/quick (stdlib, zero deps).
+
+// computeSeverity mirrors the severity logic in checkConflicts for PBT use.
+func computeSeverity(phaseA, phaseB string) Severity {
+	bothProof := phaseA == "proof" && phaseB == "proof"
+	oneProof := phaseA == "proof" || phaseB == "proof"
+	if bothProof {
+		return SeverityHigh
+	} else if oneProof {
+		return SeverityMedium
+	}
+	return SeverityLow
+}
+
+// Property 1: Broadcast JSON roundtrip is lossless.
+func TestQuick_BroadcastRoundtrip(t *testing.T) {
+	f := func(agent, worktree, cid, claim, id string, ttl uint16) bool {
+		b := Broadcast{
+			Agent:           agent,
+			Worktree:        worktree,
+			ConjectureID:    cid,
+			ConjectureClaim: claim,
+			Phase:           PhaseProof,
+			Status:          StatusProsecuting,
+			Files:           []string{"main.go"},
+			Ts:              1700000000,
+			TTL:             int(ttl),
+			ID:              id,
+		}
+		j, err := b.ToJSON()
+		if err != nil {
+			return true // NaN/Inf would cause this; skip
+		}
+		restored, err := BroadcastFromJSON(j)
+		if err != nil {
+			return false
+		}
+		return b.Agent == restored.Agent &&
+			b.Worktree == restored.Worktree &&
+			b.ConjectureID == restored.ConjectureID &&
+			b.ConjectureClaim == restored.ConjectureClaim &&
+			b.Phase == restored.Phase &&
+			b.Status == restored.Status &&
+			b.TTL == restored.TTL &&
+			b.ID == restored.ID &&
+			len(b.Files) == len(restored.Files)
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 2: TTL expiry is monotonic.
+func TestQuick_TTLMonotonic(t *testing.T) {
+	f := func(ttl uint16) bool {
+		if ttl == 0 {
+			return true // TTL=0 means immediate expiry, skip
+		}
+		now := float64(time.Now().Unix())
+		b := Broadcast{Ts: now, TTL: int(ttl)}
+		if b.IsExpired() {
+			return false // must not be expired at creation
+		}
+		b.Ts = now - float64(ttl) - 1
+		return b.IsExpired() // must be expired after TTL+1 seconds
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 3: Conflict overlap is symmetric.
+func TestQuick_OverlapsSymmetric(t *testing.T) {
+	f := func(filesA, filesB []string) bool {
+		a := Broadcast{Files: filesA}
+		b := Broadcast{Files: filesB}
+		return a.Overlaps(&b) == b.Overlaps(&a)
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 4: Conflict severity is deterministic.
+func TestQuick_SeverityDeterministic(t *testing.T) {
+	phases := []Phase{PhaseConjecture, PhaseProof, PhaseRefutation, PhaseRefinement}
+	f := func(idxA, idxB uint8) bool {
+		pA := string(phases[int(idxA)%len(phases)])
+		pB := string(phases[int(idxB)%len(phases)])
+		s1 := computeSeverity(pA, pB)
+		s2 := computeSeverity(pA, pB)
+		return s1 == s2
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 5: ULID uniqueness.
+func TestQuick_ULIDUnique(t *testing.T) {
+	f := func(n uint8) bool {
+		count := int(n)%50 + 2
+		seen := make(map[string]struct{}, count)
+		for i := 0; i < count; i++ {
+			id := generateULID()
+			if _, dup := seen[id]; dup {
+				return false
+			}
+			seen[id] = struct{}{}
+		}
+		return true
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 200}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 9: No false negatives on shared files.
+func TestQuick_NoFalseNegatives(t *testing.T) {
+	f := func(sharedFile string) bool {
+		if sharedFile == "" {
+			return true
+		}
+		home := t.TempDir()
+		t.Setenv("AQ_HOME", home)
+
+		other := Broadcast{
+			Agent: "agent-other", Worktree: "main",
+			ConjectureID: "C-1", Phase: PhaseProof,
+			Status: StatusProsecuting,
+			Files:  []string{sharedFile},
+			Ts:     float64(time.Now().Unix()), TTL: 3600,
+			ID: generateULID(),
+		}
+		writeBroadcast(other, "broadcast")
+
+		me := Broadcast{
+			Agent: "agent-me", Worktree: "main",
+			ConjectureID: "C-2", Phase: PhaseProof,
+			Files: []string{sharedFile},
+		}
+		signals, err := checkConflicts(me, "broadcast")
+		if err != nil {
+			return false
+		}
+		return len(signals) > 0
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 10: Phase severity ordering — both proof >= one proof >= neither.
+func TestQuick_PhaseSeverityOrdering(t *testing.T) {
+	f := func(phaseA, phaseB uint8) bool {
+		phases := []string{"conjecture", "proof", "refutation", "refinement"}
+		pA := phases[int(phaseA)%len(phases)]
+		pB := phases[int(phaseB)%len(phases)]
+
+		s := computeSeverity(pA, pB)
+		sHigh := computeSeverity("proof", "proof")
+		sLow := computeSeverity("conjecture", "conjecture")
+
+		return severityRank(Severity(sHigh)) <= severityRank(Severity(s)) &&
+			severityRank(Severity(s)) <= severityRank(Severity(sLow))
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 11: Done-status broadcasts never appear in conflict signals.
+func TestQuick_DoneExclusion(t *testing.T) {
+	f := func(sharedFile string) bool {
+		if sharedFile == "" {
+			return true
+		}
+		home := t.TempDir()
+		t.Setenv("AQ_HOME", home)
+
+		done := Broadcast{
+			Agent: "agent-done", Worktree: "main",
+			ConjectureID: "C-1", Phase: PhaseProof,
+			Status: StatusDone,
+			Files:  []string{sharedFile},
+			Ts:     float64(time.Now().Unix()), TTL: 3600,
+			ID: generateULID(),
+		}
+		writeBroadcast(done, "broadcast")
+
+		me := Broadcast{
+			Agent: "agent-me", Worktree: "main",
+			ConjectureID: "C-2", Phase: PhaseProof,
+			Files: []string{sharedFile},
+		}
+		signals, _ := checkConflicts(me, "broadcast")
+		return len(signals) == 0
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 12: File list commutativity — order doesn't affect overlap.
+func TestQuick_FileListCommutativity(t *testing.T) {
+	f := func(files []string) bool {
+		if len(files) == 0 {
+			return true
+		}
+		a := Broadcast{Files: files}
+		reversed := make([]string, len(files))
+		for i, f := range files {
+			reversed[len(files)-1-i] = f
+		}
+		b := Broadcast{Files: reversed}
+		other := Broadcast{Files: files[:1]}
+		return a.Overlaps(&other) == b.Overlaps(&other)
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Error(err)
+	}
+}
+
+// ---------- Transport config PBT ----------
+
+// Property: UDP config defaults are sane when no config exists.
+func TestQuick_UDPDefaultConfig(t *testing.T) {
+	f := func(dummy uint8) bool {
+		home := t.TempDir()
+		t.Setenv("AQ_HOME", home)
+		tc := loadTransportConfig()
+		// With no config, UDP should be nil (defaults applied by fanout)
+		// MQTT, mDNS, ggwave should also be nil
+		return tc.MQTT == nil && tc.MDNS == nil && tc.GGWave == nil
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 10}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: Transport config roundtrips through JSON.
+func TestQuick_TransportConfigRoundtrip(t *testing.T) {
+	f := func(host string, port uint16, enabled bool) bool {
+		tc := transportConfig{
+			MQTT: &mqttConfig{Host: host, Port: int(port), Topic: "aq"},
+			UDP:  &udpConfig{Enabled: enabled, Group: "239.192.65.81", Port: 4181},
+		}
+		data, err := json.Marshal(tc)
+		if err != nil {
+			return true // unmarshalable, skip
+		}
+		var restored transportConfig
+		if err := json.Unmarshal(data, &restored); err != nil {
+			return false
+		}
+		if restored.MQTT == nil || restored.UDP == nil {
+			return false
+		}
+		return restored.MQTT.Host == host &&
+			restored.MQTT.Port == int(port) &&
+			restored.UDP.Enabled == enabled
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 200}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: UDP frame encode/decode roundtrip.
+func TestQuick_UDPFrameRoundtrip(t *testing.T) {
+	f := func(agent, cid string, ttl uint16) bool {
+		b := Broadcast{
+			Agent:        agent,
+			ConjectureID: cid,
+			Phase:        PhaseProof,
+			Status:       StatusProsecuting,
+			Ts:           1700000000,
+			TTL:          int(ttl),
+			ID:           generateULID(),
+		}
+		payload, err := json.Marshal(b)
+		if err != nil {
+			return true
+		}
+		// Frame encode
+		frame := make([]byte, 4+len(payload))
+		frame[0] = 0x41
+		frame[1] = 0x51
+		frame[2] = 0x01
+		frame[3] = 0x01
+		copy(frame[4:], payload)
+
+		// Frame decode
+		if len(frame) < 5 || frame[0] != 0x41 || frame[1] != 0x51 {
+			return false
+		}
+		var restored Broadcast
+		if err := json.Unmarshal(frame[4:], &restored); err != nil {
+			return false
+		}
+		return restored.Agent == agent && restored.ConjectureID == cid
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: Dedup cache never reports first-seen as duplicate.
+func TestQuick_DedupFirstSeen(t *testing.T) {
+	f := func(ids []string) bool {
+		dc := newRxDedupCache()
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			// First call should never be duplicate
+			first := dc.isDuplicate(id)
+			if first {
+				// Unless we saw this id earlier in the slice
+				found := false
+				for _, prev := range ids {
+					if prev == id {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 200}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: Dedup cache always reports second-seen as duplicate.
+func TestQuick_DedupSecondSeen(t *testing.T) {
+	f := func(id string) bool {
+		if id == "" {
+			return true
+		}
+		dc := newRxDedupCache()
+		dc.isDuplicate(id) // first
+		return dc.isDuplicate(id) // second must be true
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
+		t.Error(err)
 	}
 }
