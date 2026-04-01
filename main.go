@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -1919,6 +1920,17 @@ func fanoutUDP(b Broadcast, cfg udpConfig) {
 		return
 	}
 	defer conn.Close()
+
+	// Enable SO_BROADCAST for subnet broadcast addresses (e.g. 192.168.86.255)
+	if cfg.Broadcast {
+		rawConn, err := conn.SyscallConn()
+		if err == nil {
+			rawConn.Control(func(fd uintptr) {
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+		}
+	}
+
 	if _, err := conn.Write(frame); err != nil {
 		fmt.Fprintf(os.Stderr, "fanout[udp]: write: %v\n", err)
 	}
