@@ -1340,7 +1340,7 @@ Creates the channel directories, agent registry, and logs.
 	configPath := filepath.Join(aqHome(), "config.json")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		config := map[string]interface{}{
-			"config_version":  1,
+			"config_version":  2,
 			"default_channel": DefaultChannel,
 			"default_ttl":     DefaultTTL,
 		}
@@ -1463,7 +1463,7 @@ Verifies AQ_HOME, channels, config, broadcasts, and tools.
 				fmt.Printf("FAIL  config     invalid JSON\n")
 				errs++
 			} else {
-				currentSchemaVersion := 1
+				currentSchemaVersion := 2
 				configVer, hasVer := raw["config_version"]
 				oldVer, hasOldVer := raw["version"]
 
@@ -1810,8 +1810,8 @@ func fanoutBroadcast(b Broadcast) {
 		go fanoutUDP(b, udpCfg)
 	}
 
-	// MQTT: publish via mosquitto_pub (requires config)
-	if tc.MQTT != nil && tc.MQTT.Host != "" {
+	// MQTT: publish via mosquitto_pub (requires config + enabled)
+	if tc.MQTT != nil && tc.MQTT.Enabled && tc.MQTT.Host != "" {
 		go fanoutMQTT(b, *tc.MQTT)
 	}
 
@@ -2365,9 +2365,10 @@ Options:
 
 // mqttConfig holds MQTT connection settings from config.json or env.
 type mqttConfig struct {
-	Host  string `json:"host"`
-	Port  int    `json:"port"`
-	Topic string `json:"topic"`
+	Enabled bool   `json:"enabled"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Topic   string `json:"topic"`
 }
 
 // loadMQTTConfig reads MQTT settings from config.json and env overrides.
