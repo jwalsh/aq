@@ -13,8 +13,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1140,12 +1142,19 @@ func cmdAnnounce(args []string) int {
 		return 1
 	}
 
+	// Fanout to all configured transports (best-effort, non-blocking).
+	fanoutBroadcast(b)
+
 	if jsonOutput {
 		j, _ := b.ToJSON()
 		fmt.Println(j)
 	} else {
 		fmt.Printf("announced: %s -> %s\n", b.ConjectureID, filepath.Base(path))
 	}
+
+	// Give async fanout goroutines a moment to complete.
+	time.Sleep(200 * time.Millisecond)
+
 	return 0
 }
 
@@ -1522,6 +1531,33 @@ Verifies AQ_HOME, channels, config, broadcasts, and tools.
 	sb := detectSandbox()
 	fmt.Printf("ok    agent      %s\n", sb.AgentAddress)
 
+	// Transport tools.
+	tc := loadTransportConfig()
+	transports := []struct {
+		name    string
+		tool    string
+		enabled bool
+	}{
+		{"udp", "", true}, // always on — zero deps, base case
+		{"mqtt", "mosquitto_pub", tc.MQTT != nil && tc.MQTT.Host != ""},
+		{"mdns", "avahi-publish-service", tc.MDNS != nil && tc.MDNS.Enabled},
+		{"ggwave", "python3", tc.GGWave != nil && tc.GGWave.Enabled},
+	}
+	for _, t := range transports {
+		if t.tool != "" {
+			if _, err := exec.LookPath(t.tool); err != nil {
+				fmt.Printf("warn  transport  %s (%s not found)\n", t.name, t.tool)
+				warns++
+				continue
+			}
+		}
+		if t.enabled {
+			fmt.Printf("ok    transport  %s (enabled)\n", t.name)
+		} else {
+			fmt.Printf("ok    transport  %s (available, not enabled)\n", t.name)
+		}
+	}
+
 	// Ecosystem tools: git is required, others optional.
 	for _, tool := range []string{"git", "sb", "cprr"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -1699,6 +1735,484 @@ Options:
 	if errs > 0 {
 		return 1
 	}
+	return 0
+}
+
+// ---------- Transport fanout ----------
+//
+// After writing to filesystem (canonical), fanout broadcasts best-effort
+// to all available transports. Failures are logged, never fatal.
+// Zero Go dependencies: shells out to CLI tools (mosquitto_pub, avahi-publish,
+// python3 ggwave, socat for UDP multicast).
+
+// transportConfig holds per-transport enable flags, loaded from config.json.
+type transportConfig struct {
+	MQTT    *mqttConfig    `json:"mqtt,omitempty"`
+	UDP     *udpConfig     `json:"udp,omitempty"`
+	MDNS    *mdnsConfig    `json:"mdns,omitempty"`
+	GGWave  *ggwaveConfig  `json:"ggwave,omitempty"`
+}
+
+type udpConfig struct {
+	Enabled bool   `json:"enabled"`
+	Group   string `json:"group"`
+	Port    int    `json:"port"`
+}
+
+type mdnsConfig struct {
+	Enabled     bool   `json:"enabled"`
+	ServiceType string `json:"service_type"`
+}
+
+type ggwaveConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Protocol int    `json:"protocol"` // ggwave protocol id (default: 1 = audible-fast)
+}
+
+// loadTransportConfig reads transport settings from config.json.
+func loadTransportConfig() transportConfig {
+	tc := transportConfig{}
+	configPath := filepath.Join(aqHome(), "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return tc
+	}
+	_ = json.Unmarshal(data, &tc)
+	return tc
+}
+
+// fanoutBroadcast sends a broadcast to all available transports, best-effort.
+// Filesystem write has already succeeded before this is called.
+// UDP multicast is always on (zero deps, stdlib only, the base case).
+// Other transports require explicit config in ~/.aq/config.json.
+func fanoutBroadcast(b Broadcast) {
+	tc := loadTransportConfig()
+
+	// UDP multicast: always on — zero deps, LAN gossip is the default.
+	// Config only needed to override group/port.
+	udpCfg := udpConfig{Enabled: true, Group: "239.192.65.81", Port: 4181}
+	if tc.UDP != nil {
+		if tc.UDP.Group != "" {
+			udpCfg.Group = tc.UDP.Group
+		}
+		if tc.UDP.Port != 0 {
+			udpCfg.Port = tc.UDP.Port
+		}
+	}
+	go fanoutUDP(b, udpCfg)
+
+	// MQTT: publish via mosquitto_pub (requires config)
+	if tc.MQTT != nil && tc.MQTT.Host != "" {
+		go fanoutMQTT(b, *tc.MQTT)
+	}
+
+	// mDNS: register via avahi-publish-service (requires config)
+	if tc.MDNS != nil && tc.MDNS.Enabled {
+		go fanoutMDNS(b, *tc.MDNS)
+	}
+
+	// ggwave: encode broadcast as audio via python3 (requires config)
+	if tc.GGWave != nil && tc.GGWave.Enabled {
+		go fanoutGGWave(b, *tc.GGWave)
+	}
+}
+
+// fanoutMQTT publishes a broadcast to the MQTT broker via mosquitto_pub.
+func fanoutMQTT(b Broadcast, cfg mqttConfig) {
+	if _, err := exec.LookPath("mosquitto_pub"); err != nil {
+		return
+	}
+	payload, err := b.ToJSON()
+	if err != nil {
+		return
+	}
+	topic := fmt.Sprintf("aq/%s/%s/presence", b.Worktree, b.ConjectureID)
+	cmd := exec.Command("mosquitto_pub",
+		"-h", cfg.Host,
+		"-p", fmt.Sprintf("%d", cfg.Port),
+		"-t", topic,
+		"-r", // retain: new subscribers see current state
+		"-m", payload,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "fanout[mqtt]: %v: %s\n", err, out)
+	}
+}
+
+// fanoutUDP sends a framed broadcast datagram to the UDP multicast group.
+// Wire format: [0x41 0x51 0x01 0x01] + JSON (matches contrib/udp-multicast).
+func fanoutUDP(b Broadcast, cfg udpConfig) {
+	payload, err := json.Marshal(b)
+	if err != nil {
+		return
+	}
+	// Frame header: "AQ" magic + version 1 + format JSON
+	frame := make([]byte, 4+len(payload))
+	frame[0] = 0x41 // 'A'
+	frame[1] = 0x51 // 'Q'
+	frame[2] = 0x01 // version
+	frame[3] = 0x01 // JSON format
+	copy(frame[4:], payload)
+
+	group := cfg.Group
+	if group == "" {
+		group = "239.192.65.81"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 4181
+	}
+
+	addr := fmt.Sprintf("%s:%d", group, port)
+	dest, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fanout[udp]: resolve %s: %v\n", addr, err)
+		return
+	}
+	conn, err := net.DialUDP("udp4", nil, dest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fanout[udp]: dial: %v\n", err)
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.Write(frame); err != nil {
+		fmt.Fprintf(os.Stderr, "fanout[udp]: write: %v\n", err)
+	}
+}
+
+// fanoutMDNS registers the broadcast as an mDNS service via avahi-publish-service.
+// The registration lives for TTL seconds then auto-expires.
+func fanoutMDNS(b Broadcast, cfg mdnsConfig) {
+	if _, err := exec.LookPath("avahi-publish-service"); err != nil {
+		return
+	}
+	svcType := cfg.ServiceType
+	if svcType == "" {
+		svcType = "_aq._tcp"
+	}
+	instanceName := fmt.Sprintf("aq-%s-%s", b.Agent, b.ConjectureID)
+	// avahi-publish-service exits after the TTL; we use a short timeout
+	cmd := exec.Command("avahi-publish-service",
+		"--no-fail",
+		instanceName,
+		svcType,
+		"4181", // port (nominal, aq doesn't listen)
+		fmt.Sprintf("conjecture=%s", b.ConjectureID),
+		fmt.Sprintf("phase=%s", string(b.Phase)),
+		fmt.Sprintf("status=%s", string(b.Status)),
+		fmt.Sprintf("claim=%s", b.ConjectureClaim),
+		fmt.Sprintf("agent=%s", b.Agent),
+		fmt.Sprintf("files=%s", strings.Join(b.Files, ",")),
+	)
+	// Run for 5 seconds then kill — enough for one mDNS announcement cycle
+	cmd.Start()
+	go func() {
+		time.Sleep(5 * time.Second)
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+	cmd.Wait()
+}
+
+// fanoutGGWave encodes a compact broadcast summary as audio via ggwave.
+// The payload is kept short (~80 bytes) to fit ggwave's practical limits.
+func fanoutGGWave(b Broadcast, cfg ggwaveConfig) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		return
+	}
+	// Compact payload: "aq:agent C-id [phase] files"
+	compact := fmt.Sprintf("aq:%s %s [%s]", b.Agent, b.ConjectureID, string(b.Phase))
+	if len(b.Files) > 0 {
+		compact += " " + strings.Join(b.Files, ",")
+	}
+	// Truncate to ~80 bytes for ggwave
+	if len(compact) > 80 {
+		compact = compact[:80]
+	}
+
+	protocol := cfg.Protocol
+	if protocol == 0 {
+		protocol = 1 // audible-fast
+	}
+
+	// Python script: encode to WAV via ggwave, play via aplay
+	pyScript := fmt.Sprintf(`
+import ggwave, struct, sys, subprocess, tempfile, os
+payload = %q
+waveform = ggwave.encode(payload, protocolId=%d, volume=50)
+samples = struct.unpack('%%dh' %% (len(waveform)//2), waveform)
+with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as f:
+    f.write(waveform)
+    tmp = f.name
+try:
+    subprocess.run(['aplay', '-f', 'S16_LE', '-r', '48000', '-c', '1', tmp],
+                   timeout=10, capture_output=True)
+finally:
+    os.unlink(tmp)
+`, compact, protocol)
+
+	cmd := exec.Command("python3", "-c", pyScript)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "fanout[ggwave]: %v: %s\n", err, out)
+	}
+}
+
+// ---------- RX: listen (materialization daemon) ----------
+//
+// aq listen subscribes to configured transports and materializes incoming
+// broadcasts to the filesystem. This closes the RX loop:
+//   TX: announce → disk → fanout(udp, mqtt, mdns, ggwave)
+//   RX: listen(udp, mqtt) → dedup → materialize to disk → aq check sees it
+
+// rxDedupCache tracks seen broadcast IDs to prevent double-materialization.
+type rxDedupCache struct {
+	seen map[string]time.Time
+}
+
+func newRxDedupCache() *rxDedupCache {
+	return &rxDedupCache{seen: make(map[string]time.Time)}
+}
+
+func (dc *rxDedupCache) isDuplicate(id string) bool {
+	// Prune entries older than 5 minutes
+	if len(dc.seen) > 512 {
+		cutoff := time.Now().Add(-5 * time.Minute)
+		for k, t := range dc.seen {
+			if t.Before(cutoff) {
+				delete(dc.seen, k)
+			}
+		}
+	}
+	if _, exists := dc.seen[id]; exists {
+		return true
+	}
+	dc.seen[id] = time.Now()
+	return false
+}
+
+// materializeBroadcast writes an incoming broadcast to the filesystem
+// so that aq status / aq check can see it.
+func materializeBroadcast(b Broadcast, channel string, via string) {
+	if err := ensureDirs(channel); err != nil {
+		fmt.Fprintf(os.Stderr, "listen[%s]: mkdir: %v\n", via, err)
+		return
+	}
+	// Check if already on disk (by ID)
+	entries, err := os.ReadDir(requestsPath(channel))
+	if err == nil {
+		for _, e := range entries {
+			if strings.Contains(e.Name(), b.ID) {
+				return // already materialized
+			}
+		}
+	}
+	if _, err := writeBroadcast(b, channel); err != nil {
+		fmt.Fprintf(os.Stderr, "listen[%s]: write: %v\n", via, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "listen[%s]: materialized %s from %s (%s)\n", via, b.ConjectureID, b.Agent, b.ID[:8])
+}
+
+// listenUDP joins the UDP multicast group and materializes incoming broadcasts.
+func listenUDP(cfg udpConfig, channel string, self string, dedup *rxDedupCache, stop <-chan struct{}) {
+	group := cfg.Group
+	if group == "" {
+		group = "239.192.65.81"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 4181
+	}
+
+	addr := fmt.Sprintf("%s:%d", group, port)
+	gaddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "listen[udp]: resolve %s: %v\n", addr, err)
+		return
+	}
+
+	conn, err := net.ListenMulticastUDP("udp4", nil, gaddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "listen[udp]: join %s: %v\n", addr, err)
+		return
+	}
+	defer conn.Close()
+	conn.SetReadBuffer(65536)
+
+	fmt.Fprintf(os.Stderr, "listen[udp]: joined %s\n", addr)
+
+	buf := make([]byte, 65536)
+	type result struct {
+		data []byte
+		err  error
+	}
+	results := make(chan result, 16)
+
+	go func() {
+		for {
+			n, _, readErr := conn.ReadFromUDP(buf)
+			if readErr != nil {
+				results <- result{err: readErr}
+				return
+			}
+			d := make([]byte, n)
+			copy(d, buf[:n])
+			results <- result{data: d}
+		}
+	}()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case r := <-results:
+			if r.err != nil {
+				fmt.Fprintf(os.Stderr, "listen[udp]: read: %v\n", r.err)
+				return
+			}
+			// Decode AQ frame header
+			if len(r.data) < 5 || r.data[0] != 0x41 || r.data[1] != 0x51 {
+				continue
+			}
+			var b Broadcast
+			if err := json.Unmarshal(r.data[4:], &b); err != nil {
+				continue
+			}
+			// Self-exclusion
+			if b.Agent == self {
+				continue
+			}
+			// TTL check
+			if b.IsExpired() {
+				continue
+			}
+			// Dedup
+			if dedup.isDuplicate(b.ID) {
+				continue
+			}
+			materializeBroadcast(b, channel, "udp")
+		}
+	}
+}
+
+// listenMQTT subscribes to aq topics via mosquitto_sub and materializes incoming broadcasts.
+func listenMQTT(cfg mqttConfig, channel string, self string, dedup *rxDedupCache, stop <-chan struct{}) {
+	if _, err := exec.LookPath("mosquitto_sub"); err != nil {
+		fmt.Fprintf(os.Stderr, "listen[mqtt]: mosquitto_sub not found, skipping\n")
+		return
+	}
+
+	topic := fmt.Sprintf("aq/+/+/presence")
+	cmd := exec.Command("mosquitto_sub",
+		"-h", cfg.Host,
+		"-p", fmt.Sprintf("%d", cfg.Port),
+		"-t", topic,
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "listen[mqtt]: pipe: %v\n", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "listen[mqtt]: start: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "listen[mqtt]: subscribed to %s on %s:%d\n", topic, cfg.Host, cfg.Port)
+
+	go func() {
+		<-stop
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+
+	scanner := make([]byte, 65536)
+	for {
+		n, readErr := stdout.Read(scanner)
+		if readErr != nil {
+			return
+		}
+		// mosquitto_sub outputs one JSON per line
+		for _, line := range strings.Split(string(scanner[:n]), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || line[0] != '{' {
+				continue
+			}
+			var b Broadcast
+			if err := json.Unmarshal([]byte(line), &b); err != nil {
+				continue
+			}
+			if b.Agent == self {
+				continue
+			}
+			if b.IsExpired() {
+				continue
+			}
+			if dedup.isDuplicate(b.ID) {
+				continue
+			}
+			materializeBroadcast(b, channel, "mqtt")
+		}
+	}
+}
+
+func cmdListen(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			fmt.Print(`aq listen — subscribe to transports, materialize incoming broadcasts
+
+Usage: aq listen [options]
+
+Joins configured transports (UDP multicast by default, MQTT if configured)
+and writes incoming broadcasts to ~/.aq/ so aq status/check can see them.
+
+RX closes the loop:
+  TX: announce → disk → fanout(udp, mqtt, mdns, ggwave)
+  RX: listen(udp, mqtt) → dedup → disk → aq check sees it
+
+Options:
+  --json       JSON output
+  -h, --help   Show this help
+`)
+			return 0
+		}
+	}
+
+	sb := detectSandbox()
+	tc := loadTransportConfig()
+	dedup := newRxDedupCache()
+	stop := make(chan struct{})
+
+	// Signal handling
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Fprintf(os.Stderr, "\nlisten: shutting down\n")
+		close(stop)
+	}()
+
+	fmt.Fprintf(os.Stderr, "listen: agent=%s channel=%s\n", sb.AgentAddress, channelName)
+
+	// Always start UDP (zero deps, base case)
+	udpCfg := udpConfig{Enabled: true, Group: "239.192.65.81", Port: 4181}
+	if tc.UDP != nil {
+		udpCfg = *tc.UDP
+	}
+	go listenUDP(udpCfg, channelName, sb.AgentAddress, dedup, stop)
+
+	// Start MQTT if configured
+	if tc.MQTT != nil && tc.MQTT.Host != "" {
+		go listenMQTT(*tc.MQTT, channelName, sb.AgentAddress, dedup, stop)
+	}
+
+	// Block until stop
+	<-stop
+	// Give goroutines a moment to clean up
+	time.Sleep(200 * time.Millisecond)
 	return 0
 }
 
@@ -1957,6 +2471,8 @@ func main() {
 		code = cmdQuickstart(args[1:])
 	case "validate":
 		code = cmdValidate(args[1:])
+	case "listen":
+		code = cmdListen(args[1:])
 	case "mqtt":
 		code = cmdMqtt(args[1:])
 	case "version", "--version", "-v":
@@ -1987,6 +2503,7 @@ Query:
 
 Operational:
   init               Create ~/.aq directory structure
+  listen             Subscribe to transports, materialize incoming (RX)
   doctor             Health check
   validate           Run invariant checks (advisory, never blocks)
   quickstart, prime  Agent-consumable context dump
@@ -2008,6 +2525,12 @@ MQTT:
   mqtt tail          Subscribe to aq topics (default)
   mqtt topics        Subscribe to all aq topics (wildcard)
   mqtt pub           Publish a heartbeat
+
+Transport fanout (configure in ~/.aq/config.json):
+  mqtt       mosquitto_pub to broker (QoS 0, retain)
+  udp        UDP multicast 239.192.65.81:4181 (LAN gossip)
+  mdns       avahi-publish-service _aq._tcp (DNS-SD)
+  ggwave     audio broadcast via speaker (just for fun)
 
 Gossip, not coordination. Broadcasts expire. Silence is normal.
 `)
