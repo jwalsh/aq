@@ -1844,20 +1844,50 @@ func fanoutMQTT(b Broadcast, cfg mqttConfig) {
 	}
 }
 
+// ---------- UDP frame codec ----------
+//
+// Wire format: 4-byte header + JSON payload.
+//   Bytes 0-1: Magic "AQ" (0x41 0x51)
+//   Byte  2:   Version (0x01)
+//   Byte  3:   Format  (0x01 = JSON)
+//   Byte  4+:  JSON-encoded Broadcast
+
+// encodeFrame wraps a JSON payload in the 4-byte AQ multicast frame header.
+func encodeFrame(jsonPayload []byte) []byte {
+	frame := make([]byte, 4+len(jsonPayload))
+	frame[0] = 0x41 // 'A'
+	frame[1] = 0x51 // 'Q'
+	frame[2] = 0x01 // version
+	frame[3] = 0x01 // JSON format
+	copy(frame[4:], jsonPayload)
+	return frame
+}
+
+// decodeFrame strips the 4-byte header and returns the JSON payload.
+// Returns nil, error for invalid/truncated/unknown frames.
+func decodeFrame(datagram []byte) ([]byte, error) {
+	if len(datagram) < 5 {
+		return nil, fmt.Errorf("frame too short: %d bytes", len(datagram))
+	}
+	if datagram[0] != 0x41 || datagram[1] != 0x51 {
+		return nil, fmt.Errorf("bad magic: %02x%02x", datagram[0], datagram[1])
+	}
+	if datagram[2] != 0x01 {
+		return nil, fmt.Errorf("unknown version: %d", datagram[2])
+	}
+	if datagram[3] != 0x01 {
+		return nil, fmt.Errorf("unknown format: %d", datagram[3])
+	}
+	return datagram[4:], nil
+}
+
 // fanoutUDP sends a framed broadcast datagram to the UDP multicast group.
-// Wire format: [0x41 0x51 0x01 0x01] + JSON (matches contrib/udp-multicast).
 func fanoutUDP(b Broadcast, cfg udpConfig) {
 	payload, err := json.Marshal(b)
 	if err != nil {
 		return
 	}
-	// Frame header: "AQ" magic + version 1 + format JSON
-	frame := make([]byte, 4+len(payload))
-	frame[0] = 0x41 // 'A'
-	frame[1] = 0x51 // 'Q'
-	frame[2] = 0x01 // version
-	frame[3] = 0x01 // JSON format
-	copy(frame[4:], payload)
+	frame := encodeFrame(payload)
 
 	group := cfg.Group
 	if group == "" {
@@ -2077,11 +2107,12 @@ func listenUDP(cfg udpConfig, channel string, self string, dedup *rxDedupCache, 
 				return
 			}
 			// Decode AQ frame header
-			if len(r.data) < 5 || r.data[0] != 0x41 || r.data[1] != 0x51 {
+			jsonPayload, err := decodeFrame(r.data)
+			if err != nil {
 				continue
 			}
 			var b Broadcast
-			if err := json.Unmarshal(r.data[4:], &b); err != nil {
+			if err := json.Unmarshal(jsonPayload, &b); err != nil {
 				continue
 			}
 			// Self-exclusion

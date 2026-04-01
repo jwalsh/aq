@@ -2048,26 +2048,42 @@ func computeSeverity(phaseA, phaseB string) Severity {
 }
 
 // Property 1: Broadcast JSON roundtrip is lossless.
+// Generator covers all fields including Phase, Status, Files, and Ts
+// (review finding: original hardcoded Phase/Status/Files/Ts).
 func TestQuick_BroadcastRoundtrip(t *testing.T) {
-	f := func(agent, worktree, cid, claim, id string, ttl uint16) bool {
+	phases := []Phase{PhaseConjecture, PhaseProof, PhaseRefutation, PhaseRefinement}
+	statuses := []Status{StatusProsecuting, StatusDone, StatusBlocked}
+	f := func(agent, worktree, cid, claim, id string, files []string,
+		phaseIdx, statusIdx uint8, ts float64, ttl uint16) bool {
+		// Filter NaN/Inf timestamps — ToJSON correctly errors on these
+		if ts != ts { // NaN check
+			return true
+		}
 		b := Broadcast{
 			Agent:           agent,
 			Worktree:        worktree,
 			ConjectureID:    cid,
 			ConjectureClaim: claim,
-			Phase:           PhaseProof,
-			Status:          StatusProsecuting,
-			Files:           []string{"main.go"},
-			Ts:              1700000000,
+			Phase:           phases[int(phaseIdx)%len(phases)],
+			Status:          statuses[int(statusIdx)%len(statuses)],
+			Files:           files,
+			Ts:              ts,
 			TTL:             int(ttl),
 			ID:              id,
 		}
 		j, err := b.ToJSON()
 		if err != nil {
-			return true // NaN/Inf would cause this; skip
+			// NaN/Inf in Ts causes marshal error — this is correct behavior
+			return true
 		}
 		restored, err := BroadcastFromJSON(j)
 		if err != nil {
+			return false
+		}
+		// Nil vs empty slice: JSON roundtrip normalizes nil → null → nil
+		if len(b.Files) == 0 && len(restored.Files) == 0 {
+			// both empty, ok
+		} else if len(b.Files) != len(restored.Files) {
 			return false
 		}
 		return b.Agent == restored.Agent &&
@@ -2077,8 +2093,7 @@ func TestQuick_BroadcastRoundtrip(t *testing.T) {
 			b.Phase == restored.Phase &&
 			b.Status == restored.Status &&
 			b.TTL == restored.TTL &&
-			b.ID == restored.ID &&
-			len(b.Files) == len(restored.Files)
+			b.ID == restored.ID
 	}
 	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
 		t.Error(err)
@@ -2258,17 +2273,102 @@ func TestQuick_FileListCommutativity(t *testing.T) {
 
 // ---------- Transport config PBT ----------
 
-// Property: UDP config defaults are sane when no config exists.
-func TestQuick_UDPDefaultConfig(t *testing.T) {
-	f := func(dummy uint8) bool {
+// Unit test: UDP config defaults are sane when no config exists.
+// (Review fix: was fake PBT with unused dummy parameter.)
+func TestUDPDefaultConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AQ_HOME", home)
+	tc := loadTransportConfig()
+	if tc.MQTT != nil {
+		t.Error("MQTT should be nil with no config")
+	}
+	if tc.UDP != nil {
+		t.Error("UDP should be nil with no config (defaults applied by fanout)")
+	}
+	if tc.MDNS != nil {
+		t.Error("MDNS should be nil with no config")
+	}
+	if tc.GGWave != nil {
+		t.Error("GGWave should be nil with no config")
+	}
+}
+
+// Property 6: ULID ordering — ULIDs generated later have greater timestamp prefix.
+func TestQuick_ULIDOrdering(t *testing.T) {
+	f := func(delayMs uint8) bool {
+		delay := time.Duration(delayMs+1) * time.Millisecond
+		id1 := generateULID()
+		time.Sleep(delay)
+		id2 := generateULID()
+		// Timestamp portion (first 12 hex chars) should be monotonically ordered
+		return id1[:12] <= id2[:12]
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 20}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property 7: Prune-on-read idempotency — two successive readActive calls return same set.
+func TestQuick_PruneIdempotency(t *testing.T) {
+	f := func(n uint8) bool {
+		count := int(n)%10 + 1
 		home := t.TempDir()
 		t.Setenv("AQ_HOME", home)
-		tc := loadTransportConfig()
-		// With no config, UDP should be nil (defaults applied by fanout)
-		// MQTT, mDNS, ggwave should also be nil
-		return tc.MQTT == nil && tc.MDNS == nil && tc.GGWave == nil
+
+		// Write N non-expired broadcasts
+		for i := 0; i < count; i++ {
+			b := NewBroadcast()
+			b.Agent = fmt.Sprintf("agent-%d", i)
+			b.ConjectureID = fmt.Sprintf("C-%d", i)
+			b.Phase = PhaseProof
+			b.Status = StatusProsecuting
+			writeBroadcast(b, "broadcast")
+		}
+
+		active1, err1 := readActive("broadcast")
+		active2, err2 := readActive("broadcast")
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		return len(active1) == len(active2)
 	}
-	if err := quick.Check(f, &quick.Config{MaxCount: 10}); err != nil {
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: materializeBroadcast is idempotent — calling twice produces exactly one file.
+func TestQuick_MaterializeIdempotent(t *testing.T) {
+	f := func(agent, cid string) bool {
+		if agent == "" || cid == "" {
+			return true
+		}
+		home := t.TempDir()
+		t.Setenv("AQ_HOME", home)
+
+		b := NewBroadcast()
+		b.Agent = agent
+		b.ConjectureID = cid
+		b.Phase = PhaseProof
+		b.Status = StatusProsecuting
+
+		materializeBroadcast(b, "broadcast", "test")
+		materializeBroadcast(b, "broadcast", "test") // second call
+
+		entries, err := os.ReadDir(requestsPath("broadcast"))
+		if err != nil {
+			return false
+		}
+		// Should have exactly one file for this broadcast
+		count := 0
+		for _, e := range entries {
+			if strings.Contains(e.Name(), b.ID) {
+				count++
+			}
+		}
+		return count == 1
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 30}); err != nil {
 		t.Error(err)
 	}
 }
@@ -2300,7 +2400,8 @@ func TestQuick_TransportConfigRoundtrip(t *testing.T) {
 	}
 }
 
-// Property: UDP frame encode/decode roundtrip.
+// Property: UDP frame encode/decode roundtrip via extracted encodeFrame/decodeFrame.
+// (Review fix: original hardcoded frame header independently of main.go.)
 func TestQuick_UDPFrameRoundtrip(t *testing.T) {
 	f := func(agent, cid string, ttl uint16) bool {
 		b := Broadcast{
@@ -2316,20 +2417,13 @@ func TestQuick_UDPFrameRoundtrip(t *testing.T) {
 		if err != nil {
 			return true
 		}
-		// Frame encode
-		frame := make([]byte, 4+len(payload))
-		frame[0] = 0x41
-		frame[1] = 0x51
-		frame[2] = 0x01
-		frame[3] = 0x01
-		copy(frame[4:], payload)
-
-		// Frame decode
-		if len(frame) < 5 || frame[0] != 0x41 || frame[1] != 0x51 {
+		frame := encodeFrame(payload)
+		decoded, err := decodeFrame(frame)
+		if err != nil {
 			return false
 		}
 		var restored Broadcast
-		if err := json.Unmarshal(frame[4:], &restored); err != nil {
+		if err := json.Unmarshal(decoded, &restored); err != nil {
 			return false
 		}
 		return restored.Agent == agent && restored.ConjectureID == cid
@@ -2339,33 +2433,57 @@ func TestQuick_UDPFrameRoundtrip(t *testing.T) {
 	}
 }
 
-// Property: Dedup cache never reports first-seen as duplicate.
+// Property: decodeFrame rejects truncated/corrupt datagrams without panic.
+func TestQuick_FrameCorruptNoPanic(t *testing.T) {
+	f := func(data []byte) bool {
+		// Must never panic — always returns payload or error
+		_, err := decodeFrame(data)
+		if len(data) < 5 {
+			return err != nil // must reject short frames
+		}
+		if data[0] != 0x41 || data[1] != 0x51 {
+			return err != nil // must reject bad magic
+		}
+		if data[2] != 0x01 {
+			return err != nil // must reject unknown version
+		}
+		if data[3] != 0x01 {
+			return err != nil // must reject unknown format
+		}
+		return err == nil // valid header
+	}
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Error(err)
+	}
+}
+
+// Property: Dedup cache returns false on first-seen, true on second-seen.
+// (Review fix: original had a self-matching loop bug making it vacuous.)
 func TestQuick_DedupFirstSeen(t *testing.T) {
 	f := func(ids []string) bool {
 		dc := newRxDedupCache()
+		seen := make(map[string]bool) // track what we've already passed to isDuplicate
 		for _, id := range ids {
 			if id == "" {
 				continue
 			}
-			// First call should never be duplicate
-			first := dc.isDuplicate(id)
-			if first {
-				// Unless we saw this id earlier in the slice
-				found := false
-				for _, prev := range ids {
-					if prev == id {
-						found = true
-						break
-					}
+			result := dc.isDuplicate(id)
+			if seen[id] {
+				// We've called isDuplicate(id) before — must return true
+				if !result {
+					return false
 				}
-				if !found {
+			} else {
+				// First time — must return false
+				if result {
 					return false
 				}
 			}
+			seen[id] = true
 		}
 		return true
 	}
-	if err := quick.Check(f, &quick.Config{MaxCount: 200}); err != nil {
+	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
 		t.Error(err)
 	}
 }
