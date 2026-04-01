@@ -1477,6 +1477,16 @@ Verifies AQ_HOME, channels, config, broadcasts, and tools.
 					} else if v, ok := configVer.(float64); ok && int(v) < currentSchemaVersion {
 						fmt.Printf("warn  config     v%d (outdated, run: aq doctor --migrate)\n", int(v))
 						warns++
+						if shouldMigrate {
+							raw["config_version"] = currentSchemaVersion
+							migrated, _ := json.MarshalIndent(raw, "", "  ")
+							if err := os.WriteFile(configPath, migrated, 0o644); err != nil {
+								fmt.Printf("FAIL  migrate    write failed: %v\n", err)
+								errs++
+							} else {
+								fmt.Printf("ok    migrate    config_version set to %d\n", currentSchemaVersion)
+							}
+						}
 					} else {
 						fmt.Printf("warn  config     config_version not an integer\n")
 						warns++
