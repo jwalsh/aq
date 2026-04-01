@@ -1538,7 +1538,7 @@ Verifies AQ_HOME, channels, config, broadcasts, and tools.
 		tool    string
 		enabled bool
 	}{
-		{"udp", "", true}, // always on — zero deps, base case
+		{"udp", "", tc.UDP == nil || tc.UDP.Enabled}, // on by default, disable with enabled:false
 		{"mqtt", "mosquitto_pub", tc.MQTT != nil && tc.MQTT.Host != ""},
 		{"mdns", "avahi-publish-service", tc.MDNS != nil && tc.MDNS.Enabled},
 		{"ggwave", "python3", tc.GGWave != nil && tc.GGWave.Enabled},
@@ -1788,10 +1788,13 @@ func loadTransportConfig() transportConfig {
 func fanoutBroadcast(b Broadcast) {
 	tc := loadTransportConfig()
 
-	// UDP multicast: always on — zero deps, LAN gossip is the default.
-	// Config only needed to override group/port.
+	// UDP multicast: on by default — zero deps, LAN gossip is the base case.
+	// Disable with {"udp":{"enabled":false}} in config.json.
 	udpCfg := udpConfig{Enabled: true, Group: "239.192.65.81", Port: 4181}
 	if tc.UDP != nil {
+		if !tc.UDP.Enabled {
+			udpCfg.Enabled = false
+		}
 		if tc.UDP.Group != "" {
 			udpCfg.Group = tc.UDP.Group
 		}
@@ -1799,7 +1802,9 @@ func fanoutBroadcast(b Broadcast) {
 			udpCfg.Port = tc.UDP.Port
 		}
 	}
-	go fanoutUDP(b, udpCfg)
+	if udpCfg.Enabled {
+		go fanoutUDP(b, udpCfg)
+	}
 
 	// MQTT: publish via mosquitto_pub (requires config)
 	if tc.MQTT != nil && tc.MQTT.Host != "" {
@@ -2197,12 +2202,22 @@ Options:
 
 	fmt.Fprintf(os.Stderr, "listen: agent=%s channel=%s\n", sb.AgentAddress, channelName)
 
-	// Always start UDP (zero deps, base case)
+	// UDP on by default; disable with {"udp":{"enabled":false}} in config.json
 	udpCfg := udpConfig{Enabled: true, Group: "239.192.65.81", Port: 4181}
 	if tc.UDP != nil {
-		udpCfg = *tc.UDP
+		if !tc.UDP.Enabled {
+			udpCfg.Enabled = false
+		}
+		if tc.UDP.Group != "" {
+			udpCfg.Group = tc.UDP.Group
+		}
+		if tc.UDP.Port != 0 {
+			udpCfg.Port = tc.UDP.Port
+		}
 	}
-	go listenUDP(udpCfg, channelName, sb.AgentAddress, dedup, stop)
+	if udpCfg.Enabled {
+		go listenUDP(udpCfg, channelName, sb.AgentAddress, dedup, stop)
+	}
 
 	// Start MQTT if configured
 	if tc.MQTT != nil && tc.MQTT.Host != "" {
