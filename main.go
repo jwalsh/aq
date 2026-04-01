@@ -1133,6 +1133,11 @@ func cmdAnnounce(args []string) int {
 
 	b := buildAnnounceBroadcast(p)
 
+	if !b.Phase.Valid() {
+		fmt.Fprintf(os.Stderr, "error: invalid phase %q (must be conjecture|proof|refutation|refinement)\n", p.phase)
+		return 1
+	}
+
 	if p.validate {
 		runPreFlightValidation(b)
 	}
@@ -1179,6 +1184,7 @@ func cmdWhisper(args []string) int {
 type checkParams struct {
 	conjecture string
 	files      string
+	claim      string
 	phase      string
 	showHelp   bool
 }
@@ -1194,6 +1200,8 @@ func parseCheckArgs(args []string) checkParams {
 			p.conjecture = consumeArg(args, &i, p.conjecture)
 		case "-f", "--files":
 			p.files = consumeArg(args, &i, p.files)
+		case "--claim":
+			p.claim = consumeArg(args, &i, p.claim)
 		case "--phase":
 			p.phase = consumeArg(args, &i, p.phase)
 		case "-h", "--help":
@@ -1209,11 +1217,16 @@ func buildCheckBroadcast(p checkParams) Broadcast {
 	if conjecture == "" {
 		conjecture = "C-?"
 	}
+	claim := p.claim
+	if claim == "" {
+		claim = "checking " + conjecture
+	}
 	sb := detectSandbox()
 	me := NewBroadcast()
 	me.Agent = sb.AgentAddress
 	me.Worktree = sb.Branch
 	me.ConjectureID = conjecture
+	me.ConjectureClaim = claim
 	me.Phase = Phase(p.phase)
 	me.Status = StatusProsecuting
 	me.Files = parseFileList(p.files)
@@ -1260,6 +1273,7 @@ Usage: aq check [options]
 Options:
   -c, --conjecture <id>    Conjecture ID (default: C-?)
   -f, --files <list>       Comma-separated file list
+  --claim <text>           Human-readable claim
   --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
   -h, --help               Show this help
 `)
@@ -1267,6 +1281,11 @@ Options:
 	}
 
 	me := buildCheckBroadcast(p)
+
+	if !me.Phase.Valid() {
+		fmt.Fprintf(os.Stderr, "error: invalid phase %q (must be conjecture|proof|refutation|refinement)\n", p.phase)
+		return 1
+	}
 
 	signals, err := checkConflicts(me, channelName)
 	if err != nil {
