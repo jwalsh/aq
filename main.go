@@ -1922,7 +1922,7 @@ func fanoutUDP(b Broadcast, cfg udpConfig) {
 	defer conn.Close()
 
 	// Enable SO_BROADCAST for subnet broadcast addresses (e.g. 192.168.86.255)
-	if cfg.Broadcast {
+	if cfg.Broadcast || isBroadcastAddr(group) {
 		rawConn, err := conn.SyscallConn()
 		if err == nil {
 			rawConn.Control(func(fd uintptr) {
@@ -2111,6 +2111,20 @@ func materializeBroadcast(b Broadcast, channel string, via string) {
 
 // listenUDP listens for UDP broadcasts or joins a multicast group,
 // then materializes incoming broadcasts to the filesystem.
+// isBroadcastAddr returns true if the address is a subnet broadcast (e.g. 192.168.86.255)
+// or the limited broadcast address (255.255.255.255).
+func isBroadcastAddr(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[3] == 255
+}
+
 func listenUDP(cfg udpConfig, channel string, self string, dedup *rxDedupCache, stop <-chan struct{}) {
 	group := cfg.Group
 	if group == "" {
@@ -2120,13 +2134,15 @@ func listenUDP(cfg udpConfig, channel string, self string, dedup *rxDedupCache, 
 			group = "239.192.65.81"
 		}
 	}
+	// Auto-detect broadcast mode from address
+	broadcast := cfg.Broadcast || isBroadcastAddr(group)
 	port := cfg.Port
 	if port == 0 {
 		port = 4181
 	}
 
 	var conn *net.UDPConn
-	if cfg.Broadcast {
+	if broadcast {
 		// Subnet broadcast: listen on 0.0.0.0:port for broadcast packets.
 		listenAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
 		if err != nil {
