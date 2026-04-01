@@ -1959,16 +1959,41 @@ func fanoutMDNS(b Broadcast, cfg mdnsConfig) {
 	cmd.Wait()
 }
 
-// fanoutGGWave encodes a compact broadcast summary as audio via ggwave.
-// The payload is kept short (~80 bytes) to fit ggwave's practical limits.
+// fanoutGGWave encodes a compact broadcast as audio via ggwave.
+// Uses uv run for dependency isolation (no system pip install needed).
+// Falls back to python3 if uv is not available.
 func fanoutGGWave(b Broadcast, cfg ggwaveConfig) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		return
+	// Compact v3.1 wire format: "aq1:who:repo:conj:ps:files:claim"
+	// Extract short agent name (last path component, first 2 chars)
+	who := b.Agent
+	if parts := strings.Split(b.Agent, "/"); len(parts) >= 2 {
+		who = parts[len(parts)-2] // repo owner
+		if len(who) > 2 {
+			who = who[:2]
+		}
 	}
-	// Compact payload: "aq:agent C-id [phase] files"
-	compact := fmt.Sprintf("aq:%s %s [%s]", b.Agent, b.ConjectureID, string(b.Phase))
+	repo := "aq"
+	if parts := strings.Split(b.Agent, "/"); len(parts) >= 1 {
+		repo = parts[len(parts)-1]
+		if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+			repo = repo[idx+1:]
+		}
+	}
+	conjNum := strings.TrimPrefix(b.ConjectureID, "C-")
+	phase := string(b.Phase[:1])
+	status := "w"
+	if b.Status == StatusDone {
+		status = "d"
+	} else if b.Status == "blocked" {
+		status = "b"
+	}
+	files := "-"
 	if len(b.Files) > 0 {
-		compact += " " + strings.Join(b.Files, ",")
+		files = strings.Join(b.Files, ",")
+	}
+	compact := fmt.Sprintf("aq1:%s:%s:%s:%s%s:%s", who, repo, conjNum, phase, status, files)
+	if b.ConjectureClaim != "" {
+		compact += ":" + b.ConjectureClaim
 	}
 	// Truncate to ~80 bytes for ggwave
 	if len(compact) > 80 {
@@ -1980,23 +2005,37 @@ func fanoutGGWave(b Broadcast, cfg ggwaveConfig) {
 		protocol = 1 // audible-fast
 	}
 
-	// Python script: encode to WAV via ggwave, play via aplay
+	// Python script: encode to WAV, play via afplay (macOS) or aplay (Linux)
 	pyScript := fmt.Sprintf(`
-import ggwave, struct, sys, subprocess, tempfile, os
+import ggwave, wave, subprocess, tempfile, os, sys, struct as st
 payload = %q
 waveform = ggwave.encode(payload, protocolId=%d, volume=50)
-samples = struct.unpack('%%dh' %% (len(waveform)//2), waveform)
-with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as f:
-    f.write(waveform)
+with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
     tmp = f.name
+    w = wave.open(f, 'wb')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(48000)
+    w.writeframes(waveform)
+    w.close()
 try:
-    subprocess.run(['aplay', '-f', 'S16_LE', '-r', '48000', '-c', '1', tmp],
-                   timeout=10, capture_output=True)
+    if sys.platform == 'darwin':
+        subprocess.run(['afplay', tmp], timeout=20, capture_output=True)
+    else:
+        subprocess.run(['aplay', tmp], timeout=20, capture_output=True)
 finally:
     os.unlink(tmp)
 `, compact, protocol)
 
-	cmd := exec.Command("python3", "-c", pyScript)
+	// Prefer uv run (handles ggwave dep automatically), fall back to python3
+	var cmd *exec.Cmd
+	if uvPath, err := exec.LookPath("uv"); err == nil {
+		cmd = exec.Command(uvPath, "run", "--with", "ggwave", "python3", "-c", pyScript)
+	} else if pyPath, err := exec.LookPath("python3"); err == nil {
+		cmd = exec.Command(pyPath, "-c", pyScript)
+	} else {
+		return // no python available
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "fanout[ggwave]: %v: %s\n", err, out)
 	}
