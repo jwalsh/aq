@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,8 +28,48 @@ jobs:
             exit 1
           fi
 
-      - name: Run tests
-        run: go test ./... -race -count=1
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Build
-        run: go build
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Unit tests
+        run: go test -count=1 -race ./...
+
+      - name: PBT tests (extended)
+        run: go test -count=1 -run TestQuick_ -v ./...
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build (linux/amd64)
+        run: GOOS=linux GOARCH=amd64 go build -o aq-linux-amd64 .
+
+      - name: Build (linux/arm64)
+        run: GOOS=linux GOARCH=arm64 go build -o aq-linux-arm64 .
+
+      - name: Build (darwin/arm64)
+        run: GOOS=darwin GOARCH=arm64 go build -o aq-darwin-arm64 .
+
+      - name: Build (freebsd/amd64)
+        run: GOOS=freebsd GOARCH=amd64 go build -o aq-freebsd-amd64 .
+
+      - name: Smoke test
+        run: |
+          ./aq-linux-amd64 version
+          ./aq-linux-amd64 init
+          ./aq-linux-amd64 announce -c C-1 --claim "CI smoke test" --phase proof -f "main.go"
+          ./aq-linux-amd64 status
+          ./aq-linux-amd64 check -c C-2 -f "main.go"
+          ./aq-linux-amd64 validate

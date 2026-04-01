@@ -1747,10 +1747,10 @@ Options:
 
 // transportConfig holds per-transport enable flags, loaded from config.json.
 type transportConfig struct {
-	MQTT    *mqttConfig    `json:"mqtt,omitempty"`
-	UDP     *udpConfig     `json:"udp,omitempty"`
-	MDNS    *mdnsConfig    `json:"mdns,omitempty"`
-	GGWave  *ggwaveConfig  `json:"ggwave,omitempty"`
+	MQTT   *mqttConfig   `json:"mqtt,omitempty"`
+	UDP    *udpConfig    `json:"udp,omitempty"`
+	MDNS   *mdnsConfig   `json:"mdns,omitempty"`
+	GGWave *ggwaveConfig `json:"ggwave,omitempty"`
 }
 
 type udpConfig struct {
@@ -1765,8 +1765,8 @@ type mdnsConfig struct {
 }
 
 type ggwaveConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Protocol int    `json:"protocol"` // ggwave protocol id (default: 1 = audible-fast)
+	Enabled  bool `json:"enabled"`
+	Protocol int  `json:"protocol"` // ggwave protocol id (default: 1 = audible-fast)
 }
 
 // loadTransportConfig reads transport settings from config.json.

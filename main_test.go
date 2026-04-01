@@ -2495,7 +2495,7 @@ func TestQuick_DedupSecondSeen(t *testing.T) {
 			return true
 		}
 		dc := newRxDedupCache()
-		dc.isDuplicate(id) // first
+		dc.isDuplicate(id)        // first
 		return dc.isDuplicate(id) // second must be true
 	}
 	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
