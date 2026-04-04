@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -109,6 +110,8 @@ const (
 //  3. announce(status="done") when finished
 type Broadcast struct {
 	Agent           string   `json:"agent"`
+	Host            string   `json:"host,omitempty"`
+	User            string   `json:"user,omitempty"`
 	Worktree        string   `json:"worktree"`
 	ConjectureID    string   `json:"conjecture_id"`
 	ConjectureClaim string   `json:"conjecture_claim"`
@@ -127,6 +130,26 @@ func NewBroadcast() Broadcast {
 		TTL: DefaultTTL,
 		ID:  generateULID(),
 	}
+}
+
+// getHostname returns the short hostname for LAN gossip identification.
+func getHostname() string {
+	if h, err := os.Hostname(); err == nil {
+		// Return short hostname (before first dot)
+		if idx := strings.Index(h, "."); idx > 0 {
+			return h[:idx]
+		}
+		return h
+	}
+	return "unknown"
+}
+
+// getUsername returns the current user for LAN gossip identification.
+func getUsername() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return "unknown"
 }
 
 // IsExpired returns true if the broadcast has outlived its TTL.
@@ -1075,6 +1098,8 @@ func buildAnnounceBroadcast(p announceParams) Broadcast {
 	}
 	b := NewBroadcast()
 	b.Agent = sb.AgentAddress
+	b.Host = getHostname()
+	b.User = getUsername()
 	b.Worktree = sb.Branch
 	b.ConjectureID = p.conjecture
 	b.ConjectureClaim = claim
@@ -1726,6 +1751,8 @@ Options:
 		}
 		b := NewBroadcast()
 		b.Agent = sb.AgentAddress
+		b.Host = getHostname()
+		b.User = getUsername()
 		b.Worktree = sb.Branch
 		b.Phase = PhaseProof
 		results = runSelfChecks(b)

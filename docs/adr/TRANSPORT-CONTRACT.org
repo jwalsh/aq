@@ -7,11 +7,11 @@
 
 | Component        | Version | Description                            |
 |------------------+---------+----------------------------------------|
-| aq binary        | v0.5.1  | Go CLI, single-file (main.go)          |
+| aq binary        | v0.5.2  | Go CLI, single-file (main.go)          |
 | config schema    | 2       | =config_version: 2= in config.json    |
 | UDP wire format  | 1.1     | Header: =AQ 0x01 0x01= (version 1, JSON format 1) |
 | compact format   | 3.1     | =aq1:who:repo:conj:ps:files:claim= (80B max) |
-| broadcast payload| 1       | JSON schema with 10 fields (see §2)   |
+| broadcast payload| 1.1     | JSON schema with 10+2 optional fields (see §2) |
 | MQTT topic schema| 1       | =aq/{worktree}/{conjecture_id}/presence= |
 | mDNS service     | 1       | =_aq._tcp= with TXT records           |
 
@@ -145,6 +145,8 @@ The canonical payload. Every transport carries this exact JSON structure.
 | Field             | Type       | Required | Example                     |
 |-------------------+------------+----------+-----------------------------|
 | =agent=           | string     | yes      | ="github.com/jwalsh/aq/main"= |
+| =host=            | string     | no       | ="hydra"= (v1.1)            |
+| =user=            | string     | no       | ="jwalsh"= (v1.1)           |
 | =worktree=        | string     | yes      | ="main"=                    |
 | =conjecture_id=   | string     | yes      | ="C-1"=                     |
 | =conjecture_claim= | string    | yes      | ="refactoring auth flow"=   |
@@ -154,6 +156,10 @@ The canonical payload. Every transport carries this exact JSON structure.
 | =ts=              | float64    | yes      | =1775306193=                |
 | =ttl=             | int        | yes      | =3600=                      |
 | =id=              | string     | yes      | ="019d587ebc3a91f108722f"=  |
+
+=host= and =user= (v1.1) disambiguate same-repo work across LAN machines:
+- =jwalsh@hydra= vs =jwalsh@nexus= both working on =aq/main=
+- Omitted by older clients; receivers must tolerate missing fields.
 
 Enums:
 - =phase=: =conjecture= | =proof= | =refutation= | =refinement=
