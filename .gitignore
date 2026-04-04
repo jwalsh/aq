@@ -45,3 +45,5 @@ spec/*_TTrace_*.tla
 # PID/lock files
 *.pid.lock
 .claude/settings.local.json
+__pycache__/
+.hypothesis/
