@@ -42,8 +42,16 @@ worktrees/
 spec/*_TTrace_*.bin
 spec/*_TTrace_*.tla
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.hypothesis/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
 # PID/lock files
 *.pid.lock
 .claude/settings.local.json
-__pycache__/
-.hypothesis/

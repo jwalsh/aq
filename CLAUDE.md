@@ -16,6 +16,22 @@ the merge wall. No orchestrator, no broker, no authority. Just gossip.
 Do not make `aq` authoritative, do not make it a retrieval system, do not
 make it coordinate. It broadcasts. That's it.
 
+## Git Hygiene — MANDATORY
+
+1. **Never `git add` a directory.** Always add specific files by name or
+   glob (`git add src/aq/*.py`). Directories sweep in bytecode, caches,
+   and secrets. This rule exists because `git add src/` once committed
+   `__pycache__/*.pyc` to a public repo.
+
+2. **Never commit site-specific network info.** No hardcoded IPs
+   (`192.168.x.x`), hostnames (`nexus.lan`), ports, credentials, or
+   API keys in committed files. All transport config must be read from
+   `~/.aq/config.json` at runtime with generic defaults (`localhost`).
+   Comments referencing specific hosts are also a leak.
+
+3. **Audit before push.** After staging, grep the diff for patterns:
+   `192\.168|\.lan|password|secret|token|api.key|__pycache__`
+
 ## Session Protocol — USE THE TOOL
 
 aq is installed. Use it. Every session, no exceptions:
