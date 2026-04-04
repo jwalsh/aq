@@ -1,0 +1,446 @@
+#+TITLE: ADR: Transport Protocol Contract
+#+DATE: 2026-04-04
+#+STATUS: Accepted
+#+AUTHOR: jwalsh
+
+* Version Summary
+
+| Component        | Version | Description                            |
+|------------------+---------+----------------------------------------|
+| aq binary        | v0.5.1  | Go CLI, single-file (main.go)          |
+| config schema    | 2       | =config_version: 2= in config.json    |
+| UDP wire format  | 1.1     | Header: =AQ 0x01 0x01= (version 1, JSON format 1) |
+| compact format   | 3.1     | =aq1:who:repo:conj:ps:files:claim= (80B max) |
+| broadcast payload| 1       | JSON schema with 10 fields (see §2)   |
+| MQTT topic schema| 1       | =aq/{worktree}/{conjecture_id}/presence= |
+| mDNS service     | 1       | =_aq._tcp= with TXT records           |
+
+Any change to wire format or payload schema requires bumping the
+relevant version number. Receivers must silently drop unknown versions.
+
+* Purpose
+
+This document is the contract for any future agent work on aq transports.
+It defines the protocol, config schema, wire format, and division of
+responsibilities between TX (fanout) and RX (listen) paths. If something
+is not in this document, it is not part of the contract.
+
+* 1. Config Schema (~/.aq/config.json)
+
+** 1.1 Top-level fields
+
+| Field              | Type   | Required | Default       | Description                          |
+|--------------------+--------+----------+---------------+--------------------------------------|
+| =config_version=   | int    | yes      | 2             | Schema version. Must be 2.           |
+| =default_channel=  | string | no       | ="broadcast"= | Channel name for filesystem storage  |
+| =default_ttl=      | int    | no       | =3600=        | Seconds. Must be >= 3600 for v2.     |
+
+** 1.2 Transport sections
+
+Each transport is an optional JSON object keyed by transport name.
+Omitting a section entirely uses the transport's defaults.
+Every transport section has an =enabled= boolean.
+
+*** =udp= — UDP multicast/broadcast (zero deps, stdlib only)
+
+| Field       | Type   | Default             | Description                              |
+|-------------+--------+---------------------+------------------------------------------|
+| =enabled=   | bool   | =true=              | *On by default.* Only transport that is. |
+| =group=     | string | ="239.192.65.81"=   | Multicast group or broadcast address     |
+| =port=      | int    | =4181=              | UDP port                                 |
+| =broadcast= | bool   | =false=             | Use subnet broadcast instead of multicast |
+
+When =broadcast= is =true= or =group= ends in =.255=, the sender sets
+=SO_BROADCAST= and the listener binds =0.0.0.0:port= instead of joining
+a multicast group.
+
+When =broadcast= is =false= (default), the sender writes to the multicast
+group and the listener joins it via =ListenMulticastUDP=.
+
+*** =mqtt= — MQTT broker via mosquitto_pub/sub (requires external binary)
+
+| Field     | Type   | Default       | Description               |
+|-----------+--------+---------------+---------------------------|
+| =enabled= | bool   | =false=       | Must be explicitly enabled |
+| =host=    | string | ="localhost"= | Broker hostname            |
+| =port=    | int    | =1883=        | Broker port                |
+| =topic=   | string | ="aq"=        | Topic prefix               |
+
+TX topic pattern: =aq/{worktree}/{conjecture_id}/presence=
+RX subscribe pattern: =aq/+/+/presence=
+QoS: 0, Retain: true.
+
+Requires =mosquitto_pub= (TX) and =mosquitto_sub= (RX) on PATH.
+If binary not found, transport is silently skipped.
+
+*** =mdns= — DNS-SD via avahi (requires external binary)
+
+| Field          | Type   | Default        | Description      |
+|----------------+--------+----------------+------------------|
+| =enabled=      | bool   | =false=        | Must be enabled  |
+| =service_type= | string | ="_aq._tcp"=   | DNS-SD service   |
+| =domain=       | string | ="local"=      | mDNS domain      |
+
+TX: publishes via =avahi-publish-service= with TXT records.
+RX: *not implemented*. mDNS is TX-only as of v0.5.1.
+
+Requires =avahi-publish-service= on PATH.
+
+*** =ggwave= — Audio broadcast via python3 (requires external binary)
+
+| Field      | Type | Default | Description                    |
+|------------+------+---------+--------------------------------|
+| =enabled=  | bool | =false= | Must be enabled                |
+| =protocol= | int  | =1=     | ggwave protocol id (1=audible) |
+
+TX only. No RX. Requires =ggwave= CLI or =python3= with =ggwave= module (legacy).
+
+*** =mesh= — Meshtastic LoRa (not yet wired into aq binary)
+
+| Field    | Type   | Default    | Description                       |
+|----------+--------+------------+-----------------------------------|
+| =enabled= | bool   | =false=    | Must be enabled                   |
+| =via=    | string | ="serial"= | ="serial"= (direct) or ="mqtt"= (bridge) |
+| =device= | string | =""=       | Serial device path (e.g. =/dev/ttyUSB0=) |
+
+Not consumed by aq binary. Reserved for future implementation.
+Present in config for documentation and tooling.
+
+** 1.3 Enable logic summary
+
+| Transport | Enabled when                                              | Binary required      |
+|-----------+-----------------------------------------------------------+----------------------|
+| udp       | Always, unless explicitly ={"udp":{"enabled":false}}=     | none (stdlib)        |
+| mqtt      | =mqtt.enabled == true= AND =mqtt.host != ""=              | =mosquitto_pub/sub=  |
+| mdns      | =mdns.enabled == true=                                     | =avahi-publish-service= |
+| ggwave    | =ggwave.enabled == true=                                   | =ggwave= CLI        |
+| mesh      | Not wired. Config is advisory only.                        | =meshtastic= CLI    |
+
+** 1.4 Config loading
+
+Config is loaded from =~/.aq/config.json= on every command invocation.
+There is no caching. The file is read, unmarshalled into =transportConfig=,
+and fields are merged with defaults. Unknown keys are silently ignored.
+
+The full config is a flat JSON object — transport sections are peers of
+top-level fields, not nested under a =transports= key:
+
+#+begin_src json
+{
+  "config_version": 2,
+  "default_channel": "broadcast",
+  "default_ttl": 3600,
+  "udp": { "enabled": true, "broadcast": true, "group": "192.168.x.255", "port": 4181 },
+  "mqtt": { "enabled": true, "host": "broker.local", "port": 1883, "topic": "aq" },
+  "mdns": { "enabled": true, "service_type": "_aq._tcp", "domain": "local" },
+  "ggwave": { "enabled": false },
+  "mesh": { "enabled": false, "via": "serial", "device": "/dev/ttyUSB0" }
+}
+#+end_src
+
+* 2. Broadcast Payload Schema
+
+The canonical payload. Every transport carries this exact JSON structure.
+
+| Field             | Type       | Required | Example                     |
+|-------------------+------------+----------+-----------------------------|
+| =agent=           | string     | yes      | ="github.com/jwalsh/aq/main"= |
+| =worktree=        | string     | yes      | ="main"=                    |
+| =conjecture_id=   | string     | yes      | ="C-1"=                     |
+| =conjecture_claim= | string    | yes      | ="refactoring auth flow"=   |
+| =phase=           | enum       | yes      | ="proof"=                   |
+| =status=          | enum       | yes      | ="prosecuting"=             |
+| =files=           | []string   | no       | =["main.go","auth.go"]=     |
+| =ts=              | float64    | yes      | =1775306193=                |
+| =ttl=             | int        | yes      | =3600=                      |
+| =id=              | string     | yes      | ="019d587ebc3a91f108722f"=  |
+
+Enums:
+- =phase=: =conjecture= | =proof= | =refutation= | =refinement=
+- =status=: =prosecuting= | =done= | =blocked=
+
+=agent= is ={remote}/{branch}= derived from git, or a worktree address.
+=id= is a ULID: 12 hex chars timestamp + 10 hex chars random.
+=ts= is Unix seconds (not milliseconds).
+=files= may be =null= or empty — this is valid.
+
+* 3. Wire Format (UDP)
+
+4-byte header + JSON payload.
+
+#+begin_src
+Offset  Size  Value       Meaning
+0       1     0x41 ('A')  Magic byte 1
+1       1     0x51 ('Q')  Magic byte 2
+2       1     0x01        Protocol version
+3       1     0x01        Format: JSON
+4+      var   {...}       JSON-encoded Broadcast
+#+end_src
+
+- Max datagram size: not enforced, but stay under MTU (1472 bytes for
+  Ethernet with standard headers). Typical broadcast is ~250 bytes.
+- Bad magic, unknown version, or unknown format → silently dropped.
+- Truncated frames (< 5 bytes) → silently dropped.
+
+MQTT and mDNS carry raw JSON (no frame header). The frame is UDP-only.
+
+** 3.1 Compact Wire Format (v3.1)
+
+For bandwidth-constrained transports (ggwave audio, LoRa mesh, status
+lines), a colon-delimited compact encoding is used. Max 80 bytes.
+
+*** Grammar (ABNF)
+
+#+begin_src
+compact     = "aq1:" who ":" repo ":" conj ":" ps ":" files [":" claim]
+who         = 1*2ALPHA                  ; first 2 chars of repo owner
+repo        = 1*VCHAR                   ; repository name
+conj        = 1*DIGIT                   ; conjecture number (no "C-" prefix)
+ps          = phase status              ; single char each, concatenated
+phase       = "c" / "p" / "r" / "f"    ; conjecture/proof/refutation/refinement
+status      = "w" / "d" / "b"          ; working(prosecuting)/done/blocked
+files       = "-" / file *("," file)    ; dash if none
+file        = 1*VCHAR                   ; filename (no colons)
+claim       = 1*VCHAR                   ; human-readable, truncated at 80 total
+#+end_src
+
+*** Examples
+
+#+begin_src
+aq1:jw:aq:1:pw:main.go:validating gossip
+aq1:jw:aq:1:pd:-:session done
+aq1:ap:netax:3:cw:auth.go,session.go:refactoring auth
+#+end_src
+
+*** Parse (shell)
+
+#+begin_src bash
+echo "aq1:jw:aq:1:pw:main.go:validating gossip" | \
+  IFS=: read -r magic who repo conj ps files claim
+# magic=aq1 who=jw repo=aq conj=1 ps=pw files=main.go claim="validating gossip"
+
+# Or with cut:
+LINE="aq1:jw:aq:1:pw:main.go:validating gossip"
+WHO=$(echo "$LINE" | cut -d: -f2)
+REPO=$(echo "$LINE" | cut -d: -f3)
+CONJ=$(echo "$LINE" | cut -d: -f4)
+PHASE=$(echo "$LINE" | cut -d: -f5 | cut -c1)
+STATUS=$(echo "$LINE" | cut -d: -f5 | cut -c2)
+FILES=$(echo "$LINE" | cut -d: -f6)
+CLAIM=$(echo "$LINE" | cut -d: -f7-)
+#+end_src
+
+*** Validation (regex)
+
+#+begin_src
+^aq1:[a-z]{1,2}:[^:]+:[0-9]+:[cprf][wdb]:[^:]+(?::.+)?$
+#+end_src
+
+*** Encode from JSON (jq)
+
+#+begin_src bash
+aq status --json | jq -r '.[] |
+  "aq1:" +
+  (.agent | split("/") | .[-2][:2]) + ":" +
+  (.agent | split("/") | .[-1]) + ":" +
+  (.conjecture_id | ltrimstr("C-")) + ":" +
+  (.phase[:1]) +
+  (if .status == "done" then "d" elif .status == "blocked" then "b" else "w" end) + ":" +
+  (if .files then (.files | join(",")) else "-" end) +
+  (if .conjecture_claim then (":" + .conjecture_claim) else "" end)'
+#+end_src
+
+*** Transport mapping
+
+| Transport     | Format        | Max size  |
+|---------------+---------------+-----------|
+| UDP multicast | AQ frame + JSON | ~1472 B (MTU) |
+| MQTT          | raw JSON      | 1 MB (broker limit) |
+| mDNS TXT      | raw JSON      | ~450 B (DNS limit) |
+| ggwave audio  | compact v3.1  | 80 B      |
+| LoRa mesh     | compact v3.1  | 80 B      |
+| IRC PRIVMSG   | compact v3.1  | ~400 B    |
+| status line   | compact v3.1  | 80 B      |
+
+* 4. TX Path (fanout)
+
+#+begin_src
+aq announce
+  │
+  ├─ 1. Write JSON to ~/.aq/channels/{channel}/{id}.json  (canonical)
+  │
+  └─ 2. fanoutBroadcast(b)  (best-effort, all goroutines)
+       ├─ fanoutUDP(b, cfg)      — frame + sendto multicast/broadcast
+       ├─ fanoutMQTT(b, cfg)     — mosquitto_pub to broker
+       ├─ fanoutMDNS(b, cfg)     — avahi-publish-service with TXT records
+       └─ fanoutGGWave(b, cfg)   — python3 ggwave encode + play
+#+end_src
+
+Rules:
+1. Filesystem write is the canonical store. If it fails, the command fails.
+2. Fanout is fire-and-forget. Failures are logged to stderr, never fatal.
+3. Each transport runs in its own goroutine. They do not wait for each other.
+4. The announce command returns after the filesystem write. It does not
+   wait for fanout to complete.
+5. A transport that requires an external binary silently skips if the
+   binary is not found (=exec.LookPath= check).
+
+* 5. RX Path (listen)
+
+#+begin_src
+aq listen
+  │
+  ├─ listenUDP(cfg, channel, self, dedup, stop)
+  │    │
+  │    ├─ broadcast mode: bind 0.0.0.0:{port}
+  │    └─ multicast mode: join {group}:{port}
+  │
+  │    loop:
+  │      read datagram → decodeFrame → unmarshal Broadcast
+  │      → skip if self (same agent identity)
+  │      → skip if dedup cache hit (same broadcast ID)
+  │      → materializeBroadcast(b, channel, "udp")
+  │           → write to ~/.aq/channels/{channel}/requests/{id}.json
+  │
+  ├─ listenMQTT(cfg, channel, self, dedup, stop)
+  │    │
+  │    └─ mosquitto_sub -t aq/+/+/presence
+  │       → parse JSON line → same skip/dedup/materialize logic
+  │
+  └─ (no listenMDNS — not implemented)
+#+end_src
+
+Rules:
+1. Self-exclusion: broadcasts from the same =agent= identity are dropped.
+2. Dedup: an in-memory cache of seen broadcast IDs prevents re-materialization.
+3. Materialization writes to =requests/= subdirectory within the channel.
+4. =aq check= and =aq status= read from the channel directory (both root
+   and =requests/=) — they see locally-announced and network-received
+   broadcasts identically.
+5. Listener runs until SIGINT/SIGTERM or the stop channel is closed.
+
+* 6. Division of Responsibilities
+
+** Filesystem (canonical, always available)
+
+- *Owns*: broadcast persistence, TTL expiry, conflict detection reads
+- *Path*: =~/.aq/channels/{channel}/=
+- *TX*: =cmdAnnounce= writes directly
+- *RX*: =materializeBroadcast= writes into =requests/= subdir
+- *Reads*: =readActive()= scans both root and =requests/=, filters expired
+
+** UDP (default LAN transport)
+
+- *Owns*: zero-dep LAN gossip
+- *TX*: =fanoutUDP= — frame + sendto
+- *RX*: =listenUDP= — recv + deframe + materialize
+- *Config*: on by default, two modes (multicast vs broadcast)
+- *Failure mode*: silent. No error if no peers are listening.
+- *Frame*: 4-byte AQ header + JSON (see §3)
+
+** MQTT (broker-mediated)
+
+- *Owns*: cross-subnet and persistent presence (via retain)
+- *TX*: =fanoutMQTT= — shells to =mosquitto_pub=
+- *RX*: =listenMQTT= — shells to =mosquitto_sub=, parses stdout lines
+- *Config*: requires host, port, enabled=true
+- *Failure mode*: logs to stderr if broker unreachable
+- *Topic structure*: =aq/{worktree}/{conjecture_id}/presence=
+- *Retain*: yes. New subscribers see last known state.
+
+** mDNS (service discovery)
+
+- *Owns*: LAN presence for hosts that haven't configured a broker
+- *TX*: =fanoutMDNS= — shells to =avahi-publish-service=
+- *RX*: NOT IMPLEMENTED. No =listenMDNS= exists.
+- *Config*: requires enabled=true
+- *TXT records*: agent, conjecture, phase, status, files, claim
+- *Gap*: implementing RX would use =avahi-browse --resolve -t _aq._tcp=
+
+** ggwave (audio)
+
+- *Owns*: air-gapped presence signaling (novelty/demo)
+- *TX*: =fanoutGGWave= — python3 ggwave encode + audio play
+- *RX*: NOT IMPLEMENTED.
+- *Config*: requires enabled=true
+
+** mesh (Meshtastic LoRa)
+
+- *Owns*: nothing yet. Config placeholder only.
+- *TX*: NOT IMPLEMENTED.
+- *RX*: NOT IMPLEMENTED.
+- *Plan*: serial device on host with USB-connected node, mqtt bridge elsewhere
+
+** IRC (Claude Code hooks only)
+
+- *Owns*: human-visible agent activity stream
+- *Not part of aq binary*. Implemented in Claude Code hooks (=aq-hooks-announce.sh=).
+- *Channel*: =#aq= on local IRC server
+- *Protocol*: raw IRC via =nc=. Connect, JOIN, PRIVMSG, QUIT.
+- *No RX*: IRC is write-only from hooks. Humans read it.
+
+* 7. Conflict Detection
+
+Conflict detection reads from the filesystem only. It does not query
+transports directly. The listener materializes network broadcasts to
+disk; conflict detection reads disk. This is the separation of concerns.
+
+| Both phases  | Shared files | Severity |
+|--------------+--------------+----------|
+| proof+proof  | yes          | HIGH     |
+| proof+other  | yes          | MEDIUM   |
+| other+other  | yes          | LOW      |
+| any          | no           | none     |
+
+Same agent identity → never a conflict.
+Expired broadcasts → excluded from conflict checks.
+
+* 8. Invariants
+
+These hold for any future transport implementation:
+
+1. *Filesystem is canonical.* If the filesystem write fails, the command fails.
+   Transport fanout is always best-effort after the canonical write.
+
+2. *Transports are independent.* A failure in one transport must not affect
+   any other transport or the filesystem write.
+
+3. *Self-exclusion on RX.* The listener must never materialize its own broadcasts.
+
+4. *Dedup on RX.* The same broadcast ID must not be materialized twice,
+   regardless of which transport delivered it.
+
+5. *Materialized broadcasts are indistinguishable from local broadcasts*
+   to readers (=aq status=, =aq check=). The only difference is the
+   subdirectory (=requests/= for network-received).
+
+6. *Config is additive.* Adding a new transport section must not change
+   the behavior of existing transports. Omitting a section uses defaults.
+
+7. *UDP is the base case.* It requires zero external dependencies and is
+   enabled by default. Every other transport is opt-in.
+
+8. *No transport carries obligation.* Broadcasts expire via TTL. Silence
+   is normal. A transport going down is not an error condition.
+
+9. *Wire format is versioned.* The UDP frame header carries version and
+   format bytes. Unknown versions/formats are silently dropped, not errored.
+
+10. *Config is re-read on every invocation.* There is no daemon-side
+    config cache. Changing config.json takes effect on the next command.
+
+* 9. Adding a New Transport
+
+To add transport =foo=:
+
+1. Define =fooConfig struct= with =Enabled bool= and transport-specific fields.
+2. Add =Foo *fooConfig `json:"foo,omitempty"`= to =transportConfig=.
+3. Implement =fanoutFoo(b Broadcast, cfg fooConfig)=.
+4. Add the call to =fanoutBroadcast()= guarded by =tc.Foo != nil && tc.Foo.Enabled=.
+5. (Optional) Implement =listenFoo(...)= following the same signature as =listenUDP=.
+6. Add to =cmdDoctor= transport checks.
+7. Update this document.
+
+The function must be non-blocking (run in a goroutine), must handle its
+own errors (log to stderr, never fatal), and must check for required
+external binaries via =exec.LookPath= before attempting to use them.
