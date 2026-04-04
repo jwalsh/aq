@@ -28,6 +28,8 @@ Each broadcast is a single JSON object, one per file, newline-terminated.
 #+begin_src json
 {
   "agent": "github.com/jwalsh/aq/feature-auth",
+  "host": "hydra",
+  "user": "jwalsh",
   "worktree": "feature-auth",
   "conjecture_id": "C-1",
   "conjecture_claim": "Filesystem-first transport is sufficient",
@@ -45,6 +47,8 @@ Each broadcast is a single JSON object, one per file, newline-terminated.
 | Field              | JSON key           | Type       | Required | Default        | Description                              |
 |--------------------+--------------------+------------+----------+----------------+------------------------------------------|
 | Agent              | =agent=            | string     | yes      | auto-detected  | ={remote}/{branch}= or worktree address. Auto-detected from git remote + branch. Linked worktrees use ={remote}/worktrees/{branch}=. |
+| Host               | =host=             | string     | no       | auto-detected  | Short hostname (e.g. =hydra=, =nexus=). Enables LAN gossip disambiguation. Added in payload v1.1. |
+| User               | =user=             | string     | no       | auto-detected  | Username (e.g. =jwalsh=). Combined with =host= identifies =user@host=. Added in payload v1.1. |
 | Worktree           | =worktree=         | string     | yes      | auto-detected  | Branch name. Auto-detected from =git rev-parse --abbrev-ref HEAD=. |
 | ConjectureID       | =conjecture_id=    | string     | yes      | ---            | Conjecture identifier, e.g. =C-1=. Required by CLI. |
 | ConjectureClaim    | =conjecture_claim= | string     | no       | "working on {conjecture_id}" | Human-readable description of the conjecture. |

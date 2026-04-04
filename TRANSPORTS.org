@@ -14,6 +14,69 @@ verdicts calibrated against L1.5 requirements.
 =spec.org= is the source of truth. This document explains *why* the
 filesystem backend was chosen and what the upgrade path looks like.
 
+* Fanout Architecture
+
+=aq= uses a *write-once, fanout-everywhere* architecture. A single
+=aq announce= command does one canonical write (filesystem) and then
+best-effort fanouts to all enabled transports in parallel.
+
+#+begin_src
+aq announce
+  │
+  ├─ 1. Write JSON to ~/.aq/channels/{channel}/{id}.json  (CANONICAL)
+  │
+  └─ 2. fanoutBroadcast(b)  (best-effort, parallel goroutines)
+       ├─ fanoutUDP(b)      — framed datagram to multicast/broadcast
+       ├─ fanoutMQTT(b)     — mosquitto_pub to broker (retained)
+       ├─ fanoutMDNS(b)     — avahi-publish-service with TXT records
+       └─ fanoutGGWave(b)   — audio broadcast via ggwave (compact format)
+#+end_src
+
+** Why fanout?
+
+1. *Reach vs reliability tradeoff.* The filesystem is always present
+   and debuggable (=ls=, =cat=). Network transports extend reach to
+   other machines but may fail. Fanout gives you both: guaranteed
+   local persistence + best-effort network propagation.
+
+2. *Transport independence.* Each transport runs in its own goroutine
+   and cannot block another. UDP failure doesn't affect MQTT. MQTT
+   broker down doesn't affect filesystem. The announce command returns
+   after the filesystem write; it does not wait for network fanout.
+
+3. *LAN gossip.* Multi-machine development (laptop + workstation +
+   server) requires network transport. UDP broadcast is zero-config.
+   MQTT provides retained messages so late joiners see current state.
+   mDNS enables discovery without hardcoded addresses.
+
+4. *Constrained transports.* ggwave (audio) and Meshtastic (LoRa) use
+   an 80-byte compact format (=aq1:who:repo:conj:ps:files:claim=) for
+   bandwidth-limited channels. Same semantic payload, different wire
+   encoding.
+
+** Payload v1.1: host/user fields
+
+As of v0.5.2, the broadcast payload includes optional =host= and =user=
+fields for LAN disambiguation:
+
+#+begin_src json
+{
+  "agent": "github.com/jwalsh/aq/main",
+  "host": "hydra",
+  "user": "jwalsh",
+  ...
+}
+#+end_src
+
+This solves the problem of the same user working on the same repo from
+multiple machines. Without =host=, broadcasts from =jwalsh@hydra= and
+=jwalsh@nexus= both appear as =github.com/jwalsh/aq/main= — identical
+agent identities. With =host=, receivers can distinguish them.
+
+The fields are optional (=omitempty=) for wire compatibility. Older
+clients (<v0.5.2) will not emit them; newer clients tolerate their
+absence.
+
 * L1.5 Requirements (what aq actually needs)
 
 =aq= sits at Layer 1.5 of the Seven Concerns stack — between =bd= (L1,
