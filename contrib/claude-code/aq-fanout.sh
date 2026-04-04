@@ -2,7 +2,7 @@
 # aq-fanout.sh — fan out aq broadcast to all enabled transports
 #
 # Called as a CC hook on Stop/PostToolUse events.
-# Writes to: filesystem (always), MQTT (if nexus reachable), mesh (if e196 connected),
+# Writes to: filesystem (always), MQTT (if broker reachable), mesh (if device connected),
 #            ggwave (if sounddevice available — audible chirp)
 #
 # Install:
