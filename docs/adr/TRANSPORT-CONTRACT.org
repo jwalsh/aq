@@ -395,7 +395,75 @@ disk; conflict detection reads disk. This is the separation of concerns.
 Same agent identity → never a conflict.
 Expired broadcasts → excluded from conflict checks.
 
-* 8. Invariants
+* 8. Version Mismatch Detection
+
+** The problem
+
+The broadcast payload (§2) does not carry a protocol version field.
+The UDP frame (§3) has a version byte, but MQTT and mDNS carry raw JSON
+with no envelope. This means:
+
+- A v0.3 Python agent and a v0.5 Go agent can coexist on the same MQTT
+  topic. The receiver will attempt to unmarshal the foreign payload and
+  silently get zero-valued fields for anything missing.
+- Retained MQTT messages from dead agents persist indefinitely. A stale
+  v0.3 payload on =aq/status= looks nothing like a v0.5 broadcast.
+- The compact format (§3.1) has its own version prefix (=aq1:=) but the
+  JSON payload does not.
+
+** Observed evidence (2026-04-04)
+
+- Stale =aq/status= retained message: ={ "service":"aq", "version":"v0.3.0" }=
+  — missing all 8 required broadcast fields (agent, worktree, conjecture_id,
+  phase, status, ts, ttl, id). Contains unknown fields (service, host, version).
+- No current v0.5.1 broadcast carries a version or protocol_version field.
+- =aq listen= silently drops payloads that fail =json.Unmarshal= into
+  =Broadcast=, but partially-valid payloads (e.g. a v0.3 message with
+  some overlapping field names) could materialize as a corrupt broadcast.
+
+** Required: add =protocol_version= to payload
+
+Future versions MUST add a =protocol_version= field to the JSON payload:
+
+#+begin_src json
+{
+  "protocol_version": 1,
+  "agent": "...",
+  ...
+}
+#+end_src
+
+Receivers MUST:
+1. Check =protocol_version= before processing.
+2. Drop payloads with unknown or missing =protocol_version= (log to stderr).
+3. Accept payloads where =protocol_version= matches their supported range.
+
+This field is cheap (14 bytes) and prevents silent corruption.
+
+** Recommended: clean stale retained MQTT messages
+
+After protocol version is implemented, purge stale retained messages:
+
+#+begin_src bash
+# Clear all retained aq topics (publish empty retained message)
+for topic in $(mosquitto_sub -h broker -t "aq/#" -C 20 -W 2 -v 2>/dev/null | cut -d' ' -f1 | sort -u); do
+  mosquitto_pub -h broker -t "$topic" -r -n  # empty retained = delete
+done
+#+end_src
+
+** Transport vs protocol version matrix
+
+| Transport | Has version envelope | Mismatch risk |
+|-----------+----------------------+---------------|
+| UDP       | Yes (frame byte 2)   | Low — unknown version dropped at frame level |
+| MQTT      | No                   | *High* — raw JSON, retained messages persist |
+| mDNS TXT  | No                   | Medium — TXT records expire with service |
+| compact   | Yes (=aq1:= prefix)  | Low — prefix acts as version gate |
+| IRC       | No                   | Low — human-readable, no machine parsing |
+
+* 9. Invariants
+
+NOTE: invariant numbering is stable. Do not renumber.
 
 These hold for any future transport implementation:
 
