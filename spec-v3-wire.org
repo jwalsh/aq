@@ -1,0 +1,266 @@
+#+TITLE: aq Wire Format v3 — Identity-First Compact Protocol
+#+SUBTITLE: Mandatory identity fields, LoRa-compressed payload, unified transport
+#+DATE: 2026-04-10
+#+STATUS: draft
+
+* Motivation
+
+** Problem: 100% of archive messages lack identity
+
+331 messages in the nexus archive (2026-03-28 to 2026-04-10), zero have
+=host= or =user= populated. The v2 spec defines these fields, the Go
+binary has setter code (=main.go:1101-1102=), but the archive write path
+drops them — =json:"host,omitempty"= means the zero-value empty string
+is silently elided.
+
+This makes agent usage reports impossible: we cannot answer "which host
+ran which session on which repo" from aq data alone.
+
+** Problem: =agent= field conflates identity with context
+
+=agent= currently encodes =remote/branch= (e.g. =github.com/aygp-dr/nexus-setup/main=).
+This is a git context string, not an identity. When aq runs outside a git repo or
+fails detection, it falls back to =local/unknown= — which accounts for 29% of all
+messages (99/331).
+
+** Problem: LoRa compact format lacks identity
+
+The mesh transport compact format (=mesh.go=, version =1=) carries:
+
+#+begin_example
+1|<phase>|<agent_short>|<ts>|<status>|<conjecture>[|<files>]
+#+end_example
+
+This omits =host=, =user=, and =conjecture_claim=. A message received
+via LoRa radio cannot be attributed to a machine or person.
+
+** Problem: session events live in a parallel topic
+
+Session lifecycle (=aq/session/<host>/<repo>=) carries =host=, =repo=,
+=event= (startup/shutdown) but uses a different schema from presence
+messages (=aq/<branch>/<conjecture>/presence=). These are not materialized
+into the archive. Two schemas for the same system = fragmented reporting.
+
+** Problem: MQTT retained messages have identity, archive doesn't
+
+MQTT retained messages from mini and hydra carry =host= and =user=
+(added by a newer code path) but the filesystem archive written by
+=aq announce= does not. The data diverges by transport.
+
+* Design: v3 Wire Format
+
+** Principle: identity is mandatory, not optional
+
+=host= and =user= are promoted from =omitempty= optional to required.
+If the binary cannot detect them (=os.Hostname()= fails, =$USER= unset),
+it MUST populate with ="unknown"= rather than omitting.
+
+** Full payload (JSON, for MQTT/UDP/filesystem)
+
+#+begin_src json
+{
+  "v": 3,
+  "host": "nexus",
+  "user": "jwalsh",
+  "agent": "github.com/aygp-dr/nexus-setup/main",
+  "worktree": "main",
+  "cid": "C-42",
+  "claim": "session-resume",
+  "phase": "p",
+  "status": "a",
+  "files": ["telegraf.conf"],
+  "ts": 1775831548,
+  "ttl": 3600,
+  "id": "019d77cf0098337c6ba662"
+}
+#+end_src
+
+** Field definitions
+
+| Field   | Key        | Type     | Required | Bytes (compact) | Description                                    |
+|---------+------------+----------+----------+-----------------+------------------------------------------------|
+| Version | =v=        | int      | yes      | 1               | Wire format version. Always =3=.               |
+| Host    | =host=     | string   | yes      | 1-8             | Short hostname. =$(hostname -s)=.              |
+| User    | =user=     | string   | yes      | 1-8             | Username. =$USER=.                             |
+| Agent   | =agent=    | string   | yes      | 10-40           | Git context: =remote/branch=.                  |
+| Worktree| =worktree= | string   | yes      | 2-20            | Branch name.                                   |
+| CID     | =cid=      | string   | yes      | 2-10            | Conjecture ID. Shortened from =conjecture_id=. |
+| Claim   | =claim=    | string   | no       | 0-40            | Human-readable claim. Shortened key.           |
+| Phase   | =phase=    | enum     | yes      | 1               | =c= / =p= / =r= / =n= (single char in JSON). |
+| Status  | =status=   | enum     | yes      | 1               | =a= / =d= / =b= (single char in JSON).        |
+| Files   | =files=    | []string | no       | 0-60            | Relative paths. Basenames only in compact.      |
+| TS      | =ts=       | int64    | yes      | 4-10            | Unix seconds.                                  |
+| TTL     | =ttl=      | int      | yes      | 2-4             | Seconds until expiry.                          |
+| ID      | =id=       | string   | yes      | 22              | ULID (unchanged).                              |
+
+*** Changes from v2
+
+| Change                          | v2                             | v3                            | Why                                    |
+|---------------------------------+--------------------------------+-------------------------------+----------------------------------------|
+| =host= required                | =omitempty=                    | required, ="unknown"= if fail | 100% of archive lacked host            |
+| =user= required                | =omitempty=                    | required, ="unknown"= if fail | 100% of archive lacked user            |
+| =v= field added                | implicit (no version)          | explicit =3=                  | Receivers can route by version         |
+| =conjecture_id= → =cid=       | =conjecture_id=                | =cid=                         | Save 11 bytes per message              |
+| =conjecture_claim= → =claim=  | =conjecture_claim=             | =claim=                       | Save 12 bytes per message              |
+| Phase/status single-char       | full words in JSON             | single char in JSON           | Save ~20 bytes, consistent with compact|
+| Session events unified         | separate =aq/session/= schema  | =status=d= + =claim=session-shutdown= | One schema, one archive       |
+
+** Compact payload (LoRa, <=80 bytes)
+
+For Meshtastic text messages (228 byte limit, but effective ~80 bytes
+after encryption overhead on short/fast profile with AES-256-CTR):
+
+#+begin_example
+3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
+#+end_example
+
+*** Field encoding
+
+| Position | Field        | Encoding                        | Max bytes | Example       |
+|----------+--------------+---------------------------------+-----------+---------------|
+|        0 | version      | always ="3"=                    |         1 | =3=           |
+|        1 | host         | hostname, truncate to 8 chars   |         8 | =nexus=       |
+|        2 | user         | username, truncate to 8 chars   |         8 | =jwalsh=      |
+|        3 | phase        | =c= / =p= / =r= / =n=         |         1 | =p=           |
+|        4 | status       | =a= / =d= / =b=                |         1 | =a=           |
+|        5 | cid          | conjecture ID                   |        10 | =C-42=        |
+|        6 | agent_short  | last 20 chars of agent          |        20 | =nexus-setup/main= |
+|        7 | ts_delta     | seconds since 2026-01-01 (base) |         8 | =8425548=     |
+|        8 | files        | comma-separated basenames       |       ~20 | =api.py,auth= |
+
+*** Size budget
+
+#+begin_example
+Worst case (all fields max):
+  3|12345678|12345678|p|a|C-999999|nexus-setup/main1234|99999999|file1.py,file2.py
+  = 1+1+8+1+8+1+1+1+1+1+1+10+1+20+1+8+1+20 = 86 bytes
+
+Typical case:
+  3|nexus|jwalsh|p|a|C-42|nexus-setup/main|8425548
+  = 49 bytes
+
+Minimum (no files):
+  3|nxs|jw|p|a|C-0|setup/main|8425548
+  = 37 bytes
+#+end_example
+
+All fit within the 80-byte Meshtastic effective payload.
+
+*** Why LoRa matters
+
+Physical proximity is a proxy for relevance. The mesh transport
+(Heltec V4 LoRa nodes on 192.168.86.0/24) carries aq gossip between
+hosts even when:
+
+1. MQTT broker (nexus:1883) is down — LoRa is independent
+2. WiFi is partitioned — LoRa penetrates walls and operates on 915MHz
+3. Host is offline but radio is on — messages queue on the Meshtastic device
+4. New host joins the LAN — it hears presence via radio before any config
+
+Without identity in the compact format, a LoRa-received message is
+anonymous gossip. With =host= and =user=, it's attributable presence
+that feeds directly into Grafana without enrichment.
+
+*** ts_delta encoding
+
+To save bytes over raw Unix timestamps (10 digits):
+
+#+begin_example
+epoch_base = 2026-01-01T00:00:00Z = 1767225600
+ts_delta = ts - epoch_base
+#+end_example
+
+This gives a 7-8 digit number through 2029, saving 2-3 bytes per
+message. Receivers add =epoch_base= to reconstruct the full timestamp.
+
+** MQTT topic structure (unchanged)
+
+#+begin_example
+aq/<worktree>/<cid>/presence     # main gossip topic
+aq/status                        # service heartbeat (retained)
+#+end_example
+
+Session lifecycle events are now regular presence messages with
+=status=d= and =claim=session-shutdown= or =claim=session-startup=.
+No separate =aq/session/= topic needed.
+
+** Backward compatibility
+
+| Transport    | v2 sender → v3 receiver        | v3 sender → v2 receiver        |
+|--------------+--------------------------------+--------------------------------|
+| Filesystem   | Missing =v= field → treat as 2 | Extra =v= field → ignored      |
+| MQTT         | Same                           | Same                           |
+| UDP multicast| Same                           | Same                           |
+| LoRa compact | Starts with ="1\|"= → v1 decode | Starts with ="3\|"= → unknown  |
+
+v3 receivers MUST accept v2 messages (no =v= field = v2).
+v3 compact receivers MUST accept v1 compact (="1\|"= prefix).
+
+* Implementation Checklist
+
+** Go binary (=main.go=)
+
+- [ ] Remove =omitempty= from =Host= and =User= JSON tags
+- [ ] Add =V int \=json:"v"\== field, set to =3= in all broadcast paths
+- [ ] Rename =ConjectureID= JSON key from =conjecture_id= to =cid=
+- [ ] Rename =ConjectureClaim= JSON key from =conjecture_claim= to =claim=
+- [ ] Use single-char phase/status in JSON (not just in compact)
+- [ ] Ensure =getHostname()= and =getUsername()= are called on ALL code paths
+  that create a Broadcast (audit: announce, whisper, listen RX, hooks)
+- [ ] Fall back to ="unknown"= not =""= when detection fails
+
+** Compact format (=contrib/meshtastic/mesh.go=)
+
+- [ ] Bump version from =1= to =3=
+- [ ] Add =host= (position 1) and =user= (position 2) to compact encoding
+- [ ] Use =ts_delta= (epoch base 2026-01-01) instead of raw Unix seconds
+- [ ] Update =compactDecode= to populate =Host= and =User= from wire
+- [ ] Accept v1 compact payloads (="1\|"= prefix) for backward compat
+
+** Session hooks (=~/.claude/hooks/aq-session-start.sh=)
+
+- [ ] Pass =--claim "session-startup"= or =--claim "session-shutdown"=
+  with =--status done= for shutdown (currently uses =C-0= for everything)
+- [ ] Generate unique conjecture IDs per session (e.g. =S-<short-ulid>=)
+
+** Telegraf (=nexus-setup/scripts/otel/telegraf.conf=)
+
+- [ ] Add =host=, =user= to MQTT consumer =tag_keys=
+- [ ] Add =v= to tag_keys for version tracking
+
+** Reporting
+
+With v3 data, these reports become possible:
+
+| Report                    | Query                                        |
+|---------------------------+----------------------------------------------|
+| Daily active hosts        | =count(distinct host) by day=                |
+| Repos per host            | =count(distinct agent) by host=              |
+| Session duration          | =ts(shutdown) - ts(startup) by host, cid=    |
+| Conjecture lifecycle      | =phase transitions by cid, ordered by ts=    |
+| User activity heatmap     | =count by user, hour-of-day=                 |
+| Cross-host file conflicts | =files overlap where host != host, phase=p=  |
+| LoRa vs MQTT coverage     | =count by transport, host= (needs transport tag) |
+
+* Conjectures
+
+| ID    | Claim                                                  | Refutation criterion                          |
+|-------+--------------------------------------------------------+-----------------------------------------------|
+| AQ-V3-1 | Removing =omitempty= from host/user fixes 100% of archive gaps | Any v3 message still lacks host/user       |
+| AQ-V3-2 | v3 compact fits in 80 bytes with identity             | Any realistic payload exceeds 80 bytes        |
+| AQ-V3-3 | Single-char phase/status saves >15% payload size      | Average JSON message shrinks <10%             |
+| AQ-V3-4 | ts_delta encoding is safe through 2029                | Delta overflows int32 before 2029-01-01       |
+| AQ-V3-5 | Unified session events eliminate aq/session/ topic    | Session reports require data from both topics |
+
+* Size Comparison
+
+| Format     | v2 typical | v3 typical | v3 compact | Meshtastic limit |
+|------------+------------+------------+------------+------------------|
+| Bytes      |        238 |        180 |         49 |               80 |
+| Has host   | no         | yes        | yes        | —                |
+| Has user   | no         | yes        | yes        | —                |
+| Has version| no         | yes        | yes        | —                |
+
+v3 JSON is *smaller* than v2 despite adding fields, because key names
+are shortened (=conjecture_id= → =cid=, =conjecture_claim= → =claim=,
+full phase/status words → single chars).
