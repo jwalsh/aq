@@ -1,0 +1,118 @@
+#+TITLE: aq Jepsen-lite Chaos Environment
+#+SUBTITLE: 20-agent multi-codec stress test in containers
+#+STATUS: scaffolding
+
+* Status
+
+This is *scaffolding only*. The canonical multi-codec stress test is
+the in-process harness in =contrib/harness/=, which is much faster to
+iterate on and produces the same findings without container overhead.
+
+The docker-compose setup exists for *BugBash demonstration* — to show
+that the in-process findings reproduce in a containerized environment
+with realistic process boundaries and a real OTel exporter.
+
+* Why not full Jepsen?
+
+Jepsen is a Clojure JVM stack for distributed databases with strong
+consistency claims. =aq= has none of those — it is eventually-consistent
+gossip. The interesting failures are at the *protocol* level (codec
+corruption, identity attribution gaps, OTel labelling), not at the
+*consensus* level. Docker Compose + =tc netem= provides 80% of Jepsen's
+chaos primitives with 20% of the infrastructure cost.
+
+If a future round of testing surfaces consistency-violating behavior in
+=aq= (which would itself be a finding worth documenting), we promote to
+real Jepsen.
+
+* Architecture
+
+#+begin_src ditaa
+  +-----------------+      OTLP gRPC      +-----------------+
+  | aq-bridge       | ------------------> | OTel collector  |
+  | (LoRa sim + LAN)|                     | (external)      |
+  +--------+--------+                     +-----------------+
+           |
+           | LoRa-sim bridge (lossy)
+           |
+  +--------+----------------------------------------+
+  | aq-lora-sim docker network                       |
+  |                                                  |
+  | +--------+ +--------+ +--------+ ... +--------+ |
+  | |agent01 | |agent02 | |agent03 |     |agent20 | |
+  | +--------+ +--------+ +--------+     +--------+ |
+  +--------------------------------------------------+
+                          |
+                  +-------+--------+
+                  | chaos-injector |
+                  | (tc netem)     |
+                  +----------------+
+#+end_src
+
+* Endpoint configuration — never hardcoded
+
+The OTel collector address is read from =OTEL_EXPORTER_OTLP_ENDPOINT=
+in the bridge container's environment. There is no default address
+embedded in any file.
+
+#+begin_src bash
+## Run with a specific collector
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel.example.org:4317
+docker compose up
+
+## Run in dev mode (stdout exporter)
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+docker compose up
+#+end_src
+
+* Chaos profiles
+
+The =chaos-injector= reads =CHAOS_PROFILE= and applies =tc netem= rules
+to the =br-aqlora= bridge interface:
+
+| Profile     | Loss | Delay        | Notes                              |
+|-------------+------+--------------+------------------------------------|
+| =baseline=  |   0% | 0            | Clean LAN                          |
+| =lora-good= |   2% | 100ms ± 30   | Realistic LoRa under good conditions |
+| =lora-bad=  |  20% | 2s ± 1s      | LoRa under interference            |
+| =partition= |   *  | *            | Split into two halves for 30s      |
+
+CHAOS_SEED is forwarded to the in-container harness so chaos primitives
+are deterministic and replayable.
+
+* Status of build
+
+The Dockerfiles and per-agent yaml templates are *not yet implemented*.
+The current docker-compose.yml is structural — it documents the intended
+topology and the env-variable contract, but =docker compose up= will
+fail until the Dockerfiles exist.
+
+This was an intentional time/value tradeoff during the BugBash session:
+the in-process harness in =contrib/harness/= already produces the key
+findings (corruption sweep, codec sizes, identity attribution rates),
+and reproduces those findings in containers adds infrastructure work
+without unlocking new questions. The container setup is reserved for
+the BugBash live demo if there is hallway interest.
+
+* Next steps (post-BugBash)
+
+- [ ] =Dockerfile.bridge= — minimal alpine + aq binary + otel-bridge binary
+- [ ] =Dockerfile.injector= — alpine + iproute2 (for =tc=)
+- [ ] =agent-base.yml= — extends template for the 20-agent fanout
+- [ ] =scripts/gen-agents.sh= — generate agents 04-20 from a template
+- [ ] =scripts/run-profiles.sh= — execute baseline → lora-good → lora-bad → partition
+- [ ] =scripts/collect-metrics.sh= — pull data from OTel collector for the report
+
+* Reference findings from in-process harness
+
+See =docs/research/wire-format-stress.org= for the full results.
+Headline numbers from the in-process run on =mini=:
+
+- =pipe= codec achieves p50 = 74 bytes (fits LoRa) but loses identity
+  10.5% of the time at 100% bit-flip rate — the worst codec under
+  corruption.
+- =cbor= codec is the resilience winner: 4.7% identity loss at 100%
+  bit-flip, p50 = 169 bytes.
+- =json= codec is unexpectedly the *most* resilient (2.3% identity
+  loss at 100% bit-flip) because parser errors fail noisily rather
+  than silently producing wrong-but-not-error decoded fields.

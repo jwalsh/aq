@@ -1,0 +1,94 @@
+## Jepsen-lite chaos environment for aq multi-codec stress testing.
+##
+## Spins up 20 agent containers + 1 OTel-bridge + 1 chaos injector.
+## Each agent has its own hostname/user/ulimit and writes to a private
+## volume. Inter-agent gossip flows over the docker bridge network with
+## tc/netem for packet loss + delay simulation.
+##
+## Usage:
+##   docker compose -f docker-compose.yml up --build
+##   docker compose logs bridge | tee bridge.log
+##   docker compose down -v
+##
+## Endpoint configuration:
+##   The OTel collector address is read from OTEL_EXPORTER_OTLP_ENDPOINT
+##   in the bridge container's environment. Set it via .env or shell:
+##     OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 docker compose up
+##   Falls back to stdout exporter when unset.
+
+services:
+
+  ## ---- One bridge node — has both LAN access and the OTel exporter ----
+  bridge:
+    build:
+      context: ../..
+      dockerfile: contrib/chaos-docker/Dockerfile.bridge
+    container_name: aq-bridge
+    hostname: aq-bridge
+    networks:
+      - aq-lora-sim
+      - aq-lan
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_SERVICE_NAME=aq-bridge
+    depends_on:
+      - chaos-injector
+
+  ## ---- 20 agent containers, each with distinct identity ----
+  ## Containers are templated via x-agent and instantiated below.
+
+  agent01:
+    extends: { service: agent-template, file: agent-base.yml }
+    container_name: aq-agent01
+    hostname: agent01
+    environment:
+      - AQ_USER=alice
+      - AQ_AGENT_ID=01
+  agent02:
+    extends: { service: agent-template, file: agent-base.yml }
+    container_name: aq-agent02
+    hostname: agent02
+    environment:
+      - AQ_USER=bob
+      - AQ_AGENT_ID=02
+  agent03:
+    extends: { service: agent-template, file: agent-base.yml }
+    container_name: aq-agent03
+    hostname: agent03
+    environment:
+      - AQ_USER=carol
+      - AQ_AGENT_ID=03
+  ## ... agents 04-20 follow the same pattern. Truncated here for brevity;
+  ## generate the rest from contrib/chaos-docker/scripts/gen-agents.sh
+  ## See README.org for the full list.
+
+  ## ---- Chaos injector — runs tc netem against the lora-sim bridge ----
+  chaos-injector:
+    build:
+      context: .
+      dockerfile: Dockerfile.injector
+    container_name: aq-chaos
+    privileged: true               ## needed for tc/netem
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - aq-lora-sim
+    environment:
+      - CHAOS_PROFILE=${CHAOS_PROFILE:-baseline}
+      - CHAOS_SEED=${CHAOS_SEED:-bugbash-2026}
+
+networks:
+  ## Simulated LoRa link — high latency, configurable loss
+  aq-lora-sim:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-aqlora
+  ## Real LAN — only the bridge has access
+  aq-lan:
+    driver: bridge
+
+## Status: scaffolding only. Build steps and the per-codec chaos profile
+## execution are tracked in bd issue aq-za9 and the BugBash write-up at
+## docs/research/wire-format-stress.org. The in-process harness in
+## contrib/harness/ is the canonical test path; this docker setup is for
+## demonstration during BugBash hallway discussions, not CI.
