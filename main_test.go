@@ -822,6 +822,105 @@ func TestWhisper_ShortTTL(t *testing.T) {
 	}
 }
 
+// TestWhisper_SeverityCeiling verifies that whisper broadcasts have a
+// severity ceiling of MEDIUM in conflict detection. This implements GEACL
+// context-aware suppression: safety-critical updates use announce (aggressive);
+// routine updates use whisper (throttled, lower conflict priority).
+func TestWhisper_SeverityCeiling(t *testing.T) {
+	makeTempAQHome(t)
+
+	// Create two agents both in proof phase with overlapping files.
+	// Normally this would be HIGH severity.
+	agentA := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "github.com/test/repo/agent-a"
+		b.Phase = PhaseProof
+		b.Files = []string{"auth.go"}
+	})
+	agentB := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "github.com/test/repo/agent-b"
+		b.Phase = PhaseProof
+		b.Files = []string{"auth.go"}
+	})
+
+	// Test 1: both non-whisper (announce) -> HIGH severity
+	_, _ = writeBroadcast(agentB, DefaultChannel)
+	signals, err := checkConflicts(agentA, DefaultChannel)
+	if err != nil {
+		t.Fatalf("checkConflicts failed: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != SeverityHigh {
+		t.Errorf("non-whisper conflict severity = %s, want high", signals[0].Severity)
+	}
+
+	// Test 2: agentA is whisper -> capped at MEDIUM
+	agentAWhisper := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "github.com/test/repo/agent-a-whisper"
+		b.Phase = PhaseProof
+		b.Files = []string{"auth.go"}
+		b.IsWhisper = true
+	})
+	signals, err = checkConflicts(agentAWhisper, DefaultChannel)
+	if err != nil {
+		t.Fatalf("checkConflicts failed: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(signals))
+	}
+	if signals[0].Severity != SeverityMedium {
+		t.Errorf("whisper conflict severity = %s, want medium (ceiling)", signals[0].Severity)
+	}
+
+	// Test 3: agentB is whisper (other side) -> also capped at MEDIUM
+	// Remove agentB and add a whisper version
+	agentBWhisper := makeBroadcast(func(b *Broadcast) {
+		b.Agent = "github.com/test/repo/agent-b-whisper"
+		b.Phase = PhaseProof
+		b.Files = []string{"auth.go"}
+		b.IsWhisper = true
+	})
+	_, _ = writeBroadcast(agentBWhisper, DefaultChannel)
+	signals, err = checkConflicts(agentA, DefaultChannel)
+	if err != nil {
+		t.Fatalf("checkConflicts failed: %v", err)
+	}
+	// Should find conflicts with both agentB (high) and agentBWhisper (medium)
+	// We check that at least one conflict with agentBWhisper is MEDIUM
+	foundMedium := false
+	for _, s := range signals {
+		if s.B.Agent == "github.com/test/repo/agent-b-whisper" {
+			if s.Severity != SeverityMedium {
+				t.Errorf("conflict with whisper agent has severity = %s, want medium", s.Severity)
+			}
+			foundMedium = true
+		}
+	}
+	if !foundMedium {
+		t.Error("no conflict found with whisper agent")
+	}
+}
+
+// TestWhisper_IsWhisperField verifies that the IsWhisper field is set correctly
+// via buildAnnounceBroadcast when isWhisper is true in params.
+func TestWhisper_IsWhisperField(t *testing.T) {
+	p := announceParams{
+		conjecture: "C-1",
+		phase:      "proof",
+		status:     "prosecuting",
+		ttl:        WhisperTTL,
+		isWhisper:  true,
+	}
+	b := buildAnnounceBroadcast(p)
+	if !b.IsWhisper {
+		t.Error("broadcast.IsWhisper should be true when params.isWhisper is true")
+	}
+	if b.TTL != WhisperTTL {
+		t.Errorf("broadcast.TTL = %d, want %d", b.TTL, WhisperTTL)
+	}
+}
+
 // ---------- Additional edge case tests ----------
 
 func TestBroadcast_Overlaps(t *testing.T) {

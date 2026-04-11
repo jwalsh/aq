@@ -236,6 +236,11 @@ type broadcastLoose struct {
 	Ts              float64  `json:"ts"`
 	TTL             int      `json:"ttl"`
 	ID              string   `json:"id"`
+	// IsWhisper marks low-priority broadcasts with context-aware suppression.
+	// Whisper broadcasts have a severity ceiling of MEDIUM in conflict detection,
+	// encoding GEACL suppression semantics: safety-critical updates use announce
+	// (aggressive propagation), routine updates use whisper (throttled).
+	IsWhisper bool `json:"is_whisper,omitempty"`
 }
 
 // MarshalJSON writes v3 wire format — opinionated on write.
@@ -1176,6 +1181,15 @@ func checkConflicts(me Broadcast, channel string) ([]ConflictSignal, error) {
 			severity = SeverityMedium
 		}
 
+		// GEACL context-aware suppression: whisper broadcasts have a severity
+		// ceiling of MEDIUM. Safety-critical updates use announce (aggressive);
+		// routine updates use whisper (throttled, lower conflict priority).
+		if me.IsWhisper || other.IsWhisper {
+			if severity == SeverityHigh {
+				severity = SeverityMedium
+			}
+		}
+
 		signals = append(signals, ConflictSignal{
 			A:           me,
 			B:           other,
@@ -1203,6 +1217,7 @@ type announceParams struct {
 	ttl        int
 	validate   bool
 	showHelp   bool
+	isWhisper  bool // Low-priority broadcast with severity ceiling of MEDIUM
 }
 
 // consumeArg returns the next argument value and advances the index, or returns
@@ -1276,6 +1291,7 @@ func buildAnnounceBroadcast(p announceParams) Broadcast {
 	b.Status = Status(p.status)
 	b.Files = parseFileList(p.files)
 	b.TTL = p.ttl
+	b.IsWhisper = p.isWhisper
 	return b
 }
 
@@ -1358,20 +1374,88 @@ func cmdAnnounce(args []string) int {
 	return 0
 }
 
-// cmdWhisper is like announce but with a short TTL (60s).
+// cmdWhisper broadcasts low-priority presence with context-aware suppression.
+// Whisper broadcasts have:
+//   - Short TTL (60s by default)
+//   - Severity ceiling of MEDIUM in conflict detection
+//
+// This implements GEACL suppression semantics: safety-critical updates use
+// announce (aggressive propagation); routine updates use whisper (throttled).
 func cmdWhisper(args []string) int {
-	// Inject --ttl 60 into args if not already specified.
-	hasTTL := false
-	for _, a := range args {
-		if a == "--ttl" {
-			hasTTL = true
-			break
-		}
+	p := parseAnnounceArgs(args)
+
+	if p.showHelp {
+		printWhisperHelp()
+		return 0
 	}
-	if !hasTTL {
-		args = append(args, "--ttl", fmt.Sprintf("%d", WhisperTTL))
+
+	if p.conjecture == "" {
+		fmt.Fprintln(os.Stderr, "error: --conjecture (-c) is required")
+		return 1
 	}
-	return cmdAnnounce(args)
+
+	// Whisper defaults: short TTL and isWhisper flag for severity ceiling
+	if p.ttl == DefaultTTL {
+		p.ttl = WhisperTTL
+	}
+	p.isWhisper = true
+
+	b := buildAnnounceBroadcast(p)
+
+	if !b.Phase.Valid() {
+		fmt.Fprintf(os.Stderr, "error: invalid phase %q (must be conjecture|proof|refutation|refinement)\n", p.phase)
+		return 1
+	}
+
+	if p.validate {
+		runPreFlightValidation(b)
+	}
+
+	path, err := writeBroadcast(b, channelName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Fanout to all configured transports (best-effort, non-blocking).
+	fanoutBroadcast(b)
+
+	if jsonOutput {
+		j, _ := b.ToJSON()
+		fmt.Println(j)
+	} else {
+		fmt.Printf("whispered: %s -> %s\n", b.ConjectureID, filepath.Base(path))
+	}
+
+	// Give async fanout goroutines a moment to complete.
+	time.Sleep(200 * time.Millisecond)
+
+	return 0
+}
+
+// printWhisperHelp prints the usage text for the whisper subcommand.
+func printWhisperHelp() {
+	fmt.Print(`aq whisper — broadcast low-priority presence with context-aware suppression
+
+Usage: aq whisper -c <conjecture> [options]
+
+Whisper is like announce but for routine updates. It has:
+  - Short TTL (60s by default) for quick expiry
+  - Severity ceiling of MEDIUM in conflict detection
+
+This implements GEACL suppression semantics: safety-critical updates use
+announce (aggressive propagation); routine updates use whisper (throttled).
+
+Options:
+  -c, --conjecture <id>    Conjecture ID (required)
+  -f, --files <list>       Comma-separated file list
+  --claim <text>           Human-readable claim
+  --phase <phase>          conjecture|proof|refutation|refinement (default: proof)
+  --status <status>        prosecuting|done|blocked (default: prosecuting)
+  --ttl <seconds>          Time to live (default: 60)
+  --validate               Run pre-flight invariant checks (advisory, never blocks)
+  -h, --help               Show this help
+`)
 }
 
 // checkParams holds the parsed arguments for the check command.
