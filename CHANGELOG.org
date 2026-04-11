@@ -1,0 +1,103 @@
+#+TITLE: aq Changelog
+#+AUTHOR: jwalsh
+#+OPTIONS: toc:nil num:nil
+
+* v0.6.0 — 2026-04-11
+
+** End-to-end multi-host telemetry validated
+
+This release marks the milestone where aq's v3 wire format and the broader
+NexusHive telemetry pipeline have been validated end-to-end across mini,
+hydra, and nexus, with multiple AI tools shipping data into a unified
+Prometheus + Grafana view.
+
+*** Highlights
+
+- *v3 wire format with mandatory identity*: =host= and =user= are now
+  required fields in every broadcast. The omitempty bug that left these
+  empty for ~100% of archive messages is gone. Compact LoRa encoding now
+  carries identity in positions 1 and 2.
+- *=NewBroadcast()= populates host/user automatically* via =os.Hostname()=
+  and =os.Getenv("USER")=. Tools embedding aq no longer need to set them
+  manually.
+- *Wire format tests* (=TestBroadcast_WireFormat_V3=,
+  =TestBroadcast_V2_BackwardCompat=, =TestBroadcast_V3_SingleCharPhaseStatus=,
+  =TestBroadcast_DefaultTTL=, =TestBroadcast_IsExpired*=,
+  =TestBroadcast_Overlaps=, =TestNewBroadcast_HasDefaults=) verify the 11
+  required v3 keys: =v=, =agent=, =host=, =user=, =worktree=, =cid=,
+  =phase=, =status=, =ts=, =ttl=, =id=.
+- *Bilingual gossip* (refined from v0.5.x): same payload spoken across
+  filesystem, MQTT, UDP multicast, mDNS, ggwave, and Meshtastic LoRa.
+- *Chaos testing* (multi-codec stress harness with OTel bridge,
+  introduced in v0.5.x) is part of the release validation pipeline.
+
+*** Verified pipeline (this release)
+
+| Source                    | Transport            | Destination                   |
+|---------------------------+----------------------+-------------------------------|
+| Claude Code 2.1.91+       | OTLP gRPC :4317      | nexus otelcol → Prometheus    |
+| gh copilot 1.0.24         | OTLP HTTP :4318      | nexus otelcol → Prometheus    |
+| LiteLLM 1.83.4 proxy      | Prometheus pull :4000| nexus scrape → Prometheus     |
+| Telegraf 1.38.2           | Prometheus pull :9273| nexus scrape → Prometheus     |
+| TinyLLM Chatbot v0.16.6   | telegraf http_response| nexus → Prometheus           |
+| aq v0.6.0 broadcasts      | MQTT :1883           | nexus mosquitto → dashboard   |
+| aider 0.86.2              | LiteLLM SDK         | LiteLLM proxy → Prometheus    |
+| codex 0.120.0             | OPENAI_BASE_URL      | LiteLLM proxy → Prometheus    |
+
+Aggregated views land in Grafana at =http://192.168.86.100:3000/=:
+- Agent Coordination — MQTT & aq
+- mini — System Health
+- Claude Code — NexusHive
+- AI Tools — Multi-Provider Usage
+
+*** Compliance
+
+mini's =aq= now sends fully populated v3 messages:
+
+#+begin_src json
+{"v":3,"host":"mini","user":"jwalsh","agent":"github.com/aygp-dr/mini-setup/main","cid":"C-AQ-V3-COMPLIANCE","phase":"p","status":"complete",...}
+#+end_src
+
+** Known issues
+
+- =outputs.opentelemetry= in telegraf v1.38.2 fails with "no route to host"
+  to nexus:4317 from launchd-supervised processes on macOS. Workaround:
+  use =prometheus_client= bound to LAN IP and have nexus scrape it. This
+  is the macOS Local Network Privacy framework intercepting urllib3 / grpcio
+  in pipx-installed Python and brew-installed Go binaries.
+- LiteLLM proxy's OTLP push has the same issue from pipx-Python. Same
+  workaround (Prometheus pull at =192.168.86.22:4000/metrics/=).
+- gh copilot 1.0.24 inherits =OTEL_RESOURCE_ATTRIBUTES= from the shell env
+  and reports =service.name=claude-code= instead of =github-copilot=.
+  Workaround: wrap copilot invocation with =OTEL_SERVICE_NAME=github-copilot=.
+
+* v0.5.3 — 2026-04-11 (earlier same day)
+
+- =fix(whisper)=: =IsWhisper= field added to v3 wire format structs
+- Documentation cleanup, removed site-specific network references
+
+* v0.5.2 — 2026-04-09
+
+- =feat(whisper)=: context-aware suppression with severity ceiling
+- =feat=: multi-codec stress harness with OTel bridge for BugBash
+
+* v0.5.0 — 2026-04-08
+
+- =feat=: v3 wire format — bilingual gossip with mandatory identity
+- =docs=: v3 wire format spec, chaos testing process
+
+* Roadmap → v0.7.0
+
+The next minor will focus on MCP integration and config hardening:
+
+- *MCP server*: aq exposed as a Model Context Protocol server so Claude
+  Code and other agents can query/announce without subprocess shelling
+- *Additional CLI flags*: more direct controls for the common operations
+  currently buried in subcommands
+- *Config contract vetting*: schema validation of =~/.aq/config.json= at
+  load time, with structured error reporting
+- *Config versioning support*: =config_version= field is currently 2;
+  v0.7 will add explicit migration paths between versions
+- *=aq doctor= for config*: detect mismatches between installed binary
+  version and on-disk config version, suggest migrations, validate
+  transports against current schema
