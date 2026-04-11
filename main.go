@@ -199,23 +199,29 @@ type Broadcast struct {
 	Ts              float64  `json:"-"`
 	TTL             int      `json:"-"`
 	ID              string   `json:"-"`
+	// IsWhisper marks low-priority broadcasts with context-aware suppression.
+	// Whisper broadcasts have a severity ceiling of MEDIUM in conflict detection,
+	// encoding GEACL suppression semantics: safety-critical updates use announce
+	// (aggressive propagation), routine updates use whisper (throttled).
+	IsWhisper bool `json:"-"`
 }
 
 // broadcastWire is the v3 JSON shape we write. Short keys, mandatory identity.
 type broadcastWire struct {
-	V      int      `json:"v"`
-	Agent  string   `json:"agent"`
-	Host   string   `json:"host"`
-	User   string   `json:"user"`
-	Wt     string   `json:"worktree"`
-	CID    string   `json:"cid"`
-	Claim  string   `json:"claim,omitempty"`
-	Phase  Phase    `json:"phase"`
-	Status Status   `json:"status"`
-	Files  []string `json:"files,omitempty"`
-	Ts     float64  `json:"ts"`
-	TTL    int      `json:"ttl"`
-	ID     string   `json:"id"`
+	V         int      `json:"v"`
+	Agent     string   `json:"agent"`
+	Host      string   `json:"host"`
+	User      string   `json:"user"`
+	Wt        string   `json:"worktree"`
+	CID       string   `json:"cid"`
+	Claim     string   `json:"claim,omitempty"`
+	Phase     Phase    `json:"phase"`
+	Status    Status   `json:"status"`
+	Files     []string `json:"files,omitempty"`
+	Ts        float64  `json:"ts"`
+	TTL       int      `json:"ttl"`
+	ID        string   `json:"id"`
+	IsWhisper bool     `json:"is_whisper,omitempty"`
 }
 
 // broadcastLoose is what we accept on read — every key we've ever used.
@@ -235,12 +241,8 @@ type broadcastLoose struct {
 	Files           []string `json:"files"`
 	Ts              float64  `json:"ts"`
 	TTL             int      `json:"ttl"`
-	ID              string   `json:"id"`
-	// IsWhisper marks low-priority broadcasts with context-aware suppression.
-	// Whisper broadcasts have a severity ceiling of MEDIUM in conflict detection,
-	// encoding GEACL suppression semantics: safety-critical updates use announce
-	// (aggressive propagation), routine updates use whisper (throttled).
-	IsWhisper bool `json:"is_whisper,omitempty"`
+	ID        string `json:"id"`
+	IsWhisper bool   `json:"is_whisper,omitempty"`
 }
 
 // MarshalJSON writes v3 wire format — opinionated on write.
@@ -250,19 +252,20 @@ func (b Broadcast) MarshalJSON() ([]byte, error) {
 		v = 3
 	}
 	return json.Marshal(broadcastWire{
-		V:      v,
-		Agent:  b.Agent,
-		Host:   b.Host,
-		User:   b.User,
-		Wt:     b.Worktree,
-		CID:    b.ConjectureID,
-		Claim:  b.ConjectureClaim,
-		Phase:  b.Phase,
-		Status: b.Status,
-		Files:  b.Files,
-		Ts:     b.Ts,
-		TTL:    b.TTL,
-		ID:     b.ID,
+		V:         v,
+		Agent:     b.Agent,
+		Host:      b.Host,
+		User:      b.User,
+		Wt:        b.Worktree,
+		CID:       b.ConjectureID,
+		Claim:     b.ConjectureClaim,
+		Phase:     b.Phase,
+		Status:    b.Status,
+		Files:     b.Files,
+		Ts:        b.Ts,
+		TTL:       b.TTL,
+		ID:        b.ID,
+		IsWhisper: b.IsWhisper,
 	})
 }
 
@@ -292,6 +295,7 @@ func (b *Broadcast) UnmarshalJSON(data []byte) error {
 	b.Ts = l.Ts
 	b.TTL = l.TTL
 	b.ID = l.ID
+	b.IsWhisper = l.IsWhisper
 	return nil
 }
 
