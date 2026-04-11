@@ -1,0 +1,352 @@
+#+TITLE: aq: A Gossip-Enhanced Ambient Coordination Layer for Multi-Agent Development
+#+SUBTITLE: Experience Report
+#+AUTHOR: Jason Walsh
+#+DATE: 2026-03-15
+#+OPTIONS: toc:nil num:t
+#+STARTUP: overview
+
+#+LATEX_CLASS: acmart
+#+LATEX_CLASS_OPTIONS: [sigconf,review,anonymous]
+#+LATEX_HEADER: \usepackage{booktabs}
+#+LATEX_HEADER: \acmConference[ELS '26]{European Lisp Symposium}{May 11--12, 2026}{Krakow, Poland}
+#+LATEX_HEADER: \copyrightyear{2026}
+
+* Abstract
+
+Multi-agent AI development lacks a presence layer---a mechanism for
+agents working in parallel on shared codebases to discover potential
+conflicts before merge time. This experience report describes =aq=, a
+concrete implementation of the GEACL (Gossip-Enhanced Agentic
+Coordination Layer) research agenda proposed in arXiv papers
+2508.01531 and 2512.03285. Unlike those theoretical frameworks, =aq=
+is a working tool: a filesystem-backed gossip protocol that AI agents
+use to broadcast intent, conjecture identity, and file-level scope.
+We describe the architecture, the dogfooding experiment (four agents
+building =aq= using =aq=), eight documented failure modes discovered
+in under an hour, and the design principles that survived. The
+contribution is twofold: (1) the first running implementation of
+GEACL semantics, and (2) a detailed failure analysis demonstrating
+that even minimal local gossip is harder than anticipated. The tool is
+implemented in Go; a Guile Scheme port exists as a scaffold.
+
+* CCS Concepts
+
+- Software and its engineering -> Multiagent systems
+- Software and its engineering -> Collaboration in software development
+- Computing methodologies -> Multi-agent systems
+
+* Keywords
+
+gossip protocols, multi-agent coordination, ambient presence, CPRR, conflict detection
+
+* Introduction
+
+The GEACL papers (Habiba & Khan 2025, Khan et al. 2025) propose gossip
+protocols as a missing substrate for multi-agent AI coordination.
+They identify seven open research questions: semantic filtering, trust
+metrics, adaptive policies, temporal consistency, churn resilience,
+emergent coordination, and evaluation methods. However, both papers
+explicitly state ``rather than proposing a complete framework''---they
+write the research agenda but build no tool.
+
+=aq= fills this gap. It is a concrete instantiation of GEACL running
+on a single machine, with CPRR (Conjecture-Proof-Refutation-Refinement)
+as the semantic payload and the filesystem as the canonical transport.
+The name stands for ``Ambient Queue''---ambient because broadcasts carry
+no obligation and may expire unread; queue because messages are ordered
+by timestamp.
+
+The contribution of this experience report is not the implementation
+(1,601 lines of Go, 59 tests) but the detailed documentation of failure
+modes discovered when four AI agents attempted to build =aq= using =aq=
+in a 58-minute dogfooding session. Local gossip on a single machine---no
+network, no broker, no daemon, just JSON files in a directory---failed
+eight ways. Each failure illuminates a structural challenge that any
+GEACL implementation must address.
+
+* Background
+
+** The L1.5 Gap
+
+Multi-agent development tooling exhibits a structural gap. At L1
+(work state), tools like =bd=/beads track authoritative task state: a
+bead's status is a fact, owned and persisted. At L2 (retrieval),
+systems like RAG-based memory answer ``what do we already know?''
+Neither answers the question: ``who else is working on this file
+right now?''
+
+=aq= occupies L1.5---the presence layer. It answers probabilistically
+about in-flight uncertainty. Broadcasts are not authoritative and may
+expire unread. The design is inspired by mDNS/Zeroconf: broadcast
+``does anyone know this address?'' The cost is near zero; the benefit
+when someone does know is conflict avoidance before the merge wall.
+
+** GEACL: The Research Agenda
+
+The 2025 GEACL papers (arXiv 2508.01531, 2512.03285) argue that gossip
+protocols offer a missing layer for context-rich, adaptive communication
+in agentic AI. Key insights:
+
+1. *Context-aware suppression*: Safety-critical updates propagate
+   aggressively; routine updates can be throttled. =aq= implements
+   this via TTL: =announce= (1 hour TTL) vs =whisper= (60 second TTL).
+
+2. *Weakly consistent situational alignment*: MCP/A2A handle intent,
+   roles, and tools; gossip maintains situational alignment without
+   strong consistency guarantees.
+
+3. *Gap identification*: ``MCP lacks constructs for collaborative
+   state convergence. There is no framework for bottom-up task
+   claiming, bidding, or peer negotiation.''
+
+=aq= does not replace MCP/A2A. It is the layer beneath them that
+neither defines.
+
+** CPRR: Epistemic Payload
+
+Unlike production gossip protocols (Cassandra, SWIM, Serf) that carry
+health and topology information, =aq= carries epistemic state. Each
+broadcast includes:
+
+- *conjecture_id*: which hypothesis is being prosecuted (e.g., C-1)
+- *conjecture_claim*: natural language description of intent
+- *phase*: conjecture / proof / refutation / refinement
+
+Conflict severity is modulated by phase intersection: two agents in
+=proof= phase over shared files is HIGH risk; =conjecture= phase is LOW.
+This CPRR-as-payload pattern has no direct analog in existing gossip
+implementations.
+
+* Architecture
+
+** Three-Primitive Interlock
+
+=aq= does not exist alone. It is the temporal layer in a three-primitive
+system:
+
+| Primitive | Dimension | Question        | Implementation |
+|-----------+-----------+-----------------+----------------|
+| =sb=      | spatial   | where am I?     | git worktree   |
+| =cprr=    | epistemic | why am I here?  | conjecture     |
+| =aq=      | temporal  | who else knows? | broadcast      |
+
+A broadcast payload requires all three: worktree identity (=sb=),
+conjecture context (=cprr=), and the broadcast itself (=aq=). They are
+coupled by design. An agent without spatial context is lost; a broadcast
+without epistemic context is noise; presence without a channel is silence.
+
+** Broadcast Payload
+
+The wire format is NDJSON (newline-delimited JSON) with the following
+fields:
+
+#+begin_src javascript
+{
+  "agent": "github.com/jwalsh/aq/worktrees/fix-auth",
+  "worktree": "fix-auth",
+  "conjecture_id": "C-1",
+  "conjecture_claim": "replacing session tokens with OAuth2 flow",
+  "phase": "proof",
+  "status": "prosecuting",
+  "files": ["auth.go", "session.go"],
+  "ts": 1710345600.123,
+  "ttl": 3600,
+  "id": "01HS2X3Y4Z..."
+}
+#+end_src
+
+** Filesystem-First Transport
+
+The filesystem is the only required transport. Every feature must work
+with =ls= and =cat= as debugger. Directory structure:
+
+#+begin_example
+~/.aq/
+  channels/
+    broadcast/
+      requests/    # active broadcasts
+      archive/     # expired broadcasts
+#+end_example
+
+Cross-machine presence works by pointing =AQ_HOME= to a shared mount
+(NFS, SMB, WebDAV). No code changes required. This is the TRAMP
+principle: the consumer of an operation should not change behavior
+based on where the data lives or how it got there.
+
+* The Dogfooding Experiment
+
+** Setup
+
+Date: 2026-03-13. Four AI agents (Claude), four git worktrees, one
+machine. Task: build =aq= using =aq=. The meta-circularity is intentional.
+
+| Agent | Mission | Conjecture |
+|-------+---------+------------|
+| Alpha | Core types, ULID, storage | C-1 (filesystem transport) |
+| Beta  | Conflict detection, CLI | C-4 (phase severity) |
+| Gamma | Operational commands, UX | C-3 (Wave semantics) |
+| Delta | Tests, integration | C-2 (conjecture identity) |
+
+Duration: 58 minutes of parallel work.
+
+** Eight Failures in Under an Hour
+
+*** Failure 1: Bootstrap Paradox
+
+Cannot dogfood what does not exist yet. The Python prototype existed
+but had zero tests. The Go port was 65 lines of stub. Gossip provides
+value on the second round, never the first.
+
+*** Failure 2: Single-File Saturation
+
+First =aq check= after all agents announced:
+
+#+begin_example
+[HIGH] aq-alpha (C-1) <-> aq-beta (C-4) -- shared: main.go
+[HIGH] aq-alpha (C-1) <-> aq-delta (C-2) -- shared: main.go
+[MEDIUM] aq-alpha (C-1) <-> aq-gamma (C-3) -- shared: main.go
+#+end_example
+
+Four agents, one file, six conflict pairs, 100% false positive rate.
+File-overlap detection assumes file-level isolation. Single-file repos
+(a Go ecosystem convention) are the worst case for this heuristic.
+
+*** Failure 3: TTL Cliff
+
+Default TTL was 300 seconds. Real coding sessions run 30-60 minutes.
+All four broadcasts expired at T+7min while agents were still working.
+=aq status= showed ``no active broadcasts.'' The system designed to
+track presence had no idea any agents existed. TTL has since been
+bumped to 3600 seconds, but heartbeat is still mandatory for
+multi-hour sessions.
+
+*** Failure 4: Worktree Address Instability
+
+We created four worktrees with =sb add= (feat/aq-alpha through
+feat/aq-delta). Agents created four different worktrees
+(worktree-agent-{hash}). The gossip layer had perfect information
+about the wrong worktrees. Agent identity must be stable across
+session boundaries.
+
+*** Failure 5: Ghost Broadcasts
+
+Agents broadcast claims about files that do not exist (=auth.py=,
+=session.py= in a Go repo). Nobody noticed because nobody checked.
+Gossip happily broadcasts lies. Invariant validation catches
+them---but only if someone runs =aq validate=.
+
+*** Failure 6: WS-* Deja Vu
+
+Every failure has a 2005 spec. UDDI registry expiry = TTL cliff.
+WS-Notification = broadcast semantics. The failure modes are
+structurally identical to enterprise SOA circa 2005. The difference:
+JSON files vs XML Schema, and recovery cost is hours not months.
+
+*** Failure 7: Forgot to Announce
+
+The agent writing DOGFOODING.md---documentation about how to use
+=aq announce=---forgot to run =aq announce=. 40 minutes of active
+work, zero broadcasts. Manual gossip is an oxymoron. Auto-heartbeat
+via git hooks is the only viable path.
+
+*** Failure 8: Stale Binary
+
+=aq validate=: ``unknown command.'' The code had the feature. The
+running binary did not. The agent had not run =go build= after adding
+the feature. A tool requiring manual rebuild has the same problem as
+manual announce---nobody remembers.
+
+** What Survived
+
+Despite eight failures, key design principles held:
+
+1. *Filesystem-first transport*: =ls= and =cat= as debugger.
+   =t.TempDir()= for test isolation. Zero setup.
+
+2. *NDJSON + TTL*: Human-readable, machine-parseable. Expired
+   broadcasts archived, not deleted.
+
+3. *CPRR phase as payload*: Novel. No analog in Cassandra, SWIM, or
+   Serf, which carry health/topology, not epistemic state.
+
+4. *The axiom held*: Nobody proposed adding a coordinator or broker.
+   ``Gossip, not coordination'' survived 8K token compression and
+   four agents.
+
+* Conjecture Status
+
+| ID | Status | Evidence |
+|----+--------+----------|
+| C-1 | Partially proven | Chaos tests: p99=77ms at 10 agents, 239ms at 50. Under 500ms threshold. |
+| C-2 | Refuted | Agent identity unstable (failure #4) |
+| C-3 | Not refuted | NDJSON+TTL expressed everything needed |
+| C-4 | Partially proven | Phase severity is sound; file granularity too coarse |
+
+New conjectures from the wreckage:
+- C-7: Auto-renewal/heartbeat prevents TTL cliff
+- C-8: Function-level granularity resolves single-file false positives
+
+* Related Work
+
+** Gossip Protocols
+
+SWIM (Das et al. 2002) provides scalable cluster membership via
+probabilistic failure detection. Serf (HashiCorp) builds event
+broadcasting on SWIM via memberlist. ZeroMQ zgossip implements
+decentralized key-value tuples over inproc/IPC/TCP. All carry
+health/topology; none carry epistemic state.
+
+** Multi-Agent Coordination
+
+Gas Town (Yegge 2026) uses hierarchical orchestration with Git-backed
+persistence: Mayor assigns tasks, Polecats execute. No gossip. Claude
+Code Agent Teams (2026) uses direct messaging with file locking.
+CrewAI, LangGraph, AutoGen all use structured communication with
+centralized orchestration.
+
+** Semantic Conflict Detection
+
+Cloud Studio (Levin & Yehudai 2015) provides real-time conflict
+tracking at semantic element level. SAM (2023) generates unit tests
+as partial specifications to detect behavioral conflicts. Both are
+reactive; =aq= is proactive.
+
+* Conclusions
+
+=aq= is the first concrete implementation of the GEACL research agenda.
+It instantiates gossip-enhanced coordination for AI agents with three
+novel elements: (1) filesystem-first transport, (2) CPRR epistemic
+payload, (3) phase-modulated conflict severity.
+
+The dogfooding demonstrated that even minimal local gossip---no network,
+no broker, no daemon, just JSON files in a directory on one machine---
+fails in eight documented ways. Each failure illuminates structural
+challenges for any GEACL implementation.
+
+The primary contribution is the failure documentation. Local presence is
+a prerequisite for distributed presence, and we have not solved local
+yet. The tool is 12-18 months early. The insight is the product.
+
+** Acknowledgments
+
+The =aq= implementation was built by multiple Claude agents in parallel
+worktrees, with Diego Martinez contributing the prior art survey. The
+CPRR methodology derives from Lakatos's /Proofs and Refutations/.
+
+** References
+
+- Das, Gupta, Kempe. ``SWIM: Scalable Weakly-consistent Infection-style
+  Process Group Membership.'' Cornell, 2002.
+- Habiba, Khan. ``Revisiting Gossip Protocols: A Vision for Emergent
+  Coordination in Agentic Multi-Agent Systems.'' arXiv:2508.01531, 2025.
+- Khan, Habiba, Khan. ``A Gossip-Enhanced Communication Substrate for
+  Agentic AI.'' arXiv:2512.03285, 2025.
+- Lakatos. /Proofs and Refutations./ Cambridge University Press, 1976.
+- Levin, Yehudai. ``Alleviating Merge Conflicts with Fine-grained
+  Visual Awareness.'' arXiv:1508.01872, 2015.
+- Yegge. ``Welcome to Gas Town.'' Medium, 2026.
+
+* Local Variables                                                  :noexport:
+# Local Variables:
+# org-confirm-babel-evaluate: nil
+# End:

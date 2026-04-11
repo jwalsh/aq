@@ -641,7 +641,7 @@ and must not redefine the three primitives.
 | CPRR.org   | Lakatos grounding, formal definition | planned |
 | SEFACA.org | Probe-before-execute integration     | planned |
 | GASTOWN.org| Mayor/Polecat/Witness role mapping   | planned |
-| ELS.org    | ELS 2026 submission                  | planned |
+| ELS.org    | ELS 2026 submission                  | done (papers/els-2026-aq-geacl.org) |
 
 * Local Variables                                                  :noexport:
 # Local Variables:
