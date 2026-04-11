@@ -68,6 +68,8 @@ func generateULID() string {
 // ---------- Broadcast payload ----------
 
 // Phase represents a CPRR epistemic phase.
+// Internally stored as full word; serialized as single char in v3 JSON.
+// Gossip is bilingual: accepts "p" or "proof" on read, emits "p" on write.
 type Phase string
 
 const (
@@ -76,6 +78,20 @@ const (
 	PhaseRefutation Phase = "refutation"
 	PhaseRefinement Phase = "refinement"
 )
+
+// phaseToChar maps internal phase to v3 single-char wire encoding.
+var phaseToChar = map[Phase]string{
+	PhaseConjecture: "c",
+	PhaseProof:      "p",
+	PhaseRefutation: "r",
+	PhaseRefinement: "n",
+}
+
+// charToPhase maps single-char wire encoding back to internal phase.
+var charToPhase = map[string]Phase{
+	"c": PhaseConjecture, "p": PhaseProof,
+	"r": PhaseRefutation, "n": PhaseRefinement,
+}
 
 // Valid returns true if p is one of the four CPRR phases.
 func (p Phase) Valid() bool {
@@ -86,7 +102,30 @@ func (p Phase) Valid() bool {
 	return false
 }
 
+// MarshalJSON emits the single-char form for v3 wire compactness.
+func (p Phase) MarshalJSON() ([]byte, error) {
+	if c, ok := phaseToChar[p]; ok {
+		return json.Marshal(c)
+	}
+	return json.Marshal(string(p))
+}
+
+// UnmarshalJSON accepts both single-char ("p") and full word ("proof").
+func (p *Phase) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	if full, ok := charToPhase[s]; ok {
+		*p = full
+		return nil
+	}
+	*p = Phase(s)
+	return nil
+}
+
 // Status represents a broadcast's work status.
+// Same bilingual approach as Phase: single char on wire, full word internally.
 type Status string
 
 const (
@@ -94,6 +133,40 @@ const (
 	StatusDone        Status = "done"
 	StatusBlocked     Status = "blocked"
 )
+
+// statusToChar maps internal status to v3 single-char wire encoding.
+var statusToChar = map[Status]string{
+	StatusProsecuting: "a", // active
+	StatusDone:        "d",
+	StatusBlocked:     "b",
+}
+
+// charToStatus maps single-char wire encoding back to internal status.
+var charToStatus = map[string]Status{
+	"a": StatusProsecuting, "d": StatusDone, "b": StatusBlocked,
+}
+
+// MarshalJSON emits the single-char form for v3 wire compactness.
+func (s Status) MarshalJSON() ([]byte, error) {
+	if c, ok := statusToChar[s]; ok {
+		return json.Marshal(c)
+	}
+	return json.Marshal(string(s))
+}
+
+// UnmarshalJSON accepts both single-char ("a") and full word ("prosecuting").
+func (s *Status) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return err
+	}
+	if full, ok := charToStatus[str]; ok {
+		*s = full
+		return nil
+	}
+	*s = Status(str)
+	return nil
+}
 
 // Severity represents a conflict severity level.
 type Severity string
@@ -108,11 +181,53 @@ const (
 //  1. announce() before touching files
 //  2. re-announce every TTL/2 while working
 //  3. announce(status="done") when finished
+//
+// v3 wire format: writes short keys (cid, claim), mandatory host/user,
+// single-char phase/status. Reads anything — v2 long keys, v3 short keys,
+// mixed. Gossip is guessy, not strict.
 type Broadcast struct {
+	V               int      `json:"-"` // wire version, not a contract
+	Agent           string   `json:"-"`
+	Host            string   `json:"-"`
+	User            string   `json:"-"`
+	Worktree        string   `json:"-"`
+	ConjectureID    string   `json:"-"`
+	ConjectureClaim string   `json:"-"`
+	Phase           Phase    `json:"-"`
+	Status          Status   `json:"-"`
+	Files           []string `json:"-"`
+	Ts              float64  `json:"-"`
+	TTL             int      `json:"-"`
+	ID              string   `json:"-"`
+}
+
+// broadcastWire is the v3 JSON shape we write. Short keys, mandatory identity.
+type broadcastWire struct {
+	V      int      `json:"v"`
+	Agent  string   `json:"agent"`
+	Host   string   `json:"host"`
+	User   string   `json:"user"`
+	Wt     string   `json:"worktree"`
+	CID    string   `json:"cid"`
+	Claim  string   `json:"claim,omitempty"`
+	Phase  Phase    `json:"phase"`
+	Status Status   `json:"status"`
+	Files  []string `json:"files,omitempty"`
+	Ts     float64  `json:"ts"`
+	TTL    int      `json:"ttl"`
+	ID     string   `json:"id"`
+}
+
+// broadcastLoose is what we accept on read — every key we've ever used.
+// Gossip in any dialect.
+type broadcastLoose struct {
+	V               int      `json:"v"`
 	Agent           string   `json:"agent"`
-	Host            string   `json:"host,omitempty"`
-	User            string   `json:"user,omitempty"`
-	Worktree        string   `json:"worktree"`
+	Host            string   `json:"host"`
+	User            string   `json:"user"`
+	Wt              string   `json:"worktree"`
+	CID             string   `json:"cid"`
+	Claim           string   `json:"claim"`
 	ConjectureID    string   `json:"conjecture_id"`
 	ConjectureClaim string   `json:"conjecture_claim"`
 	Phase           Phase    `json:"phase"`
@@ -123,12 +238,68 @@ type Broadcast struct {
 	ID              string   `json:"id"`
 }
 
+// MarshalJSON writes v3 wire format — opinionated on write.
+func (b Broadcast) MarshalJSON() ([]byte, error) {
+	v := b.V
+	if v == 0 {
+		v = 3
+	}
+	return json.Marshal(broadcastWire{
+		V:      v,
+		Agent:  b.Agent,
+		Host:   b.Host,
+		User:   b.User,
+		Wt:     b.Worktree,
+		CID:    b.ConjectureID,
+		Claim:  b.ConjectureClaim,
+		Phase:  b.Phase,
+		Status: b.Status,
+		Files:  b.Files,
+		Ts:     b.Ts,
+		TTL:    b.TTL,
+		ID:     b.ID,
+	})
+}
+
+// UnmarshalJSON reads any dialect — flexible on read.
+func (b *Broadcast) UnmarshalJSON(data []byte) error {
+	var l broadcastLoose
+	if err := json.Unmarshal(data, &l); err != nil {
+		return err
+	}
+	b.V = l.V
+	b.Agent = l.Agent
+	b.Host = l.Host
+	b.User = l.User
+	b.Worktree = l.Wt
+	// Prefer v3 short key, fall back to v2 long key
+	b.ConjectureID = l.CID
+	if b.ConjectureID == "" {
+		b.ConjectureID = l.ConjectureID
+	}
+	b.ConjectureClaim = l.Claim
+	if b.ConjectureClaim == "" {
+		b.ConjectureClaim = l.ConjectureClaim
+	}
+	b.Phase = l.Phase
+	b.Status = l.Status
+	b.Files = l.Files
+	b.Ts = l.Ts
+	b.TTL = l.TTL
+	b.ID = l.ID
+	return nil
+}
+
 // NewBroadcast creates a Broadcast with sensible defaults filled in.
+// v3: always stamps identity. If detection fails, "unknown" — never empty.
 func NewBroadcast() Broadcast {
 	return Broadcast{
-		Ts:  float64(time.Now().Unix()),
-		TTL: DefaultTTL,
-		ID:  generateULID(),
+		V:    3,
+		Host: getHostname(),
+		User: getUsername(),
+		Ts:   float64(time.Now().Unix()),
+		TTL:  DefaultTTL,
+		ID:   generateULID(),
 	}
 }
 
@@ -1096,10 +1267,8 @@ func buildAnnounceBroadcast(p announceParams) Broadcast {
 	if claim == "" {
 		claim = "working on " + p.conjecture
 	}
-	b := NewBroadcast()
+	b := NewBroadcast() // v3: Host + User already set
 	b.Agent = sb.AgentAddress
-	b.Host = getHostname()
-	b.User = getUsername()
 	b.Worktree = sb.Branch
 	b.ConjectureID = p.conjecture
 	b.ConjectureClaim = claim
@@ -1913,18 +2082,20 @@ func fanoutMQTT(b Broadcast, cfg mqttConfig) {
 //   Byte  4+:  JSON-encoded Broadcast
 
 // encodeFrame wraps a JSON payload in the 4-byte AQ multicast frame header.
+// v3: version byte is 0x03. The JSON inside is self-describing (has "v":3).
 func encodeFrame(jsonPayload []byte) []byte {
 	frame := make([]byte, 4+len(jsonPayload))
 	frame[0] = 0x41 // 'A'
 	frame[1] = 0x51 // 'Q'
-	frame[2] = 0x01 // version
+	frame[2] = 0x03 // version — v3
 	frame[3] = 0x01 // JSON format
 	copy(frame[4:], jsonPayload)
 	return frame
 }
 
 // decodeFrame strips the 4-byte header and returns the JSON payload.
-// Returns nil, error for invalid/truncated/unknown frames.
+// Accepts version 0x01 (v1/v2) and 0x03 (v3) — gossip doesn't reject
+// messages because they have an accent.
 func decodeFrame(datagram []byte) ([]byte, error) {
 	if len(datagram) < 5 {
 		return nil, fmt.Errorf("frame too short: %d bytes", len(datagram))
@@ -1932,7 +2103,7 @@ func decodeFrame(datagram []byte) ([]byte, error) {
 	if datagram[0] != 0x41 || datagram[1] != 0x51 {
 		return nil, fmt.Errorf("bad magic: %02x%02x", datagram[0], datagram[1])
 	}
-	if datagram[2] != 0x01 {
+	if datagram[2] != 0x01 && datagram[2] != 0x03 {
 		return nil, fmt.Errorf("unknown version: %d", datagram[2])
 	}
 	if datagram[3] != 0x01 {

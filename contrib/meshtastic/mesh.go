@@ -50,15 +50,20 @@ const subprocessTimeout = 30 * time.Second
 
 // ---------- Broadcast payload (matches main.go) ----------
 
-// Broadcast is the aq broadcast payload. Same schema as main.go.
+// Broadcast is the aq broadcast payload. Simplified copy of main.go struct
+// for the standalone mesh binary. Uses plain strings for phase/status
+// since this is a bridge, not the canonical implementation.
 type Broadcast struct {
+	V               int      `json:"v,omitempty"`
 	Agent           string   `json:"agent"`
+	Host            string   `json:"host,omitempty"`
+	User            string   `json:"user,omitempty"`
 	Worktree        string   `json:"worktree"`
-	ConjectureID    string   `json:"conjecture_id"`
-	ConjectureClaim string   `json:"conjecture_claim"`
+	ConjectureID    string   `json:"cid"`
+	ConjectureClaim string   `json:"claim,omitempty"`
 	Phase           string   `json:"phase"`
 	Status          string   `json:"status"`
-	Files           []string `json:"files"`
+	Files           []string `json:"files,omitempty"`
 	Ts              float64  `json:"ts"`
 	TTL             int      `json:"ttl"`
 	ID              string   `json:"id"`
@@ -80,15 +85,20 @@ func generateULID() string {
 // Full JSON broadcasts are 300-500 bytes. The compact format compresses
 // to <=80 bytes using pipe-delimited fields with abbreviated values.
 //
-// Format: 1|<phase_code>|<agent_short>|<ts_delta>|<status_code>[|<files>]
+// v3 format: 3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
+// v1 format: 1|<phase>|<agent_short>|<ts_delta>|<status>|<cid>[|<files>]
+//
+// v3 adds host + user (identity is mandatory), uses ts_delta from epoch
+// base 2026-01-01 to save bytes. Receivers accept both v1 and v3.
 //
 // Field encoding:
-//   version:     always "1"
 //   phase_code:  c=conjecture, p=proof, r=refutation, n=refinement
-//   agent_short: last 20 chars of agent address
-//   ts_delta:    seconds since epoch as compact decimal
 //   status_code: a=prosecuting, d=done, b=blocked
+//   ts_delta:    v3: seconds since 2026-01-01; v1: raw unix seconds
 //   files:       comma-separated basenames (optional)
+
+// epochBase is 2026-01-01T00:00:00Z for ts_delta encoding.
+const epochBase int64 = 1767225600
 
 var phaseToCode = map[string]string{
 	"conjecture": "c",
@@ -116,7 +126,8 @@ var codeToStatus = map[string]string{
 	"b": "blocked",
 }
 
-// compactEncode serializes a Broadcast into the compact wire format.
+// compactEncode serializes a Broadcast into the v3 compact wire format.
+// Format: 3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
 // Returns error if the result exceeds 200 bytes (Meshtastic frame limit).
 func compactEncode(broadcast Broadcast) (string, error) {
 	phaseCode, ok := phaseToCode[broadcast.Phase]
@@ -135,19 +146,36 @@ func compactEncode(broadcast Broadcast) (string, error) {
 		agentShort = agentShort[len(agentShort)-20:]
 	}
 
-	// Timestamp as compact integer (seconds since epoch).
-	tsDelta := strconv.FormatInt(int64(broadcast.Ts), 10)
+	// Host and user: truncate to 8 chars, fall back to "?" if empty.
+	host := broadcast.Host
+	if host == "" {
+		host = "?"
+	}
+	if len(host) > 8 {
+		host = host[:8]
+	}
+	user := broadcast.User
+	if user == "" {
+		user = "?"
+	}
+	if len(user) > 8 {
+		user = user[:8]
+	}
 
-	// Build conjecture tag: "C-42" stays as-is.
-	conjectureTag := broadcast.ConjectureID
+	// ts_delta: seconds since 2026-01-01 epoch base.
+	tsDelta := strconv.FormatInt(int64(broadcast.Ts)-epochBase, 10)
+
+	cid := broadcast.ConjectureID
 
 	parts := []string{
-		"1",
+		"3",
+		host,
+		user,
 		phaseCode,
+		statusCode,
+		cid,
 		agentShort,
 		tsDelta,
-		statusCode,
-		conjectureTag,
 	}
 
 	// Append basenames of files if present.
@@ -162,9 +190,8 @@ func compactEncode(broadcast Broadcast) (string, error) {
 	encoded := strings.Join(parts, "|")
 
 	if len(encoded) > 200 {
-		// Truncate files to fit within the Meshtastic frame.
-		// Drop files and retry.
-		parts = parts[:6]
+		// Drop files to fit.
+		parts = parts[:8]
 		encoded = strings.Join(parts, "|")
 		if len(encoded) > 200 {
 			return "", fmt.Errorf("compact payload exceeds 200 bytes even without files: %d bytes", len(encoded))
@@ -175,7 +202,9 @@ func compactEncode(broadcast Broadcast) (string, error) {
 }
 
 // compactDecode parses a compact wire payload back into a Broadcast.
-// Reconstructs the full JSON-serializable struct for local storage.
+// Accepts both v1 and v3 compact formats — gossip in any accent.
+//   v1: 1|<phase>|<agent_short>|<ts_raw>|<status>|<cid>[|<files>]
+//   v3: 3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
 func compactDecode(payload string) (Broadcast, error) {
 	parts := strings.Split(payload, "|")
 	if len(parts) < 6 {
@@ -183,10 +212,73 @@ func compactDecode(payload string) (Broadcast, error) {
 	}
 
 	version := parts[0]
-	if version != "1" {
-		return Broadcast{}, fmt.Errorf("unsupported compact version: %s", version)
+
+	switch version {
+	case "3":
+		return compactDecodeV3(parts)
+	case "1":
+		return compactDecodeV1(parts)
+	default:
+		return Broadcast{}, fmt.Errorf("unknown compact version %q — maybe newer gossip?", version)
+	}
+}
+
+// compactDecodeV3 decodes the v3 compact format with identity fields.
+func compactDecodeV3(parts []string) (Broadcast, error) {
+	if len(parts) < 8 {
+		return Broadcast{}, fmt.Errorf("v3 compact needs >=8 fields, got %d", len(parts))
 	}
 
+	host := parts[1]
+	user := parts[2]
+
+	phase, ok := codeToPhase[parts[3]]
+	if !ok {
+		return Broadcast{}, fmt.Errorf("unknown phase code: %s", parts[3])
+	}
+
+	status, ok := codeToStatus[parts[4]]
+	if !ok {
+		return Broadcast{}, fmt.Errorf("unknown status code: %s", parts[4])
+	}
+
+	cid := parts[5]
+	agentShort := parts[6]
+
+	tsDelta, err := strconv.ParseInt(parts[7], 10, 64)
+	if err != nil {
+		return Broadcast{}, fmt.Errorf("invalid ts_delta: %w", err)
+	}
+	tsSeconds := tsDelta + epochBase
+
+	var files []string
+	if len(parts) > 8 && parts[8] != "" {
+		files = strings.Split(parts[8], ",")
+	}
+
+	worktree := agentShort
+	if idx := strings.LastIndex(agentShort, "/"); idx >= 0 {
+		worktree = agentShort[idx+1:]
+	}
+
+	return Broadcast{
+		V:            3,
+		ID:           generateULID(),
+		Host:         host,
+		User:         user,
+		Agent:        agentShort,
+		Worktree:     worktree,
+		ConjectureID: cid,
+		Phase:        phase,
+		Status:       status,
+		Files:        files,
+		Ts:           float64(tsSeconds),
+		TTL:          3600,
+	}, nil
+}
+
+// compactDecodeV1 decodes the legacy v1 compact format (no identity).
+func compactDecodeV1(parts []string) (Broadcast, error) {
 	phase, ok := codeToPhase[parts[1]]
 	if !ok {
 		return Broadcast{}, fmt.Errorf("unknown phase code: %s", parts[1])
@@ -211,13 +303,13 @@ func compactDecode(payload string) (Broadcast, error) {
 		files = strings.Split(parts[6], ",")
 	}
 
-	// Derive worktree from agent address (last path component).
 	worktree := agentShort
 	if idx := strings.LastIndex(agentShort, "/"); idx >= 0 {
 		worktree = agentShort[idx+1:]
 	}
 
-	broadcast := Broadcast{
+	return Broadcast{
+		V:            1,
 		ID:           generateULID(),
 		Agent:        agentShort,
 		Worktree:     worktree,
@@ -227,9 +319,7 @@ func compactDecode(payload string) (Broadcast, error) {
 		Files:        files,
 		Ts:           float64(tsSeconds),
 		TTL:          3600,
-	}
-
-	return broadcast, nil
+	}, nil
 }
 
 // ---------- Transport: serial via meshtastic CLI ----------
@@ -346,8 +436,8 @@ func subscribeMQTT(mqttHost string, shutdown <-chan struct{}) error {
 		}
 		messagePayload := line[spaceIdx+1:]
 
-		// Skip non-aq payloads: aq compact format starts with "1|"
-		if !strings.HasPrefix(messagePayload, "1|") {
+		// Skip non-aq payloads: aq compact format starts with "1|" (v1) or "3|" (v3)
+		if !strings.HasPrefix(messagePayload, "1|") && !strings.HasPrefix(messagePayload, "3|") {
 			continue
 		}
 
@@ -505,8 +595,24 @@ func main() {
 			fileList = strings.Split(*files, ",")
 		}
 
+		// Detect identity for v3.
+		hostname, _ := os.Hostname()
+		if hostname == "" {
+			hostname = "unknown"
+		}
+		if idx := strings.Index(hostname, "."); idx > 0 {
+			hostname = hostname[:idx]
+		}
+		username := os.Getenv("USER")
+		if username == "" {
+			username = "unknown"
+		}
+
 		broadcast := Broadcast{
+			V:               3,
 			ID:              generateULID(),
+			Host:            hostname,
+			User:            username,
 			Agent:           *agent,
 			Worktree:        worktree,
 			ConjectureID:    *conjecture,

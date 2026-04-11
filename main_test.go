@@ -27,13 +27,16 @@ func makeTempAQHome(t *testing.T) string {
 // makeBroadcast creates a Broadcast with defaults, applying optional overrides.
 func makeBroadcast(overrides ...func(*Broadcast)) Broadcast {
 	b := Broadcast{
+		V:               3,
 		ID:              generateULID(),
 		Agent:           "test/agent",
+		Host:            "testhost",
+		User:            "testuser",
 		Worktree:        "main",
 		ConjectureID:    "C-1",
 		ConjectureClaim: "test claim",
-		Phase:           "proof",
-		Status:          "prosecuting",
+		Phase:           PhaseProof,
+		Status:          StatusProsecuting,
 		Files:           []string{"main.go"},
 		Ts:              float64(time.Now().Unix()),
 		TTL:             300,
@@ -141,22 +144,22 @@ func TestBroadcast_JSON_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestBroadcast_WireFormat(t *testing.T) {
+func TestBroadcast_WireFormat_V3(t *testing.T) {
 	b := makeBroadcast()
 	j, err := b.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON error: %v", err)
 	}
 
-	// Verify that the JSON keys are snake_case, matching the Python prototype.
 	var raw map[string]interface{}
 	if err := json.Unmarshal([]byte(j), &raw); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
+	// v3 required keys: short names, mandatory identity, version field.
 	requiredKeys := []string{
-		"agent", "worktree", "conjecture_id", "conjecture_claim",
-		"phase", "status", "files", "ts", "ttl", "id",
+		"v", "agent", "host", "user", "worktree", "cid",
+		"phase", "status", "ts", "ttl", "id",
 	}
 	for _, key := range requiredKeys {
 		if _, ok := raw[key]; !ok {
@@ -164,13 +167,101 @@ func TestBroadcast_WireFormat(t *testing.T) {
 		}
 	}
 
-	// Verify no camelCase keys snuck in.
-	for key := range raw {
-		if key != strings.ToLower(key) && key != "ts" && key != "id" && key != "ttl" {
-			// Allow "ts", "id", "ttl" as-is since they are already lowercase.
-			// Flag anything with uppercase.
-			t.Errorf("JSON key %q is not snake_case", key)
-		}
+	// v field must be 3.
+	if v, ok := raw["v"].(float64); !ok || int(v) != 3 {
+		t.Errorf("v = %v, want 3", raw["v"])
+	}
+
+	// Phase should be single-char on wire.
+	if p, ok := raw["phase"].(string); !ok || len(p) != 1 {
+		t.Errorf("phase on wire = %q, want single char", raw["phase"])
+	}
+
+	// Status should be single-char on wire.
+	if s, ok := raw["status"].(string); !ok || len(s) != 1 {
+		t.Errorf("status on wire = %q, want single char", raw["status"])
+	}
+
+	// host and user must not be empty (v3 mandate).
+	if h, _ := raw["host"].(string); h == "" {
+		t.Error("host must not be empty in v3")
+	}
+	if u, _ := raw["user"].(string); u == "" {
+		t.Error("user must not be empty in v3")
+	}
+}
+
+func TestBroadcast_V2_BackwardCompat(t *testing.T) {
+	// A v2 message arrives: old key names, full-word phase/status, no "v" field.
+	v2JSON := `{
+		"agent": "origin/feature",
+		"worktree": "feature",
+		"conjecture_id": "C-42",
+		"conjecture_claim": "refactoring auth",
+		"phase": "proof",
+		"status": "prosecuting",
+		"files": ["auth.go"],
+		"ts": 1710345600,
+		"ttl": 3600,
+		"id": "0191a2b3c4d5e60000"
+	}`
+
+	b, err := BroadcastFromJSON(v2JSON)
+	if err != nil {
+		t.Fatalf("v2 JSON should parse: %v", err)
+	}
+
+	// Fields should be populated from v2 keys.
+	if b.ConjectureID != "C-42" {
+		t.Errorf("ConjectureID = %q, want C-42", b.ConjectureID)
+	}
+	if b.ConjectureClaim != "refactoring auth" {
+		t.Errorf("ConjectureClaim = %q, want 'refactoring auth'", b.ConjectureClaim)
+	}
+	if b.Phase != PhaseProof {
+		t.Errorf("Phase = %q, want proof", b.Phase)
+	}
+	if b.Status != StatusProsecuting {
+		t.Errorf("Status = %q, want prosecuting", b.Status)
+	}
+	if b.V != 0 {
+		t.Errorf("V = %d, want 0 (absent in v2)", b.V)
+	}
+}
+
+func TestBroadcast_V3_SingleCharPhaseStatus(t *testing.T) {
+	// A v3 message with single-char phase/status.
+	v3JSON := `{
+		"v": 3,
+		"agent": "origin/feature",
+		"host": "mini",
+		"user": "jwalsh",
+		"worktree": "feature",
+		"cid": "C-42",
+		"claim": "v3 test",
+		"phase": "p",
+		"status": "a",
+		"ts": 1710345600,
+		"ttl": 3600,
+		"id": "0191a2b3c4d5e60000"
+	}`
+
+	b, err := BroadcastFromJSON(v3JSON)
+	if err != nil {
+		t.Fatalf("v3 JSON should parse: %v", err)
+	}
+
+	if b.Phase != PhaseProof {
+		t.Errorf("Phase = %q, want proof (from 'p')", b.Phase)
+	}
+	if b.Status != StatusProsecuting {
+		t.Errorf("Status = %q, want prosecuting (from 'a')", b.Status)
+	}
+	if b.ConjectureID != "C-42" {
+		t.Errorf("ConjectureID = %q, want C-42 (from 'cid')", b.ConjectureID)
+	}
+	if b.Host != "mini" {
+		t.Errorf("Host = %q, want mini", b.Host)
 	}
 }
 
@@ -2444,7 +2535,7 @@ func TestQuick_FrameCorruptNoPanic(t *testing.T) {
 		if data[0] != 0x41 || data[1] != 0x51 {
 			return err != nil // must reject bad magic
 		}
-		if data[2] != 0x01 {
+		if data[2] != 0x01 && data[2] != 0x03 {
 			return err != nil // must reject unknown version
 		}
 		if data[3] != 0x01 {
