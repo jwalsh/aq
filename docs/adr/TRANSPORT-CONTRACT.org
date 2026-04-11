@@ -82,7 +82,7 @@ If binary not found, transport is silently skipped.
 | =domain=       | string | ="local"=      | mDNS domain      |
 
 TX: publishes via =avahi-publish-service= with TXT records.
-RX: *not implemented*. mDNS is TX-only as of v0.5.1.
+RX: *not implemented*. mDNS is TX-only as of v0.5.2.
 
 Requires =avahi-publish-service= on PATH.
 
@@ -422,7 +422,7 @@ with no envelope. This means:
 - Stale =aq/status= retained message: ={ "service":"aq", "version":"v0.3.0" }=
   — missing all 8 required broadcast fields (agent, worktree, conjecture_id,
   phase, status, ts, ttl, id). Contains unknown fields (service, host, version).
-- No current v0.5.1 broadcast carries a version or protocol_version field.
+- No current v0.5.2 broadcast carries a version or protocol_version field.
 - =aq listen= silently drops payloads that fail =json.Unmarshal= into
   =Broadcast=, but partially-valid payloads (e.g. a v0.3 message with
   some overlapping field names) could materialize as a corrupt broadcast.
