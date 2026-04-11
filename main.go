@@ -2201,7 +2201,7 @@ func decodeFrame(datagram []byte) ([]byte, error) {
 }
 
 // fanoutUDP sends a framed broadcast datagram via UDP.
-// When cfg.Broadcast is true, uses subnet broadcast (e.g. 192.168.86.255)
+// When cfg.Broadcast is true, uses subnet broadcast (e.g. 192.168.x.255)
 // instead of RFC multicast. Simpler for a physical LAN — no IGMP joins.
 func fanoutUDP(b Broadcast, cfg udpConfig) {
 	payload, err := json.Marshal(b)
@@ -2236,7 +2236,7 @@ func fanoutUDP(b Broadcast, cfg udpConfig) {
 	}
 	defer conn.Close()
 
-	// Enable SO_BROADCAST for subnet broadcast addresses (e.g. 192.168.86.255)
+	// Enable SO_BROADCAST for subnet broadcast addresses (e.g. 192.168.x.255)
 	if cfg.Broadcast || isBroadcastAddr(group) {
 		rawConn, err := conn.SyscallConn()
 		if err == nil {
@@ -2426,7 +2426,7 @@ func materializeBroadcast(b Broadcast, channel string, via string) {
 
 // listenUDP listens for UDP broadcasts or joins a multicast group,
 // then materializes incoming broadcasts to the filesystem.
-// isBroadcastAddr returns true if the address is a subnet broadcast (e.g. 192.168.86.255)
+// isBroadcastAddr returns true if the address is a subnet broadcast (e.g. 192.168.x.255)
 // or the limited broadcast address (255.255.255.255).
 func isBroadcastAddr(addr string) bool {
 	ip := net.ParseIP(addr)

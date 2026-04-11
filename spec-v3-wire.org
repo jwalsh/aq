@@ -149,10 +149,10 @@ All fit within the 80-byte Meshtastic effective payload.
 *** Why LoRa matters
 
 Physical proximity is a proxy for relevance. The mesh transport
-(Heltec V4 LoRa nodes on 192.168.86.0/24) carries aq gossip between
+(Heltec V4 LoRa nodes on a local subnet) carries aq gossip between
 hosts even when:
 
-1. MQTT broker (nexus:1883) is down — LoRa is independent
+1. MQTT broker is down — LoRa is independent
 2. WiFi is partitioned — LoRa penetrates walls and operates on 915MHz
 3. Host is offline but radio is on — messages queue on the Meshtastic device
 4. New host joins the LAN — it hears presence via radio before any config

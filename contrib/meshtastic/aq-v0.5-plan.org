@@ -87,7 +87,7 @@ Always works. No network. No daemon. This is the baseline.
 
 Two options discovered during research:
 - Public broker (=mqtt.meshtastic.org=): unreliable (18+ hours unresponsive)
-- Local broker (=nexus.lan= mosquitto): reliable but localhost-only initially
+- Local broker (LAN mosquitto): reliable but localhost-only initially
 
 Recommendation: support both with fallback. =AQ_MQTT_HOST= env var.
 

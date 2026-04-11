@@ -15,7 +15,7 @@
 #   <backend-specific keys>   # passed as options dict to the transport module
 #
 # Environment overrides:
-#   AQ_{TYPE}_{KEY} overrides any option. E.g. AQ_MQTT_HOST=nexus.lan
+#   AQ_{TYPE}_{KEY} overrides any option. E.g. AQ_MQTT_HOST=broker.local
 #   overrides host below. Secrets should use env vars, not this file.
 #
 # See: docs/transport-mounts.org for the full specification.
@@ -32,7 +32,7 @@ type = "local"
 path = "/"
 
 # ---------------------------------------------------------------------------
-# Tier 1: MQTT broker (Mosquitto on nexus.lan)
+# Tier 1: MQTT broker (Mosquitto on broker.local)
 # ---------------------------------------------------------------------------
 # Publishes all broadcasts to MQTT. Uses mosquitto_pub (must be on PATH).
 # Topic structure: {topic}/{subtopic} e.g. aq/announce, aq/session/startup
@@ -46,9 +46,9 @@ enabled = false
 host = "localhost"
 port = 1883
 topic = "aq"
-# For nexus.lan deployment, override:
-#   host = "nexus.lan"
-# Or via env: AQ_MQTT_HOST=nexus.lan
+# For broker.local deployment, override:
+#   host = "broker.local"
+# Or via env: AQ_MQTT_HOST=broker.local
 
 # ---------------------------------------------------------------------------
 # Tier 1: Meshtastic / LoRa radio
@@ -137,6 +137,6 @@ service_type = "_aq._tcp"
 # [mounts.mqtt-lan]
 # type = "mqtt"
 # path = "/"
-# host = "nexus.lan"
+# host = "broker.local"
 # port = 1883
 # topic = "aq"
