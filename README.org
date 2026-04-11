@@ -1,6 +1,6 @@
 #+TITLE: aq --- Ambient Agent Queue
 #+SUBTITLE: Gossip layer (L1.5) for multi-agent development
-#+DATE: 2026-03-13
+#+DATE: 2026-04-11
 #+STARTUP: overview
 #+OPTIONS: toc:2 num:nil
 
@@ -374,17 +374,21 @@ manual dispatch.
 The =contrib/= directory contains optional extensions that are not part
 of the core binary:
 
-| Package       | Description                                            |
-|---------------+--------------------------------------------------------|
-| =dashboard=   | WebSocket-based live dashboard (localhost:8085)        |
-| =postgres=    | PostgreSQL transport (Tier 1 alternative)              |
-| =mdns=        | mDNS/Bonjour broadcast demo (macOS)                   |
-| =chaos=       | Chaos test suite --- 6 scenarios, subprocess-based     |
-| =tramp=       | Emacs TRAMP integration (=aq-tramp.el=)                |
-| =mqtt=        | MQTT transport (Tier 3, QoS 0 gossip)                 |
-| =ggwave=      | Ultrasonic/audible audio transport (Python, ggwave)    |
-| =keybase=     | KBFS shared-directory transport                        |
-| =meshtastic=  | LoRa mesh transport (Tier 3.5, 237B frame)             |
+| Package         | Description                                                  |
+|-----------------+--------------------------------------------------------------|
+| =dashboard=     | WebSocket-based live dashboard (localhost:8085)              |
+| =postgres=      | PostgreSQL transport (Tier 1 alternative)                    |
+| =mdns=          | mDNS/Bonjour broadcast demo (macOS)                          |
+| =chaos=         | Chaos test suite --- 6 scenarios, subprocess-based           |
+| =chaos-docker=  | Jepsen-lite container chaos environment (scaffolding)        |
+| =tramp=         | Emacs TRAMP integration (=aq-tramp.el=)                      |
+| =mqtt=          | MQTT transport (Tier 3, QoS 0 gossip)                        |
+| =ggwave=        | Ultrasonic/audible audio transport (Python, ggwave)          |
+| =keybase=       | KBFS shared-directory transport                              |
+| =meshtastic=    | LoRa mesh transport (Tier 3.5, 237B frame)                   |
+| =codecs=        | Six-codec wire format research lab (json, pipe, cbor, varint, dict, bad) |
+| =harness=       | In-process 20-agent stress harness with deterministic chaos  |
+| =otel-bridge=   | Gossip → OTel metrics bridge (env-driven endpoint)           |
 
 All contrib packages are optional. The core =aq= binary has zero
 dependencies beyond Go stdlib.
