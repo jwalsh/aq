@@ -1,0 +1,376 @@
+#+TITLE: aq OTEL Fanout — Specification
+#+SUBTITLE: Native OTLP transport as a first-class aq fanout target
+#+DATE: 2026-04-11
+#+STATUS: draft — spec only, no implementation
+#+AUTHOR: NexusHive Team
+
+* Purpose
+
+Add =otel= as a first-class fanout transport for aq, alongside the
+existing =mqtt=, =udp=, =mdns=, =ggwave=, and =mesh= transports.
+
+When configured, every =aq announce= emits a corresponding OTLP metric
+to an OpenTelemetry Collector, making agent presence visible in
+Prometheus and Grafana using the same pipeline that AI coding tools
+(Claude Code, Gemini CLI, Codex CLI, GitHub Copilot) already use.
+
+** Anti-goals
+
+- NOT a coordination mechanism — aq remains gossip, OTEL is
+  observability-only
+- NOT a retrieval system — metrics reflect broadcast events, not queryable state
+- NOT a requirement — otel fanout is opt-in, just like every other transport
+- NOT authoritative — the filesystem archive remains the source of truth
+- NOT a replacement for MQTT — the two fan out in parallel
+
+* Design Principles
+
+aq's foundational axiom: /gossip, not coordination./ The OTEL fanout
+MUST preserve this:
+
+1. **Fire-and-forget**: exporter failures NEVER block =aq announce=
+2. **Degrades silently**: missing exporter, unreachable collector, or
+   malformed config → log once, continue as if transport disabled
+3. **No state**: the OTEL transport holds no state beyond OpenTelemetry
+   SDK internals; no queue, no retry buffer, no persistent connection
+   tracking
+4. **No authority**: metrics can be lost without violating any aq
+   invariant — they are advisory observability, not durable records
+5. **Parallel fanout**: OTEL fires concurrently with other transports,
+   does not serialize them
+6. **Compatible with v3 wire format**: all fields in the v3 payload
+   (=host=, =user=, =agent=, =cid=, etc.) map to OTEL attributes
+
+* Config Contract
+
+** Schema (=~/.aq/config.json=)
+
+Add an =otel= block under the existing transport map:
+
+#+begin_src json
+{
+  "config_version": 2,
+  "default_channel": "broadcast",
+  "default_ttl": 3600,
+  "udp": {
+    "enabled": true,
+    "group": "239.192.65.81",
+    "port": 4181
+  },
+  "mqtt": {
+    "enabled": true,
+    "host": "nexus.lan",
+    "port": 1883,
+    "topic": "aq"
+  },
+  "mdns": {
+    "enabled": true,
+    "service_type": "_aq._tcp",
+    "domain": "local"
+  },
+  "otel": {
+    "enabled": true,
+    "endpoint": "http://192.168.86.100:4317",
+    "protocol": "grpc",
+    "service_name": "aq",
+    "export_timeout_ms": 2000,
+    "include_files": false
+  }
+}
+#+end_src
+
+** Field definitions
+
+| Field              | Type   | Required | Default                      | Description                                                              |
+|--------------------+--------+----------+------------------------------+--------------------------------------------------------------------------|
+| =enabled=          | bool   | yes      | =false=                      | Master switch. If false, transport is not registered.                    |
+| =endpoint=         | string | yes      | —                            | OTLP endpoint. Typically =http://<collector>:4317= for gRPC or :4318 HTTP. |
+| =protocol=         | enum   | no       | ="grpc"=                     | One of =grpc=, =http/protobuf=.                                          |
+| =service_name=     | string | no       | ="aq"=                       | Becomes =service.name= resource attr → =exported_job= label in Prometheus. |
+| =export_timeout_ms= | int   | no       | =2000=                       | Max time to block the announce path on a single export attempt.          |
+| =include_files=    | bool   | no       | =false=                      | Whether to include =files= list as a metric attribute (high cardinality). |
+
+** Environment variable overrides
+
+Standard OpenTelemetry env vars MUST take precedence over config file
+values, matching the convention used by Claude Code, Gemini CLI, and
+every OpenTelemetry-instrumented tool on the LAN:
+
+| Env Var                        | Overrides             | Notes                                   |
+|--------------------------------+-----------------------+-----------------------------------------|
+| =OTEL_EXPORTER_OTLP_ENDPOINT=  | =otel.endpoint=       | Upstream convention                     |
+| =OTEL_EXPORTER_OTLP_PROTOCOL=  | =otel.protocol=       | =grpc= or =http/protobuf=               |
+| =OTEL_SERVICE_NAME=            | =otel.service_name=   | Sets =service.name= resource attr       |
+| =OTEL_RESOURCE_ATTRIBUTES=     | (merged)              | Comma-separated =k=v= pairs, merged into resource |
+| =AQ_OTEL_ENABLED=              | =otel.enabled=        | =1= enables, =0= disables               |
+| =AQ_OTEL_INCLUDE_FILES=        | =otel.include_files=  | Cardinality control                     |
+
+If =OTEL_EXPORTER_OTLP_ENDPOINT= is set and =otel.enabled= is unset,
+treat otel as implicitly enabled (this matches the zero-config
+experience of Claude Code: set the env var, it works).
+
+* Metrics Emitted
+
+** Counter: =aq.announces=
+
+Incremented once per =aq announce= call.
+
+| Attribute | Source (v3 field) | Cardinality | Example                           |
+|-----------+-------------------+-------------+-----------------------------------|
+| =host=    | =host=            | bounded     | =nexus=, =hydra=, =mini=          |
+| =user=    | =user=            | bounded     | =jwalsh=                          |
+| =agent=   | =agent=           | bounded     | =github.com/aygp-dr/nexus-setup/main= |
+| =phase=   | =phase=           | 4 values    | =c= / =p= / =r= / =n=             |
+| =status=  | =status=          | 3 values    | =a= / =d= / =b=                   |
+| =cid=    | =cid=              | moderate    | =C-OTEL-SETUP=, =C-AUTH-FIX=      |
+| =channel= | channel           | low         | =broadcast=                       |
+
+Prometheus name: =aq_announces_total= (Prometheus exporter appends =_total= to counters).
+
+** Counter: =aq.whispers=
+
+Same schema as =aq.announces=, but for whisper broadcasts (low priority, TTL 60s).
+
+Prometheus name: =aq_whispers_total=.
+
+** Gauge: =aq.broadcasts.active=
+
+Current number of un-expired broadcasts from this agent, emitted on
+each announce call (computed from local =~/.aq/channels/<channel>/archive/=).
+
+Prometheus name: =aq_broadcasts_active=.
+
+** Histogram: =aq.export.duration_ms=
+
+Time spent in the OTEL exporter itself (instrumenting the instrumentation).
+Used to detect when the OTEL fanout is slowing down the announce path.
+
+Prometheus name: =aq_export_duration_ms=.
+
+Buckets: =[1, 5, 10, 50, 100, 500, 1000, 2000]= ms.
+
+* Required Metrics Contract (for aq coordination dashboard)
+
+To appear on the existing Agent Coordination dashboard
+(http://192.168.86.100:3000/d/agents/), the OTEL fanout MUST emit at
+minimum:
+
+- =aq_announces_total= (with =host=, =agent=, =cid=, =phase= labels)
+
+The other metrics are recommended but optional.
+
+* PII Handling
+
+** Forbidden fields
+
+The following v3 payload fields MUST NOT be emitted as OTEL attributes:
+
+- =claim= — contains arbitrary free-text that may include sensitive
+  work context (file paths, PR titles, secrets accidentally pasted)
+- =files= — contains absolute or relative file paths which can leak
+  directory structure and project identity beyond the repo name
+- =id= — 22-char ULID is per-broadcast, explodes cardinality, provides
+  no aggregation value
+
+** Conditional
+
+- =files= MAY be included if =otel.include_files= is explicitly set to
+  true AND the operator accepts the cardinality risk. The default is
+  false.
+
+** Allowed
+
+- =host=, =user=, =agent=, =phase=, =status=, =cid=, =channel=
+
+These are bounded-cardinality identity fields already required by the
+v3 wire format and match the contract in =docs/agent-otel-contract.md=
+on nexus-setup.
+
+** Rationale
+
+- =host= and =user= are operator identity — same level as =user_email=
+  in Claude Code metrics, which the Grafana dashboard obfuscates via
+  =label_replace= for screenshots. aq metrics must support the same
+  sanitization pattern.
+- =agent= is the repo+branch — already published publicly in git
+  remotes, not PII.
+- =cid= is a conjecture ID chosen by the user — they control it and
+  know it leaves the process.
+- =claim= is free-text narration — may leak work-in-progress details,
+  pasted error messages, temporary hypotheses.
+- =files= is dangerously specific — even basenames can reveal
+  non-public work.
+
+** Auditor checklist
+
+A third-party spec review MUST verify:
+
+1. =claim= is never serialized into an OTEL attribute
+2. =files= is off by default and gated on explicit opt-in
+3. =id= is never serialized as an attribute (would explode cardinality)
+4. Export failures never block the announce path
+5. The default config (=enabled: false=) produces zero network traffic
+6. When enabled, the OTEL exporter respects standard =OTEL_*= env vars
+7. =service.name= is set and maps to =exported_job= in Prometheus
+
+* Validation
+
+** V1: Config precedence
+
+#+begin_src sh
+# Test: env var overrides config
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://override:4317
+aq announce -c "C-V1" --claim "test" --phase proof
+# MUST hit override:4317, not the config file endpoint
+#+end_src
+
+** V2: Fire-and-forget under collector failure
+
+#+begin_src sh
+# Test: announce succeeds even when collector is down
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:1  # unroutable
+time aq announce -c "C-V2" --claim "failover test" --phase proof
+# MUST complete in < (export_timeout_ms + 100ms)
+# MUST write to ~/.aq/channels/broadcast/archive/ regardless
+#+end_src
+
+** V3: PII exclusion
+
+#+begin_src sh
+# Test: claim and files never reach OTEL
+aq announce -c "C-V3" --claim "SECRET_VALUE_DO_NOT_LEAK" \
+  -f "secret.key,private.pem" --phase proof
+
+# Check Prometheus — no metric should contain SECRET_VALUE_DO_NOT_LEAK
+# or secret.key or private.pem as a label value
+curl -s "http://192.168.86.100:9090/api/v1/query?query=aq_announces_total" \
+  | grep -E "(SECRET_VALUE|secret\.key|private\.pem)" \
+  && echo "FAIL: PII leaked" || echo "PASS"
+#+end_src
+
+** V4: Zero-config default
+
+#+begin_src sh
+# Test: no OTEL env vars, no otel block in config → zero egress
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+aq announce -c "C-V4" --claim "silent test" --phase proof
+# MUST NOT open a connection to any OTLP endpoint
+#+end_src
+
+** V5: Standard env var compatibility
+
+#+begin_src sh
+# Test: aq can share the same OTEL config as Claude Code
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://192.168.86.100:4317
+export OTEL_RESOURCE_ATTRIBUTES="host.name=$(hostname -s),team=aygp-dr"
+
+aq announce -c "C-V5" --claim "env compat" --phase proof
+
+# Verify in Prometheus
+curl -s 'http://192.168.86.100:9090/api/v1/query?query=aq_announces_total{cid="C-V5"}'
+# MUST return a result with host.name=<hostname> and team=aygp-dr
+#+end_src
+
+** V6: Parallel fanout with MQTT
+
+#+begin_src sh
+# Test: both MQTT and OTEL fire for the same announce
+aq announce -c "C-V6" --claim "parallel test" --phase proof
+
+# MQTT: check retained message
+mosquitto_sub -h nexus.lan -t 'aq/+/C-V6/presence' -C 1 -W 2
+
+# OTEL: check metric
+curl -s 'http://192.168.86.100:9090/api/v1/query?query=aq_announces_total{cid="C-V6"}'
+
+# Both MUST return within 5 seconds of the announce
+#+end_src
+
+** V7: Cardinality guard
+
+#+begin_src sh
+# Test: including 1000 files does not create 1000 label values
+for i in $(seq 1 1000); do
+  aq announce -c "C-V7-$i" -f "file-$i.py" --phase proof
+done
+
+# Check Prometheus label cardinality
+curl -s 'http://192.168.86.100:9090/api/v1/label/cid/values' | jq '.data | length'
+# MUST be <= 1000 (cid scales with call count, that's fine)
+
+curl -s 'http://192.168.86.100:9090/api/v1/label/files/values' 2>/dev/null
+# MUST be 404 or empty — files is not a label (include_files=false default)
+#+end_src
+
+* Conjectures (for cprr tracking)
+
+| ID           | Conjecture                                              | Refutation criterion                                      |
+|--------------+---------------------------------------------------------+-----------------------------------------------------------|
+| AQ-OTEL-1    | OTEL fanout never blocks announce under collector failure | V2 takes longer than =export_timeout_ms + 100ms=          |
+| AQ-OTEL-2    | Zero-config produces zero network traffic              | V4 opens a socket to any OTLP endpoint                    |
+| AQ-OTEL-3    | =claim= is never leaked to Prometheus                   | V3 finds a claim substring in any metric label value      |
+| AQ-OTEL-4    | =files= is off by default                              | V7 shows a non-empty =files= label                        |
+| AQ-OTEL-5    | Env vars take precedence over config file             | V1 hits the config endpoint instead of env override       |
+| AQ-OTEL-6    | OTEL and MQTT fanout are parallel, not serial         | V6 observes total announce time > max(MQTT, OTEL) + 10ms  |
+| AQ-OTEL-7    | =aq_announces_total= appears on agent dashboard         | No =aq_announces_total= metric in Prometheus after V5     |
+
+* Compliance with aq Design Philosophy
+
+| Principle                          | How OTEL fanout complies                                        |
+|------------------------------------+------------------------------------------------------------------|
+| Gossip, not coordination           | Metrics are advisory observability; no one is required to read them |
+| Fire-and-forget                    | =export_timeout_ms= bounds the blocking window; failures are logged and ignored |
+| Degrades silently                  | Default =enabled: false=; malformed config → transport disabled, no panic |
+| No authority                       | Metrics can be lost; filesystem archive remains source of truth |
+| Broadcasts expire (TTL)            | Counter metrics monotonically increase; no state retention       |
+| Silence is normal                  | Idle agents emit no metrics; no heartbeat requirement            |
+| Mutual independence of transports | OTEL fires in parallel with MQTT, UDP, mDNS; no transport depends on another |
+
+* Implementation Non-Goals
+
+This spec deliberately does NOT specify:
+
+- Which OpenTelemetry SDK to use (Go stdlib? contrib? zero-dep manual serialization?)
+- How to integrate with existing =contrib/= transport plugin architecture
+- Whether OTEL lives in =main.go= or =contrib/otel/otel.go=
+- Metric naming conflicts with existing Prometheus metrics (use =aq.*= namespace)
+- Trace/span emission (metrics-only for v3; traces are a v4 extension)
+- Log export via OTLP (logs are a separate concern; the archive is our log)
+
+These are implementation decisions for the next agent. The spec
+constrains the behavior, not the code shape.
+
+* Open Questions
+
+1. Should =aq.whispers= be a separate metric or a label on =aq.announces=?
+   Proposal: separate metric — whispers have different semantics (advisory,
+   60s TTL) and filtering is cleaner.
+
+2. Should the gauge =aq.broadcasts.active= be emitted on announce, or on a
+   timer? Proposal: on announce — no background goroutine, aligns with
+   fire-and-forget.
+
+3. Should the exporter share the same OTEL process resource as a parent
+   process's OTEL SDK (e.g., Claude Code calling aq)? Proposal: separate
+   resource — =service.name=aq= is meaningful, and isolating avoids
+   interfering with the parent's metric export cadence.
+
+4. Should we support OTLP logs export for announces? Proposal: no —
+   metrics are sufficient for presence, logs would duplicate the filesystem
+   archive, and the archive is the authoritative log.
+
+* Status
+
+This document is a *spec only*. No code changes in =main.go= or
+=contrib/= are in scope for this deliverable. The next agent picks it
+up, implements under a new conjecture (=AQ-OTEL-IMPL=), runs V1-V7,
+and updates =spec-v2.org= once the field list is stable.
+
+See also:
+
+- =spec-v3-wire.org= — the v3 JSON wire format this spec assumes
+- =TRANSPORTS.org= — existing transport inventory (mqtt, udp, mdns, ggwave, mesh)
+- =../../aygp-dr/nexus-setup/docs/agent-otel-contract.md= — the OTEL endpoint
+  contract for the 192.168.86.0/24 LAN
