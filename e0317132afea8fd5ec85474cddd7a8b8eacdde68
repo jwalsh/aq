@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-nq9
+X-Conjectures: C-1
+X-Testing: 30 new tests all pass, full suite passes (8.3s)
+X-Invariants: no site-specific IPs, gofmt clean, existing tests unbroken
+X-Deviations: none
+X-Timeline: bead aq-nq9 complete
