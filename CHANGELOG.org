@@ -7,9 +7,8 @@
 ** End-to-end multi-host telemetry validated
 
 This release marks the milestone where aq's v3 wire format and the broader
-NexusHive telemetry pipeline have been validated end-to-end across mini,
-hydra, and nexus, with multiple AI tools shipping data into a unified
-Prometheus + Grafana view.
+telemetry pipeline have been validated end-to-end across multiple LAN hosts,
+with multiple AI tools shipping data into a unified Prometheus + Grafana view.
 
 *** Highlights
 
@@ -33,40 +32,40 @@ Prometheus + Grafana view.
 
 *** Verified pipeline (this release)
 
-| Source                    | Transport            | Destination                   |
-|---------------------------+----------------------+-------------------------------|
-| Claude Code 2.1.91+       | OTLP gRPC :4317      | nexus otelcol → Prometheus    |
-| gh copilot 1.0.24         | OTLP HTTP :4318      | nexus otelcol → Prometheus    |
-| LiteLLM 1.83.4 proxy      | Prometheus pull :4000| nexus scrape → Prometheus     |
-| Telegraf 1.38.2           | Prometheus pull :9273| nexus scrape → Prometheus     |
-| TinyLLM Chatbot v0.16.6   | telegraf http_response| nexus → Prometheus           |
-| aq v0.6.0 broadcasts      | MQTT :1883           | nexus mosquitto → dashboard   |
-| aider 0.86.2              | LiteLLM SDK         | LiteLLM proxy → Prometheus    |
-| codex 0.120.0             | OPENAI_BASE_URL      | LiteLLM proxy → Prometheus    |
+| Source                    | Transport            | Destination                    |
+|---------------------------+----------------------+--------------------------------|
+| Claude Code 2.1.91+       | OTLP gRPC :4317      | otelcol → Prometheus           |
+| gh copilot 1.0.24         | OTLP HTTP :4318      | otelcol → Prometheus           |
+| LiteLLM 1.83.4 proxy      | Prometheus pull :4000| collector scrape → Prometheus  |
+| Telegraf 1.38.2           | Prometheus pull :9273| collector scrape → Prometheus  |
+| TinyLLM Chatbot v0.16.6   | telegraf http_response| collector → Prometheus        |
+| aq v0.6.0 broadcasts      | MQTT :1883           | mosquitto → dashboard          |
+| aider 0.86.2              | LiteLLM SDK         | LiteLLM proxy → Prometheus     |
+| codex 0.120.0             | OPENAI_BASE_URL      | LiteLLM proxy → Prometheus     |
 
-Aggregated views land in Grafana at =http://192.168.86.100:3000/=:
+Aggregated views land in the local Grafana instance:
 - Agent Coordination — MQTT & aq
-- mini — System Health
+- Host — System Health
 - Claude Code — NexusHive
 - AI Tools — Multi-Provider Usage
 
 *** Compliance
 
-mini's =aq= now sends fully populated v3 messages:
+=aq= now sends fully populated v3 messages:
 
 #+begin_src json
-{"v":3,"host":"mini","user":"jwalsh","agent":"github.com/aygp-dr/mini-setup/main","cid":"C-AQ-V3-COMPLIANCE","phase":"p","status":"complete",...}
+{"v":3,"host":"<hostname>","user":"<user>","agent":"<remote>/<branch>","cid":"C-AQ-V3-COMPLIANCE","phase":"p","status":"complete",...}
 #+end_src
 
 ** Known issues
 
 - =outputs.opentelemetry= in telegraf v1.38.2 fails with "no route to host"
-  to nexus:4317 from launchd-supervised processes on macOS. Workaround:
-  use =prometheus_client= bound to LAN IP and have nexus scrape it. This
-  is the macOS Local Network Privacy framework intercepting urllib3 / grpcio
-  in pipx-installed Python and brew-installed Go binaries.
+  to the OTLP collector from launchd-supervised processes on macOS. Workaround:
+  use =prometheus_client= bound to LAN IP and have the collector scrape it.
+  This is the macOS Local Network Privacy framework intercepting urllib3 /
+  grpcio in pipx-installed Python and brew-installed Go binaries.
 - LiteLLM proxy's OTLP push has the same issue from pipx-Python. Same
-  workaround (Prometheus pull at =192.168.86.22:4000/metrics/=).
+  workaround (Prometheus pull on the proxy's =/metrics/= endpoint).
 - gh copilot 1.0.24 inherits =OTEL_RESOURCE_ATTRIBUTES= from the shell env
   and reports =service.name=claude-code= instead of =github-copilot=.
   Workaround: wrap copilot invocation with =OTEL_SERVICE_NAME=github-copilot=.
@@ -81,10 +80,40 @@ mini's =aq= now sends fully populated v3 messages:
 - =feat(whisper)=: context-aware suppression with severity ceiling
 - =feat=: multi-codec stress harness with OTel bridge for BugBash
 
-* v0.5.0 — 2026-04-08
+* v0.5.1 — skipped
+
+v0.5.1 was skipped; v0.5.2 follows v0.5.0 directly. The whisper feature
+and multi-codec stress harness were bundled into v0.5.2 rather than
+split across two patch releases.
+
+* v0.5.0 — 2026-04-01
 
 - =feat=: v3 wire format — bilingual gossip with mandatory identity
+- =feat=: round-trip gossip with UDP as default transport
 - =docs=: v3 wire format spec, chaos testing process
+- =docs=: restructure conjectures — proven, deferred, open with ADR refs
+
+* v0.4.0 — 2026-03-30
+
+- =feat=: transport plugins — IRC, KBFS, GH Issues, Meshtastic, mDNS/DNS-SD, UDP multicast
+- =feat=: config schema versioning + =doctor --migrate=
+- =feat=: MQTT transport and Claude Code session hooks
+- =feat=: ggwave audio/ultrasonic TX/RX adapters
+- =feat=: file watcher RX adapter (kqueue/inotify/polling)
+- =feat=: =aq-fanout.sh= + PostToolUse commit hook for checkpoint notifications
+- =feat=: port AMTP protocol — parser, TLA+ spec, property tests
+- =refactor=: remove Python prototype — Go binary is the implementation
+- =docs=: transport mount table spec, transport layer state machine
+
+* v0.3.0 — 2026-03-28
+
+- =feat=: typed Phase/Status/Severity constants
+- =docs=: cross-worktree validation results — 5 agents, 22 broadcasts
+- =docs=: experience report — aq in a 973-project monorepo
+
+* v0.2.0 — 2026-03-28
+
+- Initial tagged release
 
 * Roadmap → v0.7.0
 
