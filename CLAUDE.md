@@ -126,7 +126,7 @@ context (cprr), and the broadcast itself (aq). Do not decouple them.
 | Field             | Type       | Description                              |
 |-------------------|------------|------------------------------------------|
 | agent             | string     | `{remote}/{branch}` or worktree address  |
-| host              | string     | short hostname (e.g. `hydra`, `nexus`)   |
+| host              | string     | short hostname (e.g. `host-a`, `host-b`) |
 | user              | string     | username (e.g. `jwalsh`)                 |
 | worktree          | string     | branch name                              |
 | conjecture_id     | string     | e.g. `C-1` — the idea being pursued     |
@@ -139,7 +139,7 @@ context (cprr), and the broadcast itself (aq). Do not decouple them.
 | id                | string     | ULID                                     |
 
 For LAN gossip, `host` and `user` disambiguate same-repo work across machines:
-- `jwalsh@hydra` working on `aq/main` vs `jwalsh@nexus` working on `aq/main`
+- `user@host-a` working on `aq/main` vs `user@host-b` working on `aq/main`
 
 ## Build Order
 

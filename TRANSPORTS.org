@@ -62,15 +62,15 @@ fields for LAN disambiguation:
 #+begin_src json
 {
   "agent": "github.com/jwalsh/aq/main",
-  "host": "hydra",
+  "host": "host-a",
   "user": "jwalsh",
   ...
 }
 #+end_src
 
 This solves the problem of the same user working on the same repo from
-multiple machines. Without =host=, broadcasts from =jwalsh@hydra= and
-=jwalsh@nexus= both appear as =github.com/jwalsh/aq/main= — identical
+multiple machines. Without =host=, broadcasts from =user@host-a= and
+=user@host-b= both appear as =github.com/jwalsh/aq/main= — identical
 agent identities. With =host=, receivers can distinguish them.
 
 The fields are optional (=omitempty=) for wire compatibility. Older

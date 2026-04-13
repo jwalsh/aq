@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-aq hero image generator — runs on mini via ollama
+aq hero image generator — runs via ollama
 Usage: python3 aq_hero_gen.py [--model z-image|flux] [--prompt N]
 
-Models available on mini:
+Models available locally:
   x/z-image-turbo:latest  (12GB, higher quality)
   x/flux2-klein:4b        (5.7GB, faster)
 """

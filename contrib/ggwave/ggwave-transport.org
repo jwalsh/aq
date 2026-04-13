@@ -8,7 +8,7 @@
 
 * 0. Premise
 
-Your laptop chirps. Your mini's microphone hears it. An agent broadcast
+Your laptop chirps. Your workstation's microphone hears it. An agent broadcast
 crosses the room via sound waves. No WiFi, no Bluetooth, no radio, no
 cable. Just physics.
 

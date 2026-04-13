@@ -157,7 +157,7 @@ Or add to `~/.aq/config.json`:
     "host": "localhost",
     "port": 6999,
     "channel": "#aq-presence",
-    "nick": "aq-nexus"
+    "nick": "aq-<hostname>"
   }
 }
 ```

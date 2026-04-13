@@ -1,6 +1,6 @@
 # aq-ggwave: Audio/Ultrasonic Gossip Transport
 
-Data over sound. Your laptop chirps, your mini's microphone hears it.
+Data over sound. Your laptop chirps, your workstation's microphone hears it.
 An aq broadcast crosses the room via sound waves. Tier omega.
 
 See `ggwave-transport.org` for the full spec.
@@ -85,7 +85,7 @@ Ultrasonic: ~25-byte limit. Audible: ~140-byte limit.
 
 ggwave is just a transport. Once decoded, the gossip protocol handles it.
 
-## monit (keep RX alive on mini)
+## monit (keep RX alive on the host)
 
 ```
 check process aq-ggwave-rx matching "aq_ggwave_rx"

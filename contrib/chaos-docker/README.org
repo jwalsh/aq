@@ -106,7 +106,7 @@ the BugBash live demo if there is hallway interest.
 * Reference findings from in-process harness
 
 See =docs/research/wire-format-stress.org= for the full results.
-Headline numbers from the in-process run on =mini=:
+Headline numbers from the in-process run:
 
 - =pipe= codec achieves p50 = 74 bytes (fits LoRa) but loses identity
   10.5% of the time at 100% bit-flip rate — the worst codec under
