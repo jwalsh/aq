@@ -162,5 +162,5 @@ collision rates. The mnemonic version is the same size and readable.
 - No codebook sync, no protocol negotiation
 - Format translation is each transport plugin's responsibility
 - `Broadcast.ToAMTP()` needed in Go binary to canonicalize encoding
-  (currently duplicated in bash and Python)
+  (previously duplicated in bash and the deprecated Python prototype)
 - At >10 agents, initials collide. That's not our problem.

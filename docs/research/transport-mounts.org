@@ -23,6 +23,12 @@ via an fstab-style config file.
 ** Current state
 
 Each transport is a Python module with =is_enabled()= and =publish()=.
+
+*Note*: The Python prototype (=src/aq/=) is deprecated. Go (=main.go=) is
+the canonical implementation. Only =contrib/ggwave/= (audio transport)
+uses Python. The description below reflects the Python transport
+architecture for historical reference.
+
 Enabling one requires:
 
 1. Setting an environment variable (=AQ_MQTT=1=)

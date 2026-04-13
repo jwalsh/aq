@@ -1435,8 +1435,9 @@ class PhiAccrual:
 - `docs/WAVE-PROTOCOL.md` -- Wave protocol reconstruction and aq lineage
 - `docs/DOGFOODING.md` -- Eight failures in 58 minutes
 - `docs/PRESENTATION.org` -- Conference-style summary
-- `src/aq/protocol.py` -- Current filesystem implementation
-- `src/aq/conflict.py` -- Current conflict detection
+- `src/aq/protocol.py` -- Filesystem implementation (deprecated Python prototype)
+- `src/aq/conflict.py` -- Conflict detection (deprecated Python prototype)
+- `main.go` -- Canonical Go implementation
 
 ### Secondary Sources
 

@@ -330,9 +330,13 @@ Transports can lie. This table documents known failure modes where
 
 * 3. RX State Machine (Per-Transport)
 
-The RX path does not exist in the current Python codebase. Only
-filesystem is readable today (via =read_active()=). This section
-specifies the target architecture.
+The RX path does not exist in the Python codebase. Only filesystem is
+readable today (via =read_active()=). This section specifies the target
+architecture.
+
+*Note*: The Python prototype (=src/aq/=) is deprecated. Go (=main.go=) is
+the canonical implementation. Only =contrib/ggwave/= (audio transport)
+uses Python.
 
 ** 3.1 Push vs Pull
 

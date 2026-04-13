@@ -20,6 +20,11 @@ needed. Just a file watcher.
 
 Implementation: =src/aq/filewatcher.py=.
 
+*Note*: The Python prototype (=src/aq/=) is deprecated. Go (=main.go=) is
+the canonical implementation. Only =contrib/ggwave/= (audio transport)
+uses Python. This spec describes the Python file-watcher design; a Go
+equivalent would live in =main.go=.
+
 * Architecture
 
 ** Data flow
