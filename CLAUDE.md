@@ -19,7 +19,7 @@ make it coordinate. It broadcasts. That's it.
 ## Git Hygiene — MANDATORY
 
 1. **Never `git add` a directory.** Always add specific files by name or
-   glob (`git add src/aq/*.py`). Directories sweep in bytecode, caches,
+   glob (`git add cmd/aq/*.go`). Directories sweep in bytecode, caches,
    and secrets. This rule exists because `git add src/` once committed
    `__pycache__/*.pyc` to a public repo.
 
@@ -103,10 +103,10 @@ The filesystem is the only required transport. Every feature must work
 with filesystem I/O alone. No network services, no databases, no brokers.
 
 Per-component implications:
-- **protocol.py**: reads/writes `~/.aq/channels/` directory
-- **conflict.py**: reads active broadcasts from filesystem, no RPC
-- **cli.py**: no server connection required
-- **daemon.py** (future): uses inotify/FSEvents, not polling
+- **protocol.go**: reads/writes `~/.aq/channels/` directory
+- **conflict.go**: reads active broadcasts from filesystem, no RPC
+- **cli.go**: no server connection required
+- **daemon.go** (future): uses inotify/FSEvents, not polling
 
 ## Three-Primitive Interlock
 
@@ -143,8 +143,8 @@ For LAN gossip, `host` and `user` disambiguate same-repo work across machines:
 
 ## Build Order
 
-1. **Tangle source from spec.org** — acceptance: `python -c "from aq.protocol import Broadcast"` succeeds
-2. **Unit tests for protocol** — acceptance: `pytest tests/` passes with ≥5 tests covering Broadcast, announce, read_active
+1. **Tangle source from spec.org** — acceptance: `go build ./...` succeeds
+2. **Unit tests for protocol** — acceptance: `go test ./...` passes with ≥5 tests covering Broadcast, announce, read_active
 3. **Unit tests for conflict detection** — acceptance: tests cover all severity levels (low/medium/high) and expiry
 4. **CLI smoke test** — acceptance: `aq announce -c C-1 --claim "testing transport"` writes a broadcast; `aq status` reads it back
 5. **Daemon with filesystem watch** — acceptance: new broadcast triggers conflict check within 1s
@@ -186,11 +186,13 @@ For C-4: compare alert rates between phase-based and flat severity.
 
 ## Stack Preferences
 
-- Python 3.11+, no runtime dependencies
-- hatchling for packaging
-- mypy strict
-- pytest for testing
+- Go 1.23+, no runtime dependencies (stdlib only)
+- hatchling: removed (Go uses Makefile)
+- gofmt for formatting (CI enforced)
+- go test + testing/quick for PBT
+- go vet for static analysis
 - FSEvents (macOS) / inotify (Linux) for daemon
+- Python: only contrib/ggwave/ (audio transport via ggwave library)
 
 ## Git Notes (mandatory on every commit)
 
