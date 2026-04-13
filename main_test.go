@@ -2692,3 +2692,419 @@ func TestQuick_DedupSecondSeen(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// ========== Transport Layer Tests (bead aq-nq9) ==========
+
+// ---------- isBroadcastAddr ----------
+
+func TestIsBroadcastAddr_SubnetBroadcast(t *testing.T) {
+	// Subnet broadcasts end in .255
+	if !isBroadcastAddr("10.0.0.255") {
+		t.Error("10.0.0.255 should be a broadcast address")
+	}
+}
+
+func TestIsBroadcastAddr_LimitedBroadcast(t *testing.T) {
+	if !isBroadcastAddr("255.255.255.255") {
+		t.Error("255.255.255.255 should be a broadcast address")
+	}
+}
+
+func TestIsBroadcastAddr_Unicast(t *testing.T) {
+	if isBroadcastAddr("10.0.0.100") {
+		t.Error("10.0.0.100 should NOT be a broadcast address")
+	}
+}
+
+func TestIsBroadcastAddr_Multicast(t *testing.T) {
+	// Multicast addresses are not broadcast addresses
+	if isBroadcastAddr("239.192.65.81") {
+		t.Error("239.192.65.81 (multicast) should NOT be a broadcast address")
+	}
+}
+
+func TestIsBroadcastAddr_InvalidInput(t *testing.T) {
+	if isBroadcastAddr("not-an-ip") {
+		t.Error("non-IP string should return false")
+	}
+	if isBroadcastAddr("") {
+		t.Error("empty string should return false")
+	}
+}
+
+func TestIsBroadcastAddr_IPv6(t *testing.T) {
+	// IPv6 addresses are not IPv4 broadcast
+	if isBroadcastAddr("::1") {
+		t.Error("IPv6 loopback should return false")
+	}
+	if isBroadcastAddr("ff02::1") {
+		t.Error("IPv6 multicast should return false")
+	}
+}
+
+func TestIsBroadcastAddr_Table(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"10.0.0.255", true},
+		{"10.0.1.255", true},
+		{"172.16.0.255", true},
+		{"255.255.255.255", true},
+		{"10.0.0.1", false},
+		{"10.0.0.0", false},
+		{"10.0.0.254", false},
+		{"127.0.0.1", false},
+		{"0.0.0.0", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			got := isBroadcastAddr(tt.addr)
+			if got != tt.want {
+				t.Errorf("isBroadcastAddr(%q) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------- materializeBroadcast ----------
+
+func TestMaterializeBroadcast_WritesFile(t *testing.T) {
+	home := makeTempAQHome(t)
+	ch := "broadcast"
+
+	b := makeBroadcast()
+	materializeBroadcast(b, ch, "test")
+
+	// Check that a file was written in the requests directory
+	reqDir := filepath.Join(home, "channels", ch, "requests")
+	entries, err := os.ReadDir(reqDir)
+	if err != nil {
+		t.Fatalf("failed to read requests dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file in requests dir, got %d", len(entries))
+	}
+	if !strings.Contains(entries[0].Name(), b.ID) {
+		t.Errorf("filename %q should contain broadcast ID %q", entries[0].Name(), b.ID)
+	}
+
+	// Verify the file contains valid JSON with the correct broadcast
+	data, err := os.ReadFile(filepath.Join(reqDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("failed to read broadcast file: %v", err)
+	}
+	var decoded Broadcast
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("broadcast file is not valid JSON: %v", err)
+	}
+	if decoded.ID != b.ID {
+		t.Errorf("decoded ID = %q, want %q", decoded.ID, b.ID)
+	}
+}
+
+func TestMaterializeBroadcast_SkipsDuplicate(t *testing.T) {
+	makeTempAQHome(t)
+	ch := "broadcast"
+
+	b := makeBroadcast()
+	// First write
+	materializeBroadcast(b, ch, "test")
+	// Second write with same broadcast ID — should be skipped
+	materializeBroadcast(b, ch, "test")
+
+	reqDir := filepath.Join(os.Getenv("AQ_HOME"), "channels", ch, "requests")
+	entries, err := os.ReadDir(reqDir)
+	if err != nil {
+		t.Fatalf("failed to read requests dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 file after duplicate materialize, got %d", len(entries))
+	}
+}
+
+func TestMaterializeBroadcast_DifferentIDs(t *testing.T) {
+	makeTempAQHome(t)
+	ch := "broadcast"
+
+	b1 := makeBroadcast()
+	b2 := makeBroadcast(func(b *Broadcast) {
+		b.ConjectureID = "C-2"
+	})
+
+	materializeBroadcast(b1, ch, "test")
+	materializeBroadcast(b2, ch, "test")
+
+	reqDir := filepath.Join(os.Getenv("AQ_HOME"), "channels", ch, "requests")
+	entries, err := os.ReadDir(reqDir)
+	if err != nil {
+		t.Fatalf("failed to read requests dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 files for different broadcast IDs, got %d", len(entries))
+	}
+}
+
+// ---------- encodeFrame / decodeFrame ----------
+
+func TestFrameRoundtrip(t *testing.T) {
+	payload := []byte(`{"agent":"test/main","conjecture_id":"C-1"}`)
+	frame := encodeFrame(payload)
+	decoded, err := decodeFrame(frame)
+	if err != nil {
+		t.Fatalf("decodeFrame error: %v", err)
+	}
+	if string(decoded) != string(payload) {
+		t.Errorf("roundtrip mismatch: got %q, want %q", decoded, payload)
+	}
+}
+
+func TestFrameHeader(t *testing.T) {
+	payload := []byte(`{}`)
+	frame := encodeFrame(payload)
+
+	if len(frame) != 4+len(payload) {
+		t.Fatalf("frame length = %d, want %d", len(frame), 4+len(payload))
+	}
+	if frame[0] != 0x41 || frame[1] != 0x51 {
+		t.Errorf("magic bytes = %02x%02x, want 4151", frame[0], frame[1])
+	}
+	if frame[2] != 0x03 {
+		t.Errorf("version = %02x, want 03", frame[2])
+	}
+	if frame[3] != 0x01 {
+		t.Errorf("format = %02x, want 01", frame[3])
+	}
+}
+
+func TestFrameEmptyPayload(t *testing.T) {
+	// Empty JSON payload should still encode/decode
+	payload := []byte(``)
+	frame := encodeFrame(payload)
+	// Frame is 4 bytes header + 0 bytes payload = 4 bytes
+	// decodeFrame requires len > 4 (at least 5), so empty payload is "too short"
+	_, err := decodeFrame(frame)
+	if err == nil {
+		t.Error("expected error for empty payload (frame too short), got nil")
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("expected 'too short' error, got: %v", err)
+	}
+}
+
+func TestFrameMinimalPayload(t *testing.T) {
+	// Single byte payload: header (4) + payload (1) = 5 bytes, should decode
+	payload := []byte(`x`)
+	frame := encodeFrame(payload)
+	decoded, err := decodeFrame(frame)
+	if err != nil {
+		t.Fatalf("decodeFrame error for 1-byte payload: %v", err)
+	}
+	if string(decoded) != "x" {
+		t.Errorf("got %q, want %q", decoded, "x")
+	}
+}
+
+func TestFrameDecodeV1(t *testing.T) {
+	// v1 frames should still decode (version 0x01 accepted)
+	payload := []byte(`{"v":1}`)
+	frame := make([]byte, 4+len(payload))
+	frame[0] = 0x41 // 'A'
+	frame[1] = 0x51 // 'Q'
+	frame[2] = 0x01 // version 1
+	frame[3] = 0x01 // JSON format
+	copy(frame[4:], payload)
+
+	decoded, err := decodeFrame(frame)
+	if err != nil {
+		t.Fatalf("v1 frame should decode: %v", err)
+	}
+	if string(decoded) != string(payload) {
+		t.Errorf("v1 decode mismatch: got %q, want %q", decoded, payload)
+	}
+}
+
+func TestFrameDecodeV3(t *testing.T) {
+	// v3 frames should decode (version 0x03 accepted)
+	payload := []byte(`{"v":3}`)
+	frame := make([]byte, 4+len(payload))
+	frame[0] = 0x41
+	frame[1] = 0x51
+	frame[2] = 0x03
+	frame[3] = 0x01
+	copy(frame[4:], payload)
+
+	decoded, err := decodeFrame(frame)
+	if err != nil {
+		t.Fatalf("v3 frame should decode: %v", err)
+	}
+	if string(decoded) != string(payload) {
+		t.Errorf("v3 decode mismatch: got %q, want %q", decoded, payload)
+	}
+}
+
+func TestFrameDecodeUnknownVersion(t *testing.T) {
+	// Version 0x02 is not accepted — should return error
+	payload := []byte(`{"v":2}`)
+	frame := make([]byte, 4+len(payload))
+	frame[0] = 0x41
+	frame[1] = 0x51
+	frame[2] = 0x02 // unknown version
+	frame[3] = 0x01
+	copy(frame[4:], payload)
+
+	_, err := decodeFrame(frame)
+	if err == nil {
+		t.Error("expected error for unknown version 0x02, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown version") {
+		t.Errorf("expected 'unknown version' error, got: %v", err)
+	}
+}
+
+func TestFrameDecodeBadMagic(t *testing.T) {
+	frame := []byte{0x00, 0x00, 0x03, 0x01, 0x7B} // bad magic, valid rest
+	_, err := decodeFrame(frame)
+	if err == nil {
+		t.Error("expected error for bad magic bytes, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad magic") {
+		t.Errorf("expected 'bad magic' error, got: %v", err)
+	}
+}
+
+func TestFrameDecodeTooShort(t *testing.T) {
+	// Less than 5 bytes should fail
+	for _, size := range []int{0, 1, 2, 3, 4} {
+		frame := make([]byte, size)
+		_, err := decodeFrame(frame)
+		if err == nil {
+			t.Errorf("expected error for %d-byte frame, got nil", size)
+		}
+	}
+}
+
+func TestFrameDecodeUnknownFormat(t *testing.T) {
+	// Format byte 0x02 (not JSON) should be rejected
+	frame := []byte{0x41, 0x51, 0x03, 0x02, 0x7B}
+	_, err := decodeFrame(frame)
+	if err == nil {
+		t.Error("expected error for unknown format 0x02, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown format") {
+		t.Errorf("expected 'unknown format' error, got: %v", err)
+	}
+}
+
+// ---------- CLI Command Exit-Code Tests ----------
+
+func TestCmdWhisper_WithValidArgs(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdWhisper([]string{"-c", "C-1", "--claim", "testing whisper transport", "-f", "main.go"})
+	if code != 0 {
+		t.Errorf("cmdWhisper returned %d, want 0", code)
+	}
+
+	// Verify the broadcast was written
+	reqDir := filepath.Join(os.Getenv("AQ_HOME"), "channels", "broadcast", "requests")
+	entries, err := os.ReadDir(reqDir)
+	if err != nil {
+		t.Fatalf("failed to read requests dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Error("cmdWhisper should have written a broadcast file")
+	}
+}
+
+func TestCmdWhisper_Help(t *testing.T) {
+	code := cmdWhisper([]string{"--help"})
+	if code != 0 {
+		t.Errorf("cmdWhisper --help returned %d, want 0", code)
+	}
+}
+
+func TestCmdWhisper_MissingConjecture(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdWhisper([]string{"--claim", "no conjecture"})
+	if code != 1 {
+		t.Errorf("cmdWhisper without -c returned %d, want 1", code)
+	}
+}
+
+func TestCmdStatus_NoActiveBroadcasts(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdStatus([]string{})
+	if code != 0 {
+		t.Errorf("cmdStatus returned %d, want 0", code)
+	}
+}
+
+func TestCmdStatus_Help(t *testing.T) {
+	code := cmdStatus([]string{"--help"})
+	if code != 0 {
+		t.Errorf("cmdStatus --help returned %d, want 0", code)
+	}
+}
+
+func TestCmdInit_CreatesStructure(t *testing.T) {
+	home := makeTempAQHome(t)
+	channelName = "broadcast"
+
+	code := cmdInit([]string{})
+	if code != 0 {
+		t.Errorf("cmdInit returned %d, want 0", code)
+	}
+
+	// Verify directory structure was created
+	for _, sub := range []string{
+		filepath.Join("channels", "broadcast", "requests"),
+		filepath.Join("channels", "broadcast", "archive"),
+		"agents",
+		"logs",
+	} {
+		path := filepath.Join(home, sub)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("cmdInit should have created %s", sub)
+		}
+	}
+
+	// Verify config.json was created
+	configPath := filepath.Join(home, "config.json")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Error("cmdInit should have created config.json")
+	}
+}
+
+func TestCmdInit_Help(t *testing.T) {
+	code := cmdInit([]string{"--help"})
+	if code != 0 {
+		t.Errorf("cmdInit --help returned %d, want 0", code)
+	}
+}
+
+func TestCmdQuickstart_ReturnsZero(t *testing.T) {
+	makeTempAQHome(t)
+	channelName = "broadcast"
+	jsonOutput = false
+
+	code := cmdQuickstart([]string{})
+	if code != 0 {
+		t.Errorf("cmdQuickstart returned %d, want 0", code)
+	}
+}
+
+func TestCmdQuickstart_Help(t *testing.T) {
+	code := cmdQuickstart([]string{"--help"})
+	if code != 0 {
+		t.Errorf("cmdQuickstart --help returned %d, want 0", code)
+	}
+}
