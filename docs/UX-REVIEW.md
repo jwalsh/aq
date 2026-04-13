@@ -71,6 +71,9 @@ Commands that would be useful but don't exist yet:
 - **`aq watch`**: Daemon mode that monitors the channel directory for new
   broadcasts and prints conflict alerts in real-time. This is build step 5.
   Without it, conflict detection is pull-only (you have to ask).
+  *Update (v0.5.2)*: `aq listen` now provides RX capability (subscribes to
+  UDP and MQTT, materializes incoming broadcasts to disk). A full `aq watch`
+  with FSEvents/inotify-driven conflict alerting is still pending.
 
 - **`aq clear`**: Remove your own broadcasts. Currently there's no way to
   clean up without manually deleting files. `aq announce --status done`
@@ -166,7 +169,7 @@ the TTL value itself.
 
 The CLI is functional and follows the patterns established by sb and cprr.
 The biggest gaps are:
-1. No daemon/watch mode (planned, build step 5)
+1. No full daemon/watch mode (partially addressed: `aq listen` provides RX; full FSEvents watcher still pending)
 2. No way to clear/expire broadcasts explicitly
 3. File-level conflict granularity is too coarse for multi-agent-on-single-file
 4. TTL needs auto-renewal mechanism

@@ -181,7 +181,7 @@ port = 1883
 topic = "aq"
 # Syncs all channels to MQTT broker.
 # Write: local file -> mqtt publish
-# Read:  mqtt subscribe -> local file (future)
+# Read:  mqtt subscribe -> local file (implemented: `aq listen` materializes MQTT messages to disk)
 
 [mounts.mesh]
 type = "mesh"
@@ -284,7 +284,7 @@ From highest to lowest:
    - mqtt: =mosquitto_sub= -> write to =~/.aq/mounts/mqtt/{channel}/requests/=
    - mesh: =am mon= -> parse compact format -> write to mounts/mesh/
 5. =read_active()= reads from =channels/= (canonical) and optionally
-   merges from =mounts/*/= (remote broadcasts not yet propagated locally).
+   merges from =mounts/*/= (partially implemented: =aq listen= materializes remote broadcasts to =requests/= subdir).
 
 ** The symlink optimization
 
@@ -507,13 +507,13 @@ codified as follows:
 3. *Remote mounts sync /from/ the local filesystem.* Conceptually, a
    remote mount is a watcher on =~/.aq/channels/= that propagates writes
    to a backend. The current implementation (subprocess per publish)
-   achieves this synchronously in =_fanout()=. A future implementation
-   could use inotify/FSEvents to decouple the sync.
+   achieves this synchronously in =_fanout()=. A decoupled implementation
+   using inotify/FSEvents is still pending.
 
 4. *=read_active()= reads from =~/.aq/channels/= only.* Remote mounts
    may /ingest/ data into =~/.aq/mounts/{name}/= but this data is
    advisory, not authoritative. Merging remote data into =read_active()=
-   is a separate concern (and a future feature).
+   is a separate concern (still pending as a dedicated feature; =aq listen= handles per-transport RX but mount-level merge is not yet implemented).
 
 5. *The local mount is Tier 0.* All other mounts are Tier 1+. If the
    system has nothing but a local mount, =aq= is fully functional. Every
@@ -531,7 +531,7 @@ announce() ------> ~/.aq/channels/{ch}/requests/{id}.json
                    |
                    +--[mqtt]----> mosquitto_pub ---> broker
                    |                                    |
-                   |              (future: subscribe)   v
+                   |              (implemented: =aq listen= subscribes)   v
                    |                                 ingest to
                    |                              ~/.aq/mounts/mqtt/
                    |
@@ -544,7 +544,7 @@ announce() ------> ~/.aq/channels/{ch}/requests/{id}.json
 
 read_active() <--- ~/.aq/channels/{ch}/requests/  (only source today)
                    |
-                   +-- (future) merge ~/.aq/mounts/*/  (advisory)
+                   +-- (still pending) merge ~/.aq/mounts/*/  (advisory)
 #+end_example
 
 * Transport Module Interface
@@ -794,14 +794,14 @@ work during migration. They are equivalent to =--mount {name}=.
 - Add =health_check()= to each transport module.
 - =~/.aq/mounts/= directory structure created on first mount.
 
-** Phase 3: Bidirectional sync (future)
+** Phase 3: Bidirectional sync (partially implemented)
 
 - Add =subscribe()= to MQTT transport (=mosquitto_sub= watcher).
 - Ingest remote broadcasts into =~/.aq/mounts/mqtt/{channel}/=.
 - =read_active()= optionally merges mount data.
 - This is the full Plan 9 realization.
 
-** Phase 4: Deprecate env vars (future)
+** Phase 4: Deprecate env vars (still pending)
 
 - Print deprecation warning when =AQ_MQTT=1= is set without =transports.toml=.
 - Remove env var support in a future major version.

@@ -271,12 +271,12 @@ echo '{"config_version":2,"udp":{"enabled":false},"mqtt":{"enabled":false}}' \
 AQ_HOME=/tmp/aq-bench go run contrib/chaos/chaos.go --aq-binary ./aq
 #+end_src
 
-* Future Scenarios
+* Planned Scenarios (still pending)
 
 | Scenario | What it would test | Status |
 |----------+--------------------+--------|
-| UDP round-trip | TX→RX latency via multicast | Not implemented |
-| MQTT round-trip | pub→sub latency via broker | Not implemented |
+| UDP round-trip | TX→RX latency via multicast | Not implemented (=aq listen= provides RX; needs latency harness) |
+| MQTT round-trip | pub→sub latency via broker | Not implemented (=listenMQTT= exists; needs latency harness) |
 | Cross-host conflict | Two hosts, shared file, detect HIGH | Requires 2 machines |
 | Stale message injection | v0.3 payload → does listener crash? | Not implemented |
 | Config hot-reload | Change config.json during =aq listen= | Not implemented |

@@ -81,9 +81,9 @@ graph TD
 
 ** Current Monitoring (As-Is)
    Typical deployment: a broker host running Mosquitto, InfluxDB, Grafana.
-   Telegraf consumer ingests Meshtastic (~msh/US/2/+/+~), not yet ~agents/#~.
+   Telegraf consumer ingests Meshtastic (~msh/US/2/+/+~), ~agents/#~ subscription still pending.
    Mobile: IoT MQTT Panel connecting to the broker LAN address.
-   Grafana MQTT datasource plugin: available, not yet deployed.
+   Grafana MQTT datasource plugin: available, deployment still pending.
 
 * Industry State: March 2026
   :PROPERTIES:

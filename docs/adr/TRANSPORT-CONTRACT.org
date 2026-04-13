@@ -95,7 +95,7 @@ Requires =avahi-publish-service= on PATH.
 
 TX only. No RX. Requires =ggwave= CLI or =python3= with =ggwave= module (legacy).
 
-*** =mesh= — Meshtastic LoRa (not yet wired into aq binary)
+*** =mesh= — Meshtastic LoRa (available as contrib, not wired into core binary)
 
 | Field    | Type   | Default    | Description                       |
 |----------+--------+------------+-----------------------------------|
@@ -103,7 +103,7 @@ TX only. No RX. Requires =ggwave= CLI or =python3= with =ggwave= module (legacy)
 | =via=    | string | ="serial"= | ="serial"= (direct) or ="mqtt"= (bridge) |
 | =device= | string | =""=       | Serial device path (e.g. =/dev/ttyUSB0=) |
 
-Not consumed by aq binary. Reserved for future implementation.
+Not consumed by aq binary. Available as contrib package (=contrib/meshtastic/mesh.go=).
 Present in config for documentation and tooling.
 
 ** 1.3 Enable logic summary
@@ -114,7 +114,7 @@ Present in config for documentation and tooling.
 | mqtt      | =mqtt.enabled == true= AND =mqtt.host != ""=              | =mosquitto_pub/sub=  |
 | mdns      | =mdns.enabled == true=                                     | =avahi-publish-service= |
 | ggwave    | =ggwave.enabled == true=                                   | =ggwave= CLI        |
-| mesh      | Not wired. Config is advisory only.                        | =meshtastic= CLI    |
+| mesh      | Available as contrib (=contrib/meshtastic/=). Not wired into core. | =meshtastic= CLI    |
 
 ** 1.4 Config loading
 
@@ -372,8 +372,8 @@ Rules:
 
 ** mesh (Meshtastic LoRa)
 
-- *Owns*: nothing yet. Config placeholder only.
-- *TX*: NOT IMPLEMENTED.
+- *Owns*: LoRa mesh broadcast (available as contrib, not in core binary).
+- *TX*: Implemented in =contrib/meshtastic/mesh.go=. Not wired into core fanout.
 - *RX*: NOT IMPLEMENTED.
 - *Plan*: serial device on host with USB-connected node, mqtt bridge elsewhere
 

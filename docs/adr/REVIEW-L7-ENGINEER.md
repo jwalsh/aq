@@ -30,13 +30,13 @@ aq is a well-scoped, intellectually honest project that correctly identifies a r
 
 ### What's missing
 
-- **Heartbeat / auto-renewal.** The dogfooding data is unambiguous: TTL=300s expires while agents are still working, and no agent remembers to re-announce. JOURNEY.md confirms this at T+7min. Without a heartbeat mechanism (`aq watch` or git hook integration), the system has 5 minutes of useful memory in a 30-60 minute session. This is the highest-priority gap.
+- **Heartbeat / auto-renewal.** The dogfooding data is unambiguous: TTL=300s expires while agents are still working, and no agent remembers to re-announce. JOURNEY.md confirms this at T+7min. *Update*: DefaultTTL has been bumped to 3600s (1 hour). Multiple heartbeat options are documented in HEARTBEAT.md (PostToolUse hooks, git hooks, cd wrapper, aq watch). Full auto-renewal daemon is still pending.
 - **File locking or CAS semantics for archive operations.** The prune-on-read pattern needs at minimum a best-effort advisory lock or a rename-to-unique-temp-then-move pattern to avoid race conditions between concurrent readers.
 - **Status-based filtering.** `readActive()` returns all non-expired broadcasts including those with `status=done`. The conflict check at line 905 skips self but does not skip `done` broadcasts. An agent that announced `status=done` should not contribute to conflict calculations for other agents' `check` calls. (The `checkNoDuplicateActive` invariant correctly filters `done` at line 505, but `checkConflicts` does not.)
-- **Benchmark harness.** Build step 7 (10 agents, 100 msg/min, p99 < 500ms) has no implementation. C-1 is untested at load. Without this, the core conjecture is decorative.
+- **Benchmark harness.** Build step 7 (10 agents, 100 msg/min, p99 < 500ms) has been implemented and passed. See CHAOS-TESTING.org and JOURNEY.md for results: p99=88ms at N=10, p99=239ms at N=50. C-1 is not refuted.
 - **Transport abstraction interface.** The README and TRANSPORTS.org describe an upgrade path from filesystem to NATS/Redis/etcd, but there is no `Transport` interface in the code. The announce/readActive functions are hardcoded to filesystem I/O.
-- **Daemon mode (build step 5).** `aq watch` is referenced in multiple documents but does not exist. This is the critical path to making heartbeat work.
-- **No LICENSE file.** README.org line 403 says "TODO." A public repository without a license is legally unusable by third parties.
+- **Daemon mode (build step 5).** `aq listen` now exists for RX (subscribes to UDP and MQTT transports, materializes incoming broadcasts to disk). A full `aq watch` with FSEvents/inotify-driven re-announcement is still pending.
+- **No LICENSE file.** *Update*: LICENSE file has been added (MIT). This item is resolved.
 
 ## Code Review
 

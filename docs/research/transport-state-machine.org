@@ -799,7 +799,7 @@ User runs: aq announce -c C-1 -f "auth.py"
   5. CLI prints summary: "announced: C-1 -> aq-xxx.json (+ mqtt, mdns)"
 #+end_src
 
-** 6.2 RX Path (=aq watch=, future)
+** 6.2 RX Path (=aq listen=, implemented for UDP and MQTT)
 
 #+begin_src
 Agent daemon runs: aq watch --channel broadcast

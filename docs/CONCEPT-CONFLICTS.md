@@ -154,7 +154,7 @@ The file is the wrong unit --- the *change* is the right unit.
 carry no obligation. Conflicts are advisory. But aq should learn from the
 next step CVS/SVN took: they stopped treating "same file" as the conflict
 signal and started looking at *what changed within the file*. aq's conflict
-detection has not yet made this transition.
+detection has not yet made this transition (still pending; see conjecture C-8 for function-level granularity proposal).
 
 ### 1.5 Git (2005) --- No Locking, Branch Isolation
 

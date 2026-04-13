@@ -37,7 +37,7 @@ by default and must be explicitly enabled.
 Topics published:
 - `{topic}/announce` — agent broadcasts
 - `{topic}/session/{startup|resume|clear}` — session lifecycle (Claude Code hook)
-- `{topic}/conflict` — conflict alerts (future)
+- `{topic}/conflict` — conflict alerts (still pending; `aq check` detects conflicts locally but does not publish to MQTT)
 
 ### mDNS Section
 
