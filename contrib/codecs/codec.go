@@ -92,7 +92,7 @@ func All() []Codec {
 		Pipe{},
 		CBOR{},
 		Varint{},
-		Dict{},
+		NewDict(),
 		Bad{},
 	}
 }

@@ -73,19 +73,17 @@ func NewDict() *Dict {
 	return d
 }
 
-func (Dict) Name() string  { return "dict" }
-func (Dict) MaxBytes() int { return 200 }
+func (*Dict) Name() string  { return "dict" }
+func (*Dict) MaxBytes() int { return 200 }
 
-// Make Dict satisfy the Codec interface as a value type for All().
-// The default value (zero) gets a lazy-init.
-func (d Dict) Encode(r Record) ([]byte, error) {
-	enc := defaultDict()
-	return enc.encode(r)
+// Encode serializes a Record using dictionary-coded varint wire format.
+func (d *Dict) Encode(r Record) ([]byte, error) {
+	return d.encode(r)
 }
 
-func (d Dict) Decode(data []byte) (Record, error) {
-	enc := defaultDict()
-	return enc.decode(data)
+// Decode parses dictionary-coded varint wire bytes back into a Record.
+func (d *Dict) Decode(data []byte) (Record, error) {
+	return d.decode(data)
 }
 
 // defaultDict returns a process-wide default dictionary instance.
