@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: aq-roq
+X-Conjectures: C-1
+X-Testing: go vet ./... (0 warnings), go test ./... -count=1 -v (all pass)
+X-Invariants: Codec interface contract preserved; sync.Mutex no longer copied by value
+X-Deviations: none
+X-Timeline: step 1 of 1 (single-bead fix)
