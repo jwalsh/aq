@@ -60,12 +60,12 @@ func TestCorruptionSweep(t *testing.T) {
 	rates := []float64{0.0, 0.1, 0.25, 0.5, 0.75, 1.0}
 
 	type curvePoint struct {
-		rate     float64
-		codec    string
-		decodeOK int64
+		rate       float64
+		codec      string
+		decodeOK   int64
 		decodeFail int64
-		idOK     int64
-		idLoss   int64
+		idOK       int64
+		idLoss     int64
 	}
 	var curve []curvePoint
 

@@ -23,19 +23,19 @@ type CBOR struct{}
 // CBOR encodes string map keys as length-prefixed UTF-8, so 1-char
 // keys cost 2 bytes (length=1 + 1 char) instead of 5+ for JSON.
 type cborWire struct {
-	V      int      `cbor:"v"`
-	H      string   `cbor:"h"`             // host
-	U      string   `cbor:"u"`             // user
-	A      string   `cbor:"a"`             // agent
-	W      string   `cbor:"w"`             // worktree
-	C      string   `cbor:"c"`             // cid
-	M      string   `cbor:"m,omitempty"`   // claim ("m" for "meaning")
-	P      string   `cbor:"p"`             // phase
-	S      string   `cbor:"s"`             // status
-	F      []string `cbor:"f,omitempty"`   // files
-	T      int64    `cbor:"t"`             // ts
-	L      int      `cbor:"l"`             // ttl ("l" for lifetime)
-	I      string   `cbor:"i"`             // id
+	V int      `cbor:"v"`
+	H string   `cbor:"h"`           // host
+	U string   `cbor:"u"`           // user
+	A string   `cbor:"a"`           // agent
+	W string   `cbor:"w"`           // worktree
+	C string   `cbor:"c"`           // cid
+	M string   `cbor:"m,omitempty"` // claim ("m" for "meaning")
+	P string   `cbor:"p"`           // phase
+	S string   `cbor:"s"`           // status
+	F []string `cbor:"f,omitempty"` // files
+	T int64    `cbor:"t"`           // ts
+	L int      `cbor:"l"`           // ttl ("l" for lifetime)
+	I string   `cbor:"i"`           // id
 }
 
 func (CBOR) Name() string  { return "cbor" }

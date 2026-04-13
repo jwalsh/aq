@@ -15,19 +15,19 @@ type JSON struct{}
 
 // jsonWire is the on-wire shape for the JSON codec.
 type jsonWire struct {
-	V        int      `json:"v"`
-	Host     string   `json:"host"`
-	User     string   `json:"user"`
-	Agent    string   `json:"agent"`
-	Wt       string   `json:"worktree"`
-	CID      string   `json:"cid"`
-	Claim    string   `json:"claim,omitempty"`
-	Phase    string   `json:"phase"`
-	Status   string   `json:"status"`
-	Files    []string `json:"files,omitempty"`
-	Ts       int64    `json:"ts"`
-	TTL      int      `json:"ttl"`
-	ID       string   `json:"id"`
+	V      int      `json:"v"`
+	Host   string   `json:"host"`
+	User   string   `json:"user"`
+	Agent  string   `json:"agent"`
+	Wt     string   `json:"worktree"`
+	CID    string   `json:"cid"`
+	Claim  string   `json:"claim,omitempty"`
+	Phase  string   `json:"phase"`
+	Status string   `json:"status"`
+	Files  []string `json:"files,omitempty"`
+	Ts     int64    `json:"ts"`
+	TTL    int      `json:"ttl"`
+	ID     string   `json:"id"`
 }
 
 func (JSON) Name() string { return "json" }

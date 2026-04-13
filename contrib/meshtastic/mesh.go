@@ -203,8 +203,9 @@ func compactEncode(broadcast Broadcast) (string, error) {
 
 // compactDecode parses a compact wire payload back into a Broadcast.
 // Accepts both v1 and v3 compact formats — gossip in any accent.
-//   v1: 1|<phase>|<agent_short>|<ts_raw>|<status>|<cid>[|<files>]
-//   v3: 3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
+//
+//	v1: 1|<phase>|<agent_short>|<ts_raw>|<status>|<cid>[|<files>]
+//	v3: 3|<host>|<user>|<phase>|<status>|<cid>|<agent_short>|<ts_delta>[|<files>]
 func compactDecode(payload string) (Broadcast, error) {
 	parts := strings.Split(payload, "|")
 	if len(parts) < 6 {

@@ -26,8 +26,8 @@ type Pipe struct{}
 // ~3-4 bytes per timestamp vs raw unix seconds, valid through 2029.
 const epochBase int64 = 1767225600
 
-func (Pipe) Name() string     { return "pipe" }
-func (Pipe) MaxBytes() int    { return 200 } // Meshtastic AES-256-CTR effective payload
+func (Pipe) Name() string       { return "pipe" }
+func (Pipe) MaxBytes() int      { return 200 } // Meshtastic AES-256-CTR effective payload
 func (Pipe) maxIdentBytes() int { return 8 }
 
 func (p Pipe) Encode(r Record) ([]byte, error) {

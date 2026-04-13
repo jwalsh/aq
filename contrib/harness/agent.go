@@ -60,31 +60,31 @@ func (c Cohort) String() string {
 type FailureMode int
 
 const (
-	FailNone FailureMode = iota
-	FailCorruptBytes        // bit-flip a few bytes after encode
-	FailStaleTimestamp      // ts in the past beyond TTL
-	FailFutureTimestamp     // ts in the future
-	FailEmptyHost           // emit Host=""
-	FailDuplicateID         // reuse the same ULID
-	FailOversizedPayload    // 500 files, 200-char claim
-	FailVersionDowngrade    // emit V=0 (pretends to be v2)
+	FailNone             FailureMode = iota
+	FailCorruptBytes                 // bit-flip a few bytes after encode
+	FailStaleTimestamp               // ts in the past beyond TTL
+	FailFutureTimestamp              // ts in the future
+	FailEmptyHost                    // emit Host=""
+	FailDuplicateID                  // reuse the same ULID
+	FailOversizedPayload             // 500 files, 200-char claim
+	FailVersionDowngrade             // emit V=0 (pretends to be v2)
 )
 
 // AgentProfile is the static configuration of one simulated agent.
 type AgentProfile struct {
-	ID           string
-	Cohort       Cohort
-	Host         string
-	User         string
-	Agent        string
-	Worktree     string
-	Conjectures  []string
-	FilePool     []string
-	Phase        string
-	Status       string
-	Interval     time.Duration
-	Failure      FailureMode
-	FailureRate  float64 // 0.0 to 1.0
+	ID          string
+	Cohort      Cohort
+	Host        string
+	User        string
+	Agent       string
+	Worktree    string
+	Conjectures []string
+	FilePool    []string
+	Phase       string
+	Status      string
+	Interval    time.Duration
+	Failure     FailureMode
+	FailureRate float64 // 0.0 to 1.0
 }
 
 // agentRun is a single agent's runtime state.
@@ -297,7 +297,7 @@ func BuildCohorts() []AgentProfile {
 		AgentProfile{
 			ID: "edge-max", Cohort: CohortEdge,
 			Host: "longhostname", User: "longusername",
-			Agent: "github.com/very-long-org-name/very-long-repo-name/main",
+			Agent:       "github.com/very-long-org-name/very-long-repo-name/main",
 			Worktree:    "feature/long-branch-name-with-extras",
 			Conjectures: []string{"C-9999999"},
 			FilePool:    []string{"a/very/deep/path/file.go", "another/long/path.go"},

@@ -241,8 +241,8 @@ type broadcastLoose struct {
 	Files           []string `json:"files"`
 	Ts              float64  `json:"ts"`
 	TTL             int      `json:"ttl"`
-	ID        string `json:"id"`
-	IsWhisper bool   `json:"is_whisper,omitempty"`
+	ID              string   `json:"id"`
+	IsWhisper       bool     `json:"is_whisper,omitempty"`
 }
 
 // MarshalJSON writes v3 wire format — opinionated on write.

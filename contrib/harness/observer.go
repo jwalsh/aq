@@ -25,14 +25,14 @@ type Observer struct {
 	codecs []codecs.Codec
 
 	mu          sync.Mutex
-	sizes       map[string][]int   // codec -> bytes seen
-	decodeOK    map[string]int64   // codec -> successful decodes
-	decodeFail  map[string]int64   // codec -> failed decodes
-	identityOK  map[string]int64   // codec -> identity preserved
-	identityErr map[string]int64   // codec -> identity lost (truncation, desync)
-	violations  map[string]int64   // invariant -> count
-	envelopes   atomic.Int64       // total envelopes processed
-	desyncs     atomic.Int64       // dict desync detections
+	sizes       map[string][]int // codec -> bytes seen
+	decodeOK    map[string]int64 // codec -> successful decodes
+	decodeFail  map[string]int64 // codec -> failed decodes
+	identityOK  map[string]int64 // codec -> identity preserved
+	identityErr map[string]int64 // codec -> identity lost (truncation, desync)
+	violations  map[string]int64 // invariant -> count
+	envelopes   atomic.Int64     // total envelopes processed
+	desyncs     atomic.Int64     // dict desync detections
 }
 
 // NewObserver constructs an Observer subscribed to all codecs.
