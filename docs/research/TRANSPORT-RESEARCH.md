@@ -1,5 +1,9 @@
 # Transport Research: Alternative Channels for aq
 
+> **Navigation**: This is the deep-dive research document on gossip transport
+> theory. For the user-facing transport reference, see
+> [TRANSPORTS.org](../TRANSPORTS.org).
+
 > **Purpose**: Comprehensive research into alternative transports, persistence
 > mechanisms, gossip protocols, and distribution channels for `aq`. This document
 > is the deep version of what was planned for `TRANSPORTS.org`. It evaluates each
