@@ -169,7 +169,7 @@ scaling curve shows where the filesystem bottleneck lives.
 
 #+begin_src
 === aq chaos test suite ===
-Binary:   ./aq v0.5.1
+Binary:   ./aq v0.6.0
 
 Scenario 1: Sustained Load (10 agents, 10s)
   Announces: 160  Reads: 4

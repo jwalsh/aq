@@ -7,7 +7,7 @@
 
 | Component        | Version | Description                            |
 |------------------+---------+----------------------------------------|
-| aq binary        | v0.5.2  | Go CLI, single-file (main.go)          |
+| aq binary        | v0.6.0  | Go CLI, single-file (main.go)          |
 | config schema    | 2       | =config_version: 2= in config.json    |
 | UDP wire format  | 1.1     | Header: =AQ 0x01 0x01= (version 1, JSON format 1) |
 | compact format   | 3.1     | =aq1:who:repo:conj:ps:files:claim= (80B max) |
@@ -422,7 +422,7 @@ with no envelope. This means:
 - Stale =aq/status= retained message: ={ "service":"aq", "version":"v0.3.0" }=
   — missing all 8 required broadcast fields (agent, worktree, conjecture_id,
   phase, status, ts, ttl, id). Contains unknown fields (service, host, version).
-- No current v0.5.2 broadcast carries a version or protocol_version field.
+- No current v0.6.0 broadcast carries a version or protocol_version field.
 - =aq listen= silently drops payloads that fail =json.Unmarshal= into
   =Broadcast=, but partially-valid payloads (e.g. a v0.3 message with
   some overlapping field names) could materialize as a corrupt broadcast.
