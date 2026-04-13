@@ -59,7 +59,7 @@ Add an =otel= block under the existing transport map:
   },
   "mqtt": {
     "enabled": true,
-    "host": "nexus.lan",
+    "host": "localhost",
     "port": 1883,
     "topic": "aq"
   },
@@ -70,7 +70,7 @@ Add an =otel= block under the existing transport map:
   },
   "otel": {
     "enabled": true,
-    "endpoint": "http://192.168.86.100:4317",
+    "endpoint": "http://localhost:4317",
     "protocol": "grpc",
     "service_name": "aq",
     "export_timeout_ms": 2000,
@@ -152,7 +152,7 @@ Buckets: =[1, 5, 10, 50, 100, 500, 1000, 2000]= ms.
 * Required Metrics Contract (for aq coordination dashboard)
 
 To appear on the existing Agent Coordination dashboard
-(http://192.168.86.100:3000/d/agents/), the OTEL fanout MUST emit at
+(http://localhost:3000/d/agents/), the OTEL fanout MUST emit at
 minimum:
 
 - =aq_announces_total= (with =host=, =agent=, =cid=, =phase= labels)
@@ -243,7 +243,7 @@ aq announce -c "C-V3" --claim "SECRET_VALUE_DO_NOT_LEAK" \
 
 # Check Prometheus — no metric should contain SECRET_VALUE_DO_NOT_LEAK
 # or secret.key or private.pem as a label value
-curl -s "http://192.168.86.100:9090/api/v1/query?query=aq_announces_total" \
+curl -s "http://localhost:9090/api/v1/query?query=aq_announces_total" \
   | grep -E "(SECRET_VALUE|secret\.key|private\.pem)" \
   && echo "FAIL: PII leaked" || echo "PASS"
 #+end_src
@@ -263,13 +263,13 @@ aq announce -c "C-V4" --claim "silent test" --phase proof
 # Test: aq can share the same OTEL config as Claude Code
 export OTEL_METRICS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://192.168.86.100:4317
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 export OTEL_RESOURCE_ATTRIBUTES="host.name=$(hostname -s),team=aygp-dr"
 
 aq announce -c "C-V5" --claim "env compat" --phase proof
 
 # Verify in Prometheus
-curl -s 'http://192.168.86.100:9090/api/v1/query?query=aq_announces_total{cid="C-V5"}'
+curl -s 'http://localhost:9090/api/v1/query?query=aq_announces_total{cid="C-V5"}'
 # MUST return a result with host.name=<hostname> and team=aygp-dr
 #+end_src
 
@@ -280,10 +280,10 @@ curl -s 'http://192.168.86.100:9090/api/v1/query?query=aq_announces_total{cid="C
 aq announce -c "C-V6" --claim "parallel test" --phase proof
 
 # MQTT: check retained message
-mosquitto_sub -h nexus.lan -t 'aq/+/C-V6/presence' -C 1 -W 2
+mosquitto_sub -h localhost -t 'aq/+/C-V6/presence' -C 1 -W 2
 
 # OTEL: check metric
-curl -s 'http://192.168.86.100:9090/api/v1/query?query=aq_announces_total{cid="C-V6"}'
+curl -s 'http://localhost:9090/api/v1/query?query=aq_announces_total{cid="C-V6"}'
 
 # Both MUST return within 5 seconds of the announce
 #+end_src
@@ -297,10 +297,10 @@ for i in $(seq 1 1000); do
 done
 
 # Check Prometheus label cardinality
-curl -s 'http://192.168.86.100:9090/api/v1/label/cid/values' | jq '.data | length'
+curl -s 'http://localhost:9090/api/v1/label/cid/values' | jq '.data | length'
 # MUST be <= 1000 (cid scales with call count, that's fine)
 
-curl -s 'http://192.168.86.100:9090/api/v1/label/files/values' 2>/dev/null
+curl -s 'http://localhost:9090/api/v1/label/files/values' 2>/dev/null
 # MUST be 404 or empty — files is not a label (include_files=false default)
 #+end_src
 
@@ -373,4 +373,4 @@ See also:
 - =spec-v3-wire.org= — the v3 JSON wire format this spec assumes
 - =TRANSPORTS.org= — existing transport inventory (mqtt, udp, mdns, ggwave, mesh)
 - =../../aygp-dr/nexus-setup/docs/agent-otel-contract.md= — the OTEL endpoint
-  contract for the 192.168.86.0/24 LAN
+  contract for the the local LAN
