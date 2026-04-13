@@ -253,7 +253,7 @@ groups. Messages broadcast to all channel members.
 **How aq broadcasts would work over IRC**:
 ```
 JOIN #aq-broadcast
-PRIVMSG #aq-broadcast :{"agent":"origin/feat-auth","conjecture_id":"C-1","phase":"proof","files":["auth.py"],"ttl":300,...}
+PRIVMSG #aq-broadcast :{"v":3,"agent":"origin/feat-auth","cid":"C-1","phase":"p","files":["auth.py"],"ttl":300,...}
 ```
 Presence is implicit: `JOIN` = alive, `PART`/`QUIT` = gone. The IRC server
 maintains the channel membership list. `WHO #aq-broadcast` returns all active
@@ -287,7 +287,7 @@ transport would be ~100 lines of Python using the `irc` library.
 ```
 Topic: aq/broadcast/{worktree}
 QoS: 0
-Payload: {"agent":"origin/feat-auth","conjecture_id":"C-1",...}
+Payload: {"v":3,"agent":"origin/feat-auth","cid":"C-1",...}
 Retained: false
 ```
 QoS 0 is the perfect match for gossip semantics: fire-and-forget, no
@@ -322,7 +322,7 @@ immediately. JetStream adds persistence.
 **How aq broadcasts would work over NATS**:
 ```
 Subject: aq.broadcast.{worktree}
-Payload: {"agent":"origin/feat-auth","conjecture_id":"C-1",...}
+Payload: {"v":3,"agent":"origin/feat-auth","cid":"C-1",...}
 ```
 NATS subjects are ephemeral resources that disappear when unused. Messages are
 dropped if nobody is listening. This is exactly gossip semantics: broadcast
@@ -355,7 +355,7 @@ is lost.
 
 **How aq broadcasts would work over Redis**:
 ```
-PUBLISH aq:broadcast '{"agent":"origin/feat-auth","conjecture_id":"C-1",...}'
+PUBLISH aq:broadcast '{"v":3,"agent":"origin/feat-auth","cid":"C-1",...}'
 ```
 
 **Evaluation**:
@@ -386,7 +386,7 @@ CREATE TABLE broadcasts (
     id TEXT PRIMARY KEY,
     agent TEXT NOT NULL,
     worktree TEXT NOT NULL,
-    conjecture_id TEXT NOT NULL,
+    cid TEXT NOT NULL,
     phase TEXT NOT NULL,
     status TEXT NOT NULL,
     files TEXT NOT NULL,  -- JSON array
@@ -441,7 +441,7 @@ Socket path: /tmp/aq-broadcast.sock
 Socket path: ~/.aq/broadcast.sock
 
 # Agent A sends datagram:
-echo '{"agent":"...","conjecture_id":"C-1",...}' | socat - UNIX-SENDTO:~/.aq/broadcast.sock
+echo '{"v":3,"agent":"...","cid":"C-1",...}' | socat - UNIX-SENDTO:~/.aq/broadcast.sock
 
 # Agent B listens:
 socat UNIX-RECVFROM:~/.aq/broadcast.sock,fork -
@@ -488,8 +488,8 @@ near zero."
 Service type: _aq._tcp
 Instance name: agent-origin-feat-auth
 TXT records:
-  conjecture_id=C-1
-  phase=proof
+  cid=C-1
+  phase=p
   files=auth.py,session.py
   ttl=300
 
@@ -539,7 +539,7 @@ bus.emit_signal(
     '/com/aq/Broadcast',
     'com.aq.Channel',
     'Announce',
-    dbus.String('{"agent":"...","conjecture_id":"C-1",...}')
+    dbus.String('{"v":3,"agent":"...","cid":"C-1",...}')
 )
 
 # Subscribe to signals
@@ -583,7 +583,7 @@ writing files.
 9pfuse remote-host:5640 /mnt/aq
 
 # Announce (same as filesystem!):
-echo '{"agent":"...","conjecture_id":"C-1",...}' > /mnt/aq/broadcast/aq-$(date +%s)-$(ulid).json
+echo '{"v":3,"agent":"...","cid":"C-1",...}' > /mnt/aq/broadcast/aq-$(date +%s)-$(ulid).json
 
 # Read active (same as filesystem!):
 cat /mnt/aq/broadcast/aq-*.json
@@ -661,7 +661,7 @@ import zmq
 ctx = zmq.Context()
 pub = ctx.socket(zmq.PUB)
 pub.bind("tcp://*:5555")
-pub.send_json({"agent": "...", "conjecture_id": "C-1", ...})
+pub.send_json({"v": 3, "agent": "...", "cid": "C-1", ...})
 
 # Subscriber
 sub = ctx.socket(zmq.SUB)
@@ -712,9 +712,10 @@ a room.
   "type": "com.aq.broadcast",
   "room_id": "!aqbroadcast:homeserver.local",
   "content": {
+    "v": 3,
     "agent": "origin/feat-auth",
-    "conjecture_id": "C-1",
-    "phase": "proof",
+    "cid": "C-1",
+    "phase": "p",
     "files": ["auth.py"],
     "ttl": 300
   }
@@ -971,7 +972,7 @@ To: aq-broadcast@team.example.com
 Subject: [aq] C-1 proof auth.py
 Content-Type: application/json
 
-{"agent":"origin/feat-auth","conjecture_id":"C-1","phase":"proof","files":["auth.py"],"ttl":300}
+{"v":3,"agent":"origin/feat-auth","cid":"C-1","phase":"p","files":["auth.py"],"ttl":300}
 ```
 
 ### 6.2 How Absurd Is This?

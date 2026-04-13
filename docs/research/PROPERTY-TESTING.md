@@ -58,7 +58,7 @@ func TestProperty_BroadcastRoundtrip(t *testing.T) {
 }
 ```
 
-**Why it matters**: JSON field naming (`json:"conjecture_id"` vs Go field
+**Why it matters**: JSON field naming (`json:"cid"` vs Go field
 `ConjectureID`) is a common source of roundtrip failures. This property
 ensures the wire format is lossless.
 
@@ -251,7 +251,7 @@ audit trail of agent activity.
 
 ### Property 9: No False Negatives on Conjecture Match
 
-If two broadcasts share a `conjecture_id` and overlapping files with
+If two broadcasts share a `cid` and overlapping files with
 different agents, `checkConflicts` MUST return a signal.
 
 ```go

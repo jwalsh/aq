@@ -92,10 +92,10 @@ requirement. A broadcast carries:
 type Broadcast struct {
     Agent           string   `json:"agent"`           // sb: spatial
     Worktree        string   `json:"worktree"`        // sb: spatial
-    ConjectureID    string   `json:"conjecture_id"`   // cprr: epistemic
-    ConjectureClaim string   `json:"conjecture_claim"`// cprr: epistemic
-    Phase           Phase    `json:"phase"`           // cprr: epistemic
-    Status          Status   `json:"status"`          // aq: temporal
+    ConjectureID    string   `json:"cid"`             // cprr: epistemic
+    ConjectureClaim string   `json:"claim"`           // cprr: epistemic
+    Phase           Phase    `json:"phase"`           // cprr: epistemic (v3: single char c/p/r/n)
+    Status          Status   `json:"status"`          // aq: temporal (v3: single char a/d/b)
     Ts              float64  `json:"ts"`              // aq: temporal
     TTL             int      `json:"ttl"`             // aq: temporal
     Files           []string `json:"files"`           // conflict surface

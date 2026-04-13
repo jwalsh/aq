@@ -426,7 +426,7 @@ The file watcher validates strictly:
 2. Content is valid UTF-8 JSON.
 3. Top-level value is a JSON object.
 4. All required Broadcast fields are present: =agent=, =worktree=,
-   =conjecture_id=, =conjecture_claim=, =phase=, =status=, =files=.
+   =cid=, =claim=, =phase=, =status=, =files=.
 5. No unknown fields (only the 10 Broadcast fields are allowed).
 6. =files= is a list, =agent= is a string.
 7. =Broadcast.from_json()= succeeds (dataclass construction).
@@ -489,7 +489,7 @@ from aq.filewatcher import watch, watch_and_post, watch_daemon
 
 # In-process, blocking
 def on_broadcast(broadcast, source_path):
-    print(f"received: {broadcast.conjecture_id} from {broadcast.agent}")
+    print(f"received: {broadcast.cid} from {broadcast.agent}")
 
 watch("broadcast", callback=on_broadcast)
 

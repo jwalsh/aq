@@ -169,7 +169,7 @@ Prevents duplicate delivery on the RX path. Gossip means the same
 
 Responsible for:
 - *ID-based dedup*: Track seen =(broadcast.id)= values.
-- *Agent+seq dedup*: Track =(agent, conjecture_id)= pairs to
+- *Agent+seq dedup*: Track =(agent, cid)= pairs to
   collapse re-announcements of the same claim.
 - *TTL-based expiry*: Evict entries from the dedup set after TTL.
 - *Convergence signal*: When a duplicate arrives, increment the
@@ -876,7 +876,7 @@ always works as the fallback at every phase.
 
 3. *Per-conjecture or per-transport trickle timers?* RFC 6206 suggests
    per-"code" (where code = the state being disseminated). For =aq=, this
-   means per-=(agent, conjecture_id)= pair. Each active conjecture has
+   means per-=(agent, cid)= pair. Each active conjecture has
    its own trickle interval. Recommendation: per-conjecture, not per-transport.
 
 4. *mDNS lifetime semantics.* mDNS service registrations naturally
