@@ -745,7 +745,7 @@ a specific interface:
 sock.setsockopt(
     socket.IPPROTO_IP,
     socket.IP_MULTICAST_IF,
-    socket.inet_aton("192.168.1.100")  # IP of the desired interface
+    socket.inet_aton("<interface-ip>")  # IP of the desired interface
 )
 #+end_src
 
@@ -894,8 +894,8 @@ broadcasts as they arrive:
 #+begin_example
 $ aq listen --multicast
 [multicast] listening on 239.42.0.1:4271
-[multicast] jwalsh/feat-auth C-42 [proof] api.py,auth.py  (from 192.168.1.50)
-[multicast] daidaitaotao/main C-1 [conjecture] send.py    (from 192.168.1.51)
+[multicast] jwalsh/feat-auth C-42 [proof] api.py,auth.py  (from 10.0.0.50)
+[multicast] daidaitaotao/main C-1 [conjecture] send.py    (from 10.0.0.51)
 #+end_example
 
 * 15. Open Questions

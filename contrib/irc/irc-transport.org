@@ -257,7 +257,7 @@ Set =AQ_IRC=1= to enable IRC for all announces without the flag:
 
 #+begin_example
 export AQ_IRC=1
-export AQ_IRC_HOST=192.168.86.100
+export AQ_IRC_HOST=localhost
 export AQ_IRC_PORT=6999
 export AQ_IRC_CHANNEL="#aq-presence"
 #+end_example
@@ -270,7 +270,7 @@ Add to =~/.aq/config.json=:
 {
   "irc": {
     "enabled": true,
-    "host": "192.168.86.100",
+    "host": "localhost",
     "port": 6999,
     "channel": "#aq-presence",
     "nick": "aq-nexus"
@@ -323,7 +323,7 @@ signal visible to the naked eye.
 
 * 6. Nexus Deployment
 
-The nexus server (FreeBSD, 192.168.86.100) should run miniircd on
+The nexus server (FreeBSD) should run miniircd on
 port 6999:
 
 #+begin_example
@@ -335,7 +335,7 @@ miniircd --listen 0.0.0.0 --ports 6999
 #+end_example
 
 Agents on nexus connect to =localhost:6999=.
-Agents on mini (macOS) connect to =192.168.86.100:6999=.
+Agents on mini (macOS) connect to =<irc-host>:6999=.
 
 Firewall: ensure port 6999 is open on nexus for LAN traffic.
 
