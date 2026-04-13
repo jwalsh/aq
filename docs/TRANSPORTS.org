@@ -16,7 +16,7 @@ This document is context for agents implementing or extending the =aq=
 transport layer. It catalogs every transport option evaluated, with
 verdicts calibrated against L1.5 requirements.
 
-See [[file:../spec.org][spec.org]] for the full specification. This document explains *why* the
+See [[file:../spec/spec-v1.org][spec.org]] for the full specification. This document explains *why* the
 filesystem backend was chosen and what the upgrade path looks like.
 
 * L1.5 Requirements (what aq actually needs)

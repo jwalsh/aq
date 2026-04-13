@@ -113,7 +113,7 @@ may not conflict at all if their conjectures are independent.
 =aq= is about *feels, not files*. The gossip carries intent.
 
 Wire format details (JSON schema, filename conventions, lifecycle) are
-in [[file:spec-v2.org][spec-v2.org]]. You don't need to understand the protocol to use the tool.
+in [[file:spec/spec-v2.org][spec-v2.org]]. You don't need to understand the protocol to use the tool.
 
 * Three-Primitive Interlock
 
