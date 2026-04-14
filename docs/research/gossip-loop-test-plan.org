@@ -1,0 +1,127 @@
+#+TITLE: Gossip Loop Test Plan — Can Agents Close the Loop?
+#+DATE: 2026-04-13
+#+STATUS: draft
+#+CONJECTURE: C-17
+
+* Motivation
+
+793 archived aq broadcasts, zero inter-agent acknowledgments. The
+protocol works; agents don't use it. This test plan verifies whether
+the gossip loop can close when agents are structured to check.
+
+* Prerequisites
+
+- aq v0.6.1+ installed on all participating hosts
+- MQTT broker reachable (or UDP broadcast on the same subnet)
+- ~/.aq/config.json configured per the provisioning gist
+- ghq with a portfolio of repos to work on
+
+* Process (reproducible, repo-agnostic)
+
+** Phase 1: Cluster
+
+A lister agent scans a portfolio of N repos (via ghq root). For each
+repo, it reads the first 5 lines of README to extract a one-liner.
+It clusters repos by conceptual domain:
+
+- Agent/AI tooling
+- Observability/telemetry
+- Protocols/networking
+- Formal methods/testing
+- Teaching/workshops
+- Language-specific projects
+
+Output: a cluster map with repo counts per domain. No repo names in
+the committed test plan — the clusters are the unit, not the repos.
+
+** Phase 2: Coordinate
+
+A coordinator agent reads the cluster map and selects 2-3 clusters
+with potential conceptual overlap (e.g., "observability" and
+"protocols" clusters both touch telemetry). It dispatches builder
+agents, one per cluster.
+
+The coordinator announces its intent via aq:
+
+#+begin_example
+aq announce -c C-test --claim "dispatching builders to N clusters"
+#+end_example
+
+** Phase 3: Build (parallel)
+
+Each builder agent works on 2-3 repos from its assigned cluster,
+simultaneously. Before touching any repo, it:
+
+1. =aq announce= with a claim describing its intent
+2. =aq check= to see if any other builder is in the same space
+3. Checks MQTT (=mosquitto_sub -W 3=) for recent broadcasts
+
+While working, the builder periodically re-checks. If it sees
+another agent's broadcast that overlaps with its current work, it
+includes that observation in its next announce claim:
+
+#+begin_example
+aq announce -c C-test --claim "also touching telemetry (saw builder-2 on otel)"
+#+end_example
+
+This is the test: *does the claim reference another agent's work?*
+If yes, the gossip loop closed.
+
+** Phase 4: Observe
+
+A read-only observer monitors MQTT and the aq archive:
+
+#+begin_example
+mosquitto_sub -h <broker> -t 'aq/#' -v
+#+end_example
+
+It counts:
+- Total broadcasts
+- Broadcasts that reference another agent's work (grep for "saw",
+  "also", "overlap", agent names)
+- Time-to-first-ack: how long from first broadcast to first
+  cross-reference
+
+** Phase 5: Report
+
+The output is a single table:
+
+| Metric | Value |
+|--------|-------|
+| Total broadcasts | N |
+| Cross-references | N |
+| Loop closure rate | N/total % |
+| Time-to-first-ack | Ns |
+| Clusters with overlap detected | N |
+
+The test PASSES if loop closure rate > 0%. The current baseline
+(793 broadcasts, 0 acks) is 0.0%.
+
+* What this tests
+
+** Positive
+- Agents CAN close the gossip loop when structured to check
+- The claim field is sufficient for inter-agent awareness
+- MQTT/UDP transport delivers broadcasts between parallel agents
+
+** Negative (what we're NOT testing)
+- We are NOT testing whether agents MUST check (that's coordination)
+- We are NOT blocking on conflict (that's VSS)
+- We are NOT injecting signals into prompts (that's spam)
+- We are NOT measuring whether conflict avoidance improves (that's C-16 refutation)
+
+The only question: does the loop close at all?
+
+* Constraints
+
+- LoRa-first: any broadcast must fit in 80-byte compact format
+- No blocking: aq check is advisory, never gates work
+- No spam: observe the MQTT topic, don't flood it
+- No repo-specific details in this plan — it's a process, not a recipe
+- Reproducible with any portfolio of N repos on any LAN
+
+* Relationship to conjectures
+
+- C-16: the gossip loop never closes (this test attempts to refute)
+- C-17: consequential communication (builders check as side effect of working)
+- C-3: Wave presence semantics (the claim field carries the awareness signal)
