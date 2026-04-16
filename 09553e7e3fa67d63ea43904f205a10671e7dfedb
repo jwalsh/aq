@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-6
+X-Beads: n/a
+X-Conjectures: C-1
+X-Testing: go test ./... passes (9.8s), all 30 new tests green
+X-Invariants: no site-specific IPs in diff, gofmt clean
+X-Deviations: none
+X-Timeline: v0.6.2 release tag
