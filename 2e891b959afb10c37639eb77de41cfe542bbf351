@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-7[1m]
+X-Beads: none
+X-Conjectures: C-1, C-3
+X-Testing: leak audit (grep 192.168/.lan/nexus) CLEAN on commit vs main; aq validate (5 pass, pre-existing ULID dup in runtime data unrelated); docs-only, no build impact
+X-Invariants: git-hygiene no-network-leak preserved (scrubbed IPs/hostnames to localhost/0.0.0.0); filesystem-first preserved (http opt-in); fire-and-forget contract honored in proposal
+X-Deviations: amended prior commit 88c43c1 to scrub leak from unpushed history rather than adding fixup; network_filter changes left uncommitted (separate PR)
+X-Timeline: PR #5 for feat/http-transport
