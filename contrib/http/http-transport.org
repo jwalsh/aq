@@ -1,0 +1,694 @@
+#+TITLE: HTTP Gossip Transport for aq (Proposed)
+#+SUBTITLE: Tier 1.5 -- firewall-friendly TX + built-in RX server fallback
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-05-24
+#+STATUS: Proposed
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* Abstract
+
+This document proposes an HTTP transport for =aq=, the ambient agent
+queue. Unlike the existing transports it carries the canonical broadcast
+payload over plain HTTP: a TX path that POSTs/GETs an announcement to a
+gossip URL, and an RX path where =aq listen= runs a small built-in HTTP
+server that accepts announcements and materializes them to the filesystem
+exactly like the UDP/MQTT receivers.
+
+It is a *proposed change*. As of v0.6.1 the aq binary has no native HTTP
+transport and =aq doctor= ignores an =http= config stanza. This document
+follows the contract in =docs/adr/TRANSPORT-CONTRACT.org= and the style of
+=contrib/mqtt/= and =contrib/udp-multicast/=.
+
+** Motivation
+
+Observed on a live LAN (2026-05): the MQTT broker was intermittently
+unreachable while a plain HTTP "gossip" receiver answered =200= reliably
+(=GET /gossip?impl=...&status=...&host=...=). The properties that make
+HTTP the most useful fallback:
+
+- *No external binary.* MQTT needs =mosquitto_pub/sub= and an open broker
+  port. HTTP needs nothing beyond the stdlib =net/http= already in the
+  binary.
+- *Crosses subnets / NAT / VPN.* UDP multicast/broadcast is link-local and
+  does not cross subnets or VPNs. HTTP routes anywhere a TCP connection
+  can be made, through proxies and NAT.
+- *Trivial receiver.* The RX side is an =http.Server= with one handler.
+  Any host that can run aq can be a gossip sink.
+
+HTTP is therefore the dependency-light, firewall-friendly fallback when
+MQTT and UDP are both unavailable.
+
+** Tier classification
+
+Tier 1.5 -- a text/TCP protocol that needs no broker daemon, peer of IRC
+in the hierarchy. Higher reach than UDP (crosses subnets), lower setup
+cost than MQTT (no broker, no accounts).
+
+#+begin_src
+Tier 0:   Filesystem (~/.aq/)              -- single machine, zero deps
+Tier 0.5: UDP Multicast (239.192.65.81)    -- LAN, zero deps, zero broker
+Tier 1:   mDNS (_aq._tcp)                   -- LAN, zero-config discovery
+Tier 1.5: HTTP gossip (POST/GET) / IRC      -- TCP text, no broker, crosses subnets
+Tier 2:   MQTT / Keybase                     -- broker / E2E encrypted
+Tier 3:   Meshtastic (LoRa)                  -- radio, proximity-scoped
+#+end_src
+
+* 1. Config Schema (~/.aq/config.json)
+
+** 1.1 New =http= transport section
+
+Add an optional =http= object, a peer of the existing transport sections
+(flat, not nested under =transports=). Every field has a default; omitting
+the section disables the transport.
+
+| Field      | Type   | Default          | Description                                         |
+|------------+--------+------------------+-----------------------------------------------------|
+| =enabled=  | bool   | =false=          | Must be explicitly enabled (like mqtt/mdns/ggwave). |
+| =url=      | string | =""=             | TX gossip endpoint. Empty -> TX silently skipped.   |
+| =method=   | string | ="POST"=         | ="GET"= or ="POST"=. POST sends JSON body.          |
+| =listen=   | string | ="0.0.0.0:7738"= | RX server bind address ([host]:port).               |
+| =path=     | string | ="/gossip"=      | RX server URL path; also appended to =url= if unset on TX. |
+
+TX is enabled when =http.enabled == true= AND =http.url != ""= (mirrors
+the mqtt rule =mqtt.enabled == true AND mqtt.host != ""=). RX is enabled
+when =http.enabled == true= AND =http.listen != ""=. With =enabled= true,
+=url= empty, and =listen= set, the host is an RX-only sink.
+
+** 1.2 Example config
+
+#+begin_src json
+{
+  "config_version": 2,
+  "default_channel": "broadcast",
+  "default_ttl": 3600,
+  "udp": { "enabled": true, "broadcast": true, "group": "255.255.255.255", "port": 4181 },
+  "mqtt": { "enabled": true, "host": "localhost", "port": 1883, "topic": "aq" },
+  "http": {
+    "enabled": true,
+    "url": "http://localhost:7738/gossip",
+    "method": "POST",
+    "listen": "0.0.0.0:7738",
+    "path": "/gossip"
+  }
+}
+#+end_src
+
+A host that only wants to receive (a gossip sink) sets:
+
+#+begin_src json
+{
+  "http": { "enabled": true, "listen": "0.0.0.0:7738", "path": "/gossip" }
+}
+#+end_src
+
+** 1.3 config_version impact -- NO bump required
+
+This change does *not* break config schema v2 and does *not* require a
+version bump. Per the version-history table in =spec/config-schema.md=:
+
+| config_version | aq version | Breaking change                                          |
+|----------------+------------+----------------------------------------------------------|
+| 1              | 0.4.0+     | Initial versioned schema.                                |
+| 2              | 0.5.0+     | Added =udp=, =mdns=, =ggwave= transport sections.        |
+| 3              | 0.7.0+     | Added =network_filter= section.                          |
+
+The =http= section is *additive*: a brand-new optional transport object,
+exactly the kind of change v2 already absorbed for =udp=/=mdns=/=ggwave=.
+It satisfies Invariant 6 ("Config is additive -- adding a new transport
+section must not change the behavior of existing transports; omitting a
+section uses defaults"). Older binaries ignore unknown keys (§1.4 of the
+contract: "Unknown keys are silently ignored"), so a config carrying
+=http= is forward- and backward-compatible within v2.
+
+The version is bumped only on a *breaking* schema change. Adding =http=
+breaks nothing, so config_version stays at 2. (If a future release wants
+=aq doctor --migrate= to seed an empty =http= section, that seeding can be
+folded into the existing v2->v3 migration without itself forcing a bump,
+since the field remains optional.)
+
+* 2. TX Path (fanout)
+
+=aq announce= writes the canonical JSON to
+=~/.aq/channels/{channel}/{id}.json= (canonical store), then calls
+=fanoutBroadcast(b)=, which fans out to each enabled transport in its own
+goroutine. =fanoutHTTP(b, cfg)= is one such goroutine.
+
+The TX maps the v1.1 broadcast payload (§2 of the contract: =agent=,
+=host=, =user=, =worktree=, =conjecture_id=, =conjecture_claim=, =phase=,
+=status=, =files=, =ts=, =ttl=, =id=) to an HTTP request:
+
+** POST (default)
+
+- Body: the existing broadcast JSON *verbatim* (the same bytes the
+  filesystem store and the MQTT/UDP transports carry -- no re-encoding).
+- =Content-Type: application/json=.
+- URL: =http.url= (which already includes the path), or =url + path= if
+  =url= has no path component.
+
+** GET
+
+- All payload fields become query params on =http.url=. Field names match
+  the JSON keys (=agent=, =host=, =user=, =worktree=, =conjecture_id=,
+  =conjecture_claim=, =phase=, =status=, =ts=, =ttl=, =id=); =files= is
+  joined comma-separated. A compact alias set (=cid==conjecture_id,
+  =claim==conjecture_claim, =impl==agent) MAY also be emitted for
+  human-readable receivers such as a =gossip-sink:7738= endpoint -- see the
+  interim shim (§7). GET is for endpoints/log sinks that prefer query
+  strings; POST is canonical.
+
+** Rules (per contract §4)
+
+1. *Fire-and-forget.* TX must never block =aq announce=. The announce
+   command returns after the canonical filesystem write; fanout runs
+   asynchronously and is best-effort.
+2. *Bounded timeout.* The HTTP client uses a short timeout (5s). On
+   timeout or any transport error, log to stderr; never fatal
+   (Invariant 2: transports are independent).
+3. *Silent-skip when url empty.* If =http.url == ""=, =fanoutHTTP= returns
+   immediately without sending. This mirrors mqtt's "binary not found ->
+   transport silently skipped". An RX-only sink (no =url=) thus performs
+   no TX.
+4. *Status is advisory.* Any =2xx= is success for logging; a non-2xx is
+   logged at most. There is no retry (gossip is lossy; Invariant 8: no
+   transport carries obligation).
+
+* 3. RX Path (listen)
+
+=aq listen= starts =listenHTTP(cfg, channel, self, dedup, stop)= alongside
+=listenUDP= / =listenMQTT=. It runs a minimal =http.Server= bound to
+=http.listen=, serving =http.path=.
+
+The handler accepts both GET and POST:
+
+- *POST*: read the body, =json.Unmarshal= into =Broadcast=.
+- *GET*: read query params into the same =Broadcast= (accepting both the
+  canonical keys and the compact aliases from §2).
+
+It then runs the *identical* skip/dedup/materialize pipeline as the other
+RX transports:
+
+1. *Self-exclusion* (Invariant 3): drop broadcasts whose =agent= equals
+   our own identity.
+2. *TTL check*: drop expired broadcasts (=now > ts + ttl=), as udp.go does.
+3. *Dedup* (Invariant 4): drop if =(agent|id)= already seen, using the
+   same bounded in-memory =dedupCache= as the UDP transport.
+4. *Materialize* (Invariant 5): atomic write to
+   =~/.aq/channels/{channel}/requests/aq-{ts}-{id}.json= via
+   =materializeBroadcast= -- indistinguishable to =aq status= / =aq check=
+   from a locally-announced broadcast.
+
+** Response
+
+- Success: =200 OK= with a tiny body (=ok\n=). Receivers do not need the
+  body; it exists so curl/browser probes get a friendly response and so
+  the shim can confirm reachability.
+- Wrong method (not GET/POST): =405 Method Not Allowed=.
+- Malformed payload or unknown wire/payload version: *silently dropped*
+  (return =204 No Content= or =200=; do not 4xx). Per the contract,
+  "Receivers must silently drop unknown versions" -- the HTTP status must
+  not leak parse failures to senders, and a dropped payload is normal, not
+  an error.
+
+** Lifecycle
+
+The server is started in a goroutine and shut down via
+=server.Shutdown(ctx)= when the =stop= channel closes or on
+SIGINT/SIGTERM, matching the udp/mqtt listener lifecycle ("Listener runs
+until SIGINT/SIGTERM or the stop channel is closed").
+
+* 4. Wire Format & Versioning
+
+HTTP, like MQTT and mDNS, carries *raw JSON* with no frame header -- the
+4-byte =AQ= frame is UDP-only (contract §3). The payload is the canonical
+*broadcast payload 1.1* (contract §2), unchanged.
+
+This proposal assigns a transport version string -- *"HTTP transport 1"*
+-- and adds it to the Version Summary table convention in the ADR:
+
+| Component         | Version | Description                                       |
+|-------------------+---------+---------------------------------------------------|
+| HTTP transport    | 1       | Raw broadcast payload 1.1 over HTTP POST/GET; RX server on =listen=+=path= |
+
+Versioning rules (contract §8): the broadcast JSON does not yet carry a
+=protocol_version= field. Until it does, the HTTP receiver behaves like
+the MQTT receiver -- it attempts =json.Unmarshal= and drops anything that
+fails. When =protocol_version= lands (contract §8 "Required"), the HTTP RX
+MUST:
+
+1. Check =protocol_version= before processing.
+2. Silently drop payloads with unknown/missing =protocol_version=
+   (log to stderr, return 200/204, never 4xx).
+3. Accept payloads whose =protocol_version= is in its supported range.
+
+HTTP is in the "no version envelope" / mismatch-risk *High* class
+alongside MQTT (contract §8 matrix), because raw JSON over HTTP has no
+envelope byte. The =protocol_version= field is the mitigation.
+
+| Transport mapping | Format    | Max size                |
+|-------------------+-----------+-------------------------|
+| HTTP POST         | raw JSON  | effectively unbounded   |
+| HTTP GET          | raw JSON via query params | ~8 KB (server URL limit) |
+
+For GET, keep the URL under common server limits (~8 KB); large =files=
+lists should prefer POST.
+
+* 5. Security / Threat Notes
+
+- *Unauthenticated by default.* Like the udp and mqtt-anon transports, the
+  HTTP transport is LAN-only and unauthenticated by default. A broadcast
+  carries presence metadata (agent, repo/branch, files, claim), no
+  secrets, no commands. There is no obligation semantics (Invariant 8), so
+  a spurious broadcast at worst creates a phantom presence entry that
+  expires via TTL.
+- *Bind to a LAN interface on untrusted networks.* The default
+  =0.0.0.0:7738= listens on all interfaces. On a host reachable from an
+  untrusted network, set =listen= to a specific LAN address
+  (e.g. =10.0.0.x:7738=) so the gossip sink is not internet-exposed.
+- *Optional shared-secret header (future work).* A future revision MAY add
+  an optional =token= field to the =http= config and require a
+  =Authorization: Bearer <token>= (or a =X-AQ-Token=) header on both TX
+  and RX. The RX would drop requests with a missing/mismatched token
+  (silently, return 204) -- still no 4xx, to avoid leaking that a sink
+  exists. This is out of scope for "HTTP transport 1" and listed as a
+  deliberate follow-up.
+- *Input hardening.* The RX must bound the request body size
+  (=http.MaxBytesReader=) and use a read timeout, so a malformed or
+  oversized request cannot exhaust memory. Materialization remains atomic
+  (temp + rename) so readers never see partial files.
+
+* 6. Go Implementation Sketch
+
+This is a *sketch / skeleton* -- clearly marked, not guaranteed to compile
+as-is -- following the idioms of =contrib/mqtt/mqtt.go= and
+=contrib/udp-multicast/udp.go= (same =Broadcast= struct, same
+=//go:build ignore=, =generateULID=, =dedupCache=, atomic
+=writeBroadcast=, stderr logging, =-publish=/=-subscribe= modes). It would
+live at =contrib/http/http.go=.
+
+#+begin_src go
+//go:build ignore
+
+// http.go -- HTTP gossip transport sketch for aq.
+//
+// TX: POST (JSON body) or GET (query params) the broadcast payload to a
+//     gossip URL. Fire-and-forget, short timeout, never blocks announce.
+// RX: a minimal http.Server bound to {listen}{path} that accepts GET/POST,
+//     parses the payload, and materializes it to
+//     ~/.aq/channels/broadcast/requests/ -- same skip/dedup/materialize
+//     pipeline as listenUDP / listenMQTT.
+//
+// Wire format: raw broadcast payload 1.1 (no AQ frame; HTTP carries JSON).
+// This is a design sketch, not compiled into the main binary.
+//
+// Usage:
+//   go run http.go -publish -url http://localhost:7738/gossip -method POST \
+//       -agent jwalsh/main -conjecture C-1 -phase proof -files "main.go"
+//   go run http.go -subscribe -listen 0.0.0.0:7738 -path /gossip
+
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// ---------- Broadcast payload (matches main.go / udp.go / mqtt.go) ----------
+
+type Broadcast struct {
+	Agent           string   `json:"agent"`
+	Host            string   `json:"host,omitempty"`
+	User            string   `json:"user,omitempty"`
+	Worktree        string   `json:"worktree"`
+	ConjectureID    string   `json:"conjecture_id"`
+	ConjectureClaim string   `json:"conjecture_claim"`
+	Phase           string   `json:"phase"`
+	Status          string   `json:"status"`
+	Files           []string `json:"files"`
+	Ts              float64  `json:"ts"`
+	TTL             int      `json:"ttl"`
+	ID              string   `json:"id"`
+}
+
+// generateULID: 12 hex chars ms timestamp + 10 hex chars randomness.
+func generateULID() string {
+	ts := fmt.Sprintf("%012x", time.Now().UnixMilli())
+	b := make([]byte, 5)
+	_, _ = rand.Read(b)
+	return ts + hex.EncodeToString(b)
+}
+
+const httpTimeout = 5 * time.Second
+
+// ---------- TX: fanoutHTTP ----------
+//
+// Mirrors fanoutMQTT's contract: best-effort, never fatal, silently
+// skipped when the endpoint is not configured (url == "").
+func fanoutHTTP(b Broadcast, rawURL, method string) {
+	if rawURL == "" {
+		return // silent skip, like "mosquitto binary not found"
+	}
+	client := &http.Client{Timeout: httpTimeout}
+
+	var req *http.Request
+	var err error
+	switch strings.ToUpper(method) {
+	case "GET":
+		req, err = http.NewRequest("GET", rawURL+"?"+broadcastQuery(b), nil)
+	default: // POST
+		body, mErr := json.Marshal(b)
+		if mErr != nil {
+			log.Printf("[http] TX: marshal: %v", mErr)
+			return
+		}
+		req, err = http.NewRequest("POST", rawURL, strings.NewReader(string(body)))
+		if req != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+	}
+	if err != nil {
+		log.Printf("[http] TX: build request: %v", err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[http] TX: %s %s: %v (non-fatal)", method, rawURL, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[http] TX: %s %s -> %d", method, rawURL, resp.StatusCode)
+		return
+	}
+	log.Printf("[http] TX: %s %s -> %d (id=%s agent=%s)",
+		method, rawURL, resp.StatusCode, b.ID, b.Agent)
+}
+
+// broadcastQuery encodes the payload as query params for GET, emitting
+// both canonical keys and compact aliases (cid/claim/impl) for
+// human-readable receivers (e.g. a gossip-sink:7738 endpoint).
+func broadcastQuery(b Broadcast) string {
+	q := url.Values{}
+	q.Set("agent", b.Agent)
+	q.Set("impl", b.Agent)
+	q.Set("host", b.Host)
+	q.Set("user", b.User)
+	q.Set("worktree", b.Worktree)
+	q.Set("conjecture_id", b.ConjectureID)
+	q.Set("cid", b.ConjectureID)
+	q.Set("conjecture_claim", b.ConjectureClaim)
+	q.Set("claim", b.ConjectureClaim)
+	q.Set("phase", b.Phase)
+	q.Set("status", b.Status)
+	q.Set("files", strings.Join(b.Files, ","))
+	q.Set("ts", strconv.FormatFloat(b.Ts, 'f', 0, 64))
+	q.Set("ttl", strconv.Itoa(b.TTL))
+	q.Set("id", b.ID)
+	return q.Encode()
+}
+
+// ---------- RX: gossipHandler ----------
+//
+// Returns an http.HandlerFunc that parses GET/POST, then runs the same
+// self-exclusion / TTL / dedup / materialize pipeline as listenUDP.
+// selfAgent, dedup, and channel are captured from listenHTTP.
+func gossipHandler(channel, selfAgent string, dedup *dedupCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var b Broadcast
+		switch r.Method {
+		case http.MethodPost:
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB cap
+			if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+				// malformed payload -> silently drop, never 4xx
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		case http.MethodGet:
+			b = broadcastFromQuery(r.URL.Query())
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Unknown/empty payload (future: unknown protocol_version) -> drop.
+		if b.ID == "" || b.Agent == "" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Self-exclusion (Invariant 3).
+		if selfAgent != "" && b.Agent == selfAgent {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		// TTL expiry.
+		now := float64(time.Now().Unix())
+		if b.TTL > 0 && now > b.Ts+float64(b.TTL) {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		// Dedup (Invariant 4).
+		if dedup.isDuplicate(b) {
+			w.Write([]byte("ok\n"))
+			return
+		}
+		// Materialize (Invariant 5) -- atomic write into requests/.
+		if err := writeBroadcast(b); err != nil {
+			log.Printf("[http] RX: write failed: %v", err)
+		} else {
+			log.Printf("[http] RX: from %s: agent=%s conjecture=%s phase=%s",
+				r.RemoteAddr, b.Agent, b.ConjectureID, b.Phase)
+		}
+		w.Write([]byte("ok\n")) // 200, tiny body
+	}
+}
+
+func broadcastFromQuery(q url.Values) Broadcast {
+	get := func(keys ...string) string {
+		for _, k := range keys {
+			if v := q.Get(k); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	ts, _ := strconv.ParseFloat(get("ts"), 64)
+	ttl, _ := strconv.Atoi(get("ttl"))
+	var files []string
+	if f := get("files"); f != "" {
+		files = strings.Split(f, ",")
+	}
+	return Broadcast{
+		Agent:           get("agent", "impl"),
+		Host:            get("host"),
+		User:            get("user"),
+		Worktree:        get("worktree"),
+		ConjectureID:    get("conjecture_id", "cid"),
+		ConjectureClaim: get("conjecture_claim", "claim"),
+		Phase:           get("phase"),
+		Status:          get("status"),
+		Files:           files,
+		Ts:              ts,
+		TTL:             ttl,
+		ID:              get("id"),
+	}
+}
+
+// listenHTTP starts the gossip server and blocks until stop is closed,
+// matching the signature shape of listenUDP / listenMQTT.
+func listenHTTP(listenAddr, path, channel, selfAgent string, stop <-chan struct{}) error {
+	if listenAddr == "" {
+		return nil // RX disabled
+	}
+	if path == "" {
+		path = "/gossip"
+	}
+	dedup := newDedupCache()
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, gossipHandler(channel, selfAgent, dedup))
+	srv := &http.Server{
+		Addr:        listenAddr,
+		Handler:     mux,
+		ReadTimeout: httpTimeout,
+	}
+	go func() {
+		<-stop
+		ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+	log.Printf("[http] RX: serving %s%s -- press Ctrl-C to stop", listenAddr, path)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("[http] RX: serve %s: %w", listenAddr, err)
+	}
+	return nil
+}
+
+// ---------- dedup + materialize (identical idiom to udp.go) ----------
+
+const maxDedupEntries = 1024
+
+type dedupCache struct{ seen map[string]time.Time }
+
+func newDedupCache() *dedupCache { return &dedupCache{seen: make(map[string]time.Time)} }
+
+func (dc *dedupCache) isDuplicate(b Broadcast) bool {
+	key := b.Agent + "|" + b.ID
+	if len(dc.seen) > maxDedupEntries/2 {
+		cutoff := time.Now().Add(-5 * time.Minute)
+		for k, t := range dc.seen {
+			if t.Before(cutoff) {
+				delete(dc.seen, k)
+			}
+		}
+	}
+	if _, ok := dc.seen[key]; ok {
+		return true
+	}
+	dc.seen[key] = time.Now()
+	return false
+}
+
+func writeBroadcast(b Broadcast) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".aq", "channels", "broadcast", "requests")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	final := filepath.Join(dir, fmt.Sprintf("aq-%d-%s.json", time.Now().UnixMilli(), b.ID))
+	tmp, err := os.CreateTemp(dir, ".aq-tmp-*.json")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	tmp.Close()
+	return os.Rename(tmp.Name(), final)
+}
+
+// ---------- main (sketch driver, mirrors udp.go/mqtt.go) ----------
+
+func main() {
+	log.SetOutput(os.Stderr)
+	doPublish := flag.Bool("publish", false, "TX: POST/GET a broadcast to -url")
+	doSubscribe := flag.Bool("subscribe", false, "RX: run the gossip HTTP server")
+	rawURL := flag.String("url", "", "TX gossip endpoint URL")
+	method := flag.String("method", "POST", "TX method: GET or POST")
+	listenAddr := flag.String("listen", "0.0.0.0:7738", "RX bind address")
+	path := flag.String("path", "/gossip", "RX URL path")
+	agent := flag.String("agent", "", "Agent address (e.g. jwalsh/main)")
+	conjecture := flag.String("conjecture", "C-0", "Conjecture ID")
+	claim := flag.String("claim", "", "Conjecture claim")
+	phase := flag.String("phase", "conjecture", "CPRR phase")
+	status := flag.String("status", "prosecuting", "Status")
+	files := flag.String("files", "", "Comma-separated files")
+	ttl := flag.Int("broadcast-ttl", 3600, "Broadcast TTL seconds")
+	flag.Parse()
+
+	switch {
+	case *doPublish:
+		if *agent == "" {
+			log.Fatal("-agent required for -publish")
+		}
+		worktree := *agent
+		if i := strings.LastIndex(*agent, "/"); i >= 0 {
+			worktree = (*agent)[i+1:]
+		}
+		var fileList []string
+		if *files != "" {
+			fileList = strings.Split(*files, ",")
+		}
+		host, _ := os.Hostname()
+		b := Broadcast{
+			ID: generateULID(), Agent: *agent, Host: host,
+			User: os.Getenv("USER"), Worktree: worktree,
+			ConjectureID: *conjecture, ConjectureClaim: *claim,
+			Phase: *phase, Status: *status, Files: fileList,
+			Ts: float64(time.Now().Unix()), TTL: *ttl,
+		}
+		fanoutHTTP(b, *rawURL, *method)
+
+	case *doSubscribe:
+		stop := make(chan struct{})
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		go func() { <-sig; close(stop) }()
+		if err := listenHTTP(*listenAddr, *path, "broadcast", *agent, stop); err != nil {
+			log.Printf("[http] RX: %v", err)
+		}
+
+	default:
+		fmt.Fprintln(os.Stderr, "Usage: go run http.go -publish|-subscribe [flags]")
+		os.Exit(1)
+	}
+}
+#+end_src
+
+Wiring into the core binary (per contract §9 "Adding a New Transport"):
+
+1. Define =httpConfig struct= with =Enabled bool=, =URL=, =Method=,
+   =Listen=, =Path=.
+2. Add =HTTP *httpConfig `json:"http,omitempty"`= to =transportConfig=.
+3. Implement =fanoutHTTP(b, cfg)=; call it from =fanoutBroadcast()= guarded
+   by =tc.HTTP != nil && tc.HTTP.Enabled && tc.HTTP.URL != ""=.
+4. Implement =listenHTTP(...)=; start it from =aq listen= guarded by
+   =tc.HTTP != nil && tc.HTTP.Enabled && tc.HTTP.Listen != ""=.
+5. Add an HTTP check to =cmdDoctor= (TX url reachability, RX bind sanity).
+6. Update =docs/adr/TRANSPORT-CONTRACT.org= Version Summary (§4 here).
+
+* 7. Interim Shim
+
+Until native support lands, a wrapper script mirrors =aq announce= to the
+HTTP endpoint without touching the binary. The reference implementation is
+=walsh/compliance-harness/scripts/aq-http.sh=:
+
+- Runs the real =aq announce "$@" --json= (preserving udp/mqtt fanout).
+- Reads =.http.url= from =~/.aq/config.json=.
+- Reformats the machine-readable record into a =GET= against the gossip
+  URL (=impl=, =cid=, =claim=, =phase=, =host= query params -- the compact
+  aliases this doc adopts in §2/§6) with =curl -s -m 8=.
+- Never fails the caller (=exit 0= on any error) -- the same
+  fire-and-forget, best-effort contract the native transport will honor.
+
+This shim is the fast path to validate the =gossip-sink:7738= receiver before
+=fanoutHTTP=/=listenHTTP= are merged into =main.go=.
+
+* 8. Conformance to the Transport Contract
+
+| Invariant (ADR §9)                         | How HTTP satisfies it                                  |
+|--------------------------------------------+--------------------------------------------------------|
+| 1. Filesystem canonical                    | TX only fans out after the canonical write; HTTP best-effort. |
+| 2. Transports independent                  | =fanoutHTTP= logs and returns on error; never fatal.   |
+| 3. Self-exclusion on RX                    | Handler drops broadcasts whose =agent= == self.        |
+| 4. Dedup on RX                             | Shared =(agent|id)= =dedupCache=.                      |
+| 5. Materialized == local                   | Atomic write to =requests/= via =writeBroadcast=.      |
+| 6. Config additive                         | New optional =http= section; no v2 bump.               |
+| 7. UDP is base case                        | HTTP is opt-in (=enabled=false= default).              |
+| 8. No obligation                           | No retry; non-2xx logged only; silence is normal.      |
+| 9. Wire format versioned                   | "HTTP transport 1"; unknown =protocol_version= dropped silently. |
+| 10. Config re-read each invocation         | =http= read from config.json like every other section. |

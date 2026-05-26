@@ -2,6 +2,23 @@
 #+AUTHOR: jwalsh
 #+OPTIONS: toc:nil num:nil
 
+* v0.6.2 — 2026-04-15
+
+** Patch: Dict mutex safety, transport tests, file reorg
+
+- =fix(codec)=: Dict codec uses pointer receivers for =sync.Mutex= safety —
+  value receivers were copying the mutex, a correctness bug under concurrent use
+- =fix=: gofmt all Go files to pass CI lint
+- =fix=: remove remaining site-specific network references from code and docs
+- =fix=: update CLAUDE.md stack preferences from Python to Go
+- =test=: 30 new tests covering transport layer (=isBroadcastAddr=,
+  =materializeBroadcast=, =encodeFrame= / =decodeFrame= roundtrip) and CLI
+  commands (=cmdWhisper=, =cmdStatus=, =cmdInit=, =cmdQuickstart=)
+- =feat=: add =/compliance= skill for CLAUDE.md mandate verification
+- =chore=: move specs, papers, agents, meta-prompt to =docs/= and =spec/=
+- =chore=: remove duplicate =TRANSPORTS.org= and stale =uv.lock=
+- =docs=: gossip loop test plan, aq meta-prompt
+
 * v0.6.0 — 2026-04-11
 
 ** End-to-end multi-host telemetry validated

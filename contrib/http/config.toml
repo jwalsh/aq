@@ -1,0 +1,71 @@
+# HTTP gossip transport configuration for aq (proposed)
+#
+# aq broadcasts map to an HTTP request carrying the canonical broadcast
+# payload 1.1: POST sends the JSON body verbatim; GET sends query params.
+# The RX side runs a minimal http.Server that materializes received
+# broadcasts to ~/.aq/channels/{channel}/requests/, exactly like the UDP
+# and MQTT receivers.
+#
+# This config is illustrative — aq does not read TOML; the live schema is
+# the "http" object in ~/.aq/config.json (config_version 2, additive, no
+# version bump). See http-transport.org §1. As of v0.6.1 native support is
+# not yet merged; use scripts/aq-http.sh as an interim shim.
+
+[transport]
+type = "http"
+tier = 1.5          # TCP text protocol, no broker, crosses subnets/NAT/VPN
+
+# --- TX (fanout): POST/GET announcements to a gossip endpoint ---
+
+[tx]
+enabled = false                                  # opt-in, like mqtt/mdns/ggwave
+url     = "http://localhost:7738/gossip"         # empty url => TX silently skipped
+method  = "POST"                                 # "POST" (JSON body) or "GET" (query params)
+timeout_seconds = 5                              # fire-and-forget; never blocks `aq announce`
+content_type    = "application/json"             # POST only
+
+# POST body is the broadcast payload verbatim:
+#   {"agent","host","user","worktree","conjecture_id","conjecture_claim",
+#    "phase","status","files","ts","ttl","id"}
+#
+# GET maps each field to a query param. Compact aliases are also emitted
+# for human-readable receivers (e.g. a gossip-sink endpoint):
+#   impl=agent  cid=conjecture_id  claim=conjecture_claim
+
+# --- RX (listen): built-in gossip HTTP server, MQTT/UDP fallback ---
+
+[rx]
+enabled = false              # opt-in
+listen  = "0.0.0.0:7738"     # bind address; use a LAN IP on untrusted networks
+path    = "/gossip"          # GET/POST here; 200 "ok\n" on accept, 405 on bad method
+max_body_bytes = 1048576     # 1 MiB cap (http.MaxBytesReader)
+
+# Receiver pipeline (identical to listenUDP / listenMQTT):
+#   self-exclusion (agent == self) -> TTL expiry -> dedup (agent|id)
+#   -> atomic materialize to ~/.aq/channels/{channel}/requests/
+# Malformed payloads and unknown protocol_version are SILENTLY DROPPED
+# (return 204/200, never 4xx) per the transport contract.
+
+# --- Security (see http-transport.org §5) ---
+# Unauthenticated by default (LAN only, like udp/mqtt anon). The payload
+# carries presence metadata, no secrets. On untrusted networks bind to a
+# specific LAN interface, not 0.0.0.0.
+
+[auth]
+enabled = false              # future work: optional shared-secret
+# header  = "Authorization"  # e.g. "Bearer <token>" or "X-AQ-Token"
+# token   = "${AQ_HTTP_TOKEN}"
+# Missing/mismatched token => request silently dropped (204), no 4xx.
+
+# --- Equivalent ~/.aq/config.json stanza (what aq will actually read) ---
+#
+# {
+#   "config_version": 2,
+#   "http": {
+#     "enabled": true,
+#     "url": "http://localhost:7738/gossip",
+#     "method": "POST",
+#     "listen": "0.0.0.0:7738",
+#     "path": "/gossip"
+#   }
+# }
