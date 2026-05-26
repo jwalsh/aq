@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-7[1m]
+X-Beads: none
+X-Conjectures: C-1, C-3
+X-Testing: leak audit CLEAN on staged diff; docs-only, no build impact
+X-Invariants: Invariant 6 (config additive) clarified not weakened; no-network-leak preserved
+X-Deviations: none — addresses second-agent conformance review findings (MED config_version, listen default, conformance rows 6/9, §9 disambiguation)
+X-Timeline: review fixes on PR #5
