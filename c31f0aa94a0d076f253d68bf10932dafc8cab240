@@ -1,0 +1,9 @@
+X-Agent-Role: builder
+X-Agent-Runner: Claude Code
+X-Agent-Model: claude-opus-4-7[1m]
+X-Beads: none
+X-Conjectures: none
+X-Testing: grep confirms two '* 9.' headings collapsed to 9/10; no internal §9 cross-refs to cascade
+X-Invariants: contract content unchanged; numbering only
+X-Deviations: none — follow-up to PR #5 review finding (HIGH: duplicate §9)
+X-Timeline: separate branch per user request
