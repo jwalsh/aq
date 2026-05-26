@@ -16,7 +16,7 @@ gossip URL, and an RX path where =aq listen= runs a small built-in HTTP
 server that accepts announcements and materializes them to the filesystem
 exactly like the UDP/MQTT receivers.
 
-It is a *proposed change*. As of v0.6.1 the aq binary has no native HTTP
+It is a *proposed change*. As of v0.6.2 the aq binary has no native HTTP
 transport and =aq doctor= ignores an =http= config stanza. This document
 follows the contract in =docs/adr/TRANSPORT-CONTRACT.org= and the style of
 =contrib/mqtt/= and =contrib/udp-multicast/=.
@@ -68,7 +68,7 @@ the section disables the transport.
 | =enabled=  | bool   | =false=          | Must be explicitly enabled (like mqtt/mdns/ggwave). |
 | =url=      | string | =""=             | TX gossip endpoint. Empty -> TX silently skipped.   |
 | =method=   | string | ="POST"=         | ="GET"= or ="POST"=. POST sends JSON body.          |
-| =listen=   | string | ="0.0.0.0:7738"= | RX server bind address ([host]:port).               |
+| =listen=   | string | =""=             | RX server bind address ([host]:port). Empty -> RX off. =0.0.0.0:7738= binds all interfaces. |
 | =path=     | string | ="/gossip"=      | RX server URL path; also appended to =url= if unset on TX. |
 
 TX is enabled when =http.enabled == true= AND =http.url != ""= (mirrors
@@ -103,30 +103,32 @@ A host that only wants to receive (a gossip sink) sets:
 }
 #+end_src
 
-** 1.3 config_version impact -- NO bump required
+** 1.3 config_version impact
 
-This change does *not* break config schema v2 and does *not* require a
-version bump. Per the version-history table in =spec/config-schema.md=:
+The =http= section is *behaviorally additive*: it satisfies Invariant 6
+("adding a new transport section must not change the behavior of existing
+transports; omitting a section uses defaults"). Older binaries ignore
+unknown keys (§1.4 of the contract: "Unknown keys are silently ignored"),
+so a config carrying =http= is forward- and backward-compatible.
 
-| config_version | aq version | Breaking change                                          |
-|----------------+------------+----------------------------------------------------------|
-| 1              | 0.4.0+     | Initial versioned schema.                                |
-| 2              | 0.5.0+     | Added =udp=, =mdns=, =ggwave= transport sections.        |
-| 3              | 0.7.0+     | Added =network_filter= section.                          |
+That does *not* mean it skips a config_version increment. The schema does
+not treat new transport sections as silent: per =spec/config-schema.md=,
+adding =udp=/=mdns=/=ggwave= was recorded as the v1->v2 bump, and
+=network_filter= as v3 --
 
-The =http= section is *additive*: a brand-new optional transport object,
-exactly the kind of change v2 already absorbed for =udp=/=mdns=/=ggwave=.
-It satisfies Invariant 6 ("Config is additive -- adding a new transport
-section must not change the behavior of existing transports; omitting a
-section uses defaults"). Older binaries ignore unknown keys (§1.4 of the
-contract: "Unknown keys are silently ignored"), so a config carrying
-=http= is forward- and backward-compatible within v2.
+| config_version | aq version | Change                                            |
+|----------------+------------+---------------------------------------------------|
+| 1              | 0.4.0+     | Initial versioned schema.                         |
+| 2              | 0.5.0+     | Added =udp=, =mdns=, =ggwave= transport sections. |
+| 3              | 0.7.0+     | Added =network_filter= section.                   |
 
-The version is bumped only on a *breaking* schema change. Adding =http=
-breaks nothing, so config_version stays at 2. (If a future release wants
-=aq doctor --migrate= to seed an empty =http= section, that seeding can be
-folded into the existing v2->v3 migration without itself forcing a bump,
-since the field remains optional.)
+By that precedent =http= lands as the *next* config_version increment
+(v4, or folded into v3 if it ships alongside =network_filter=), with an
+=aq doctor --migrate= step that seeds an empty =http= section. The bump is
+bookkeeping for migration tracking, not a behavioral break: existing
+transports are unaffected and the field stays optional. (An earlier draft
+claimed "no bump required"; that contradicted the udp/mdns/ggwave
+precedent above and is corrected here.)
 
 * 2. TX Path (fanout)
 
@@ -649,7 +651,9 @@ func main() {
 }
 #+end_src
 
-Wiring into the core binary (per contract §9 "Adding a New Transport"):
+Wiring into the core binary (per the contract's "Adding a New Transport"
+section -- §10 once the contract's duplicate-§9 numbering is fixed; the
+"Invariant (ADR §9)" header below refers to the separate §9 "Invariants"):
 
 1. Define =httpConfig struct= with =Enabled bool=, =URL=, =Method=,
    =Listen=, =Path=.
@@ -687,8 +691,8 @@ This shim is the fast path to validate the =gossip-sink:7738= receiver before
 | 3. Self-exclusion on RX                    | Handler drops broadcasts whose =agent= == self.        |
 | 4. Dedup on RX                             | Shared =(agent|id)= =dedupCache=.                      |
 | 5. Materialized == local                   | Atomic write to =requests/= via =writeBroadcast=.      |
-| 6. Config additive                         | New optional =http= section; no v2 bump.               |
+| 6. Config additive                         | New optional =http= section; behavior unchanged; lands under the next config_version (§1.3). |
 | 7. UDP is base case                        | HTTP is opt-in (=enabled=false= default).              |
 | 8. No obligation                           | No retry; non-2xx logged only; silence is normal.      |
-| 9. Wire format versioned                   | "HTTP transport 1"; unknown =protocol_version= dropped silently. |
+| 9. Wire format versioned                   | N/A at frame level -- HTTP carries raw JSON, no AQ frame (contract §3); relies on payload =protocol_version= (§8) once added. |
 | 10. Config re-read each invocation         | =http= read from config.json like every other section. |

@@ -8,7 +8,7 @@
 #
 # This config is illustrative — aq does not read TOML; the live schema is
 # the "http" object in ~/.aq/config.json (config_version 2, additive, no
-# version bump). See http-transport.org §1. As of v0.6.1 native support is
+# version bump). See http-transport.org §1. As of v0.6.2 native support is
 # not yet merged; use scripts/aq-http.sh as an interim shim.
 
 [transport]
