@@ -2,8 +2,8 @@ X-Agent-Role: builder
 X-Agent-Runner: Claude Code
 X-Agent-Model: claude-opus-4-7[1m]
 X-Beads: none
-X-Conjectures: C-1, C-3
-X-Testing: leak audit (grep 192.168/.lan/nexus) CLEAN on commit vs main; aq validate (5 pass, pre-existing ULID dup in runtime data unrelated); docs-only, no build impact
-X-Invariants: git-hygiene no-network-leak preserved (scrubbed IPs/hostnames to localhost/0.0.0.0); filesystem-first preserved (http opt-in); fire-and-forget contract honored in proposal
-X-Deviations: amended prior commit 88c43c1 to scrub leak from unpushed history rather than adding fixup; network_filter changes left uncommitted (separate PR)
-X-Timeline: PR #5 for feat/http-transport
+X-Conjectures: C-1 (filesystem-first sufficient), C-6 (local-first .aq/ in cwd)
+X-Testing: leak audit CLEAN; docs+example only, no build impact; no edits to main.go
+X-Invariants: filesystem-first preserved (fs tier checked before network); resolution failure silent (Invariant 2); resolver is additive (Invariant 6); references TRANSPORT-CONTRACT §10 (renumbered from duplicate §9 per PR #6)
+X-Deviations: none — feature addition per user request after PR #5 review surfaced DNS-AID as adjacent layer
+X-Timeline: spec then contrib on feat/dns-aid (off main)
