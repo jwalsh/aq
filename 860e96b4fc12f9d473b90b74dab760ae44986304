@@ -1,9 +1,0 @@
-X-Agent-Role: builder
-X-Agent-Runner: Claude Code
-X-Agent-Model: claude-opus-4-7[1m]
-X-Beads: none
-X-Conjectures: C-1 (filesystem-first sufficient), C-6 (local-first .aq/ in cwd)
-X-Testing: leak audit CLEAN; docs+example only, no build impact; no edits to main.go
-X-Invariants: filesystem-first preserved (fs tier checked before network); resolution failure silent (Invariant 2); resolver is additive (Invariant 6); references TRANSPORT-CONTRACT §10 (renumbered from duplicate §9 per PR #6)
-X-Deviations: none — feature addition per user request after PR #5 review surfaced DNS-AID as adjacent layer
-X-Timeline: spec then contrib on feat/dns-aid (off main)
