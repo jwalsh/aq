@@ -1,0 +1,341 @@
+#+TITLE: DNS-AID Resolver for aq (Reference Implementation)
+#+SUBTITLE: Three-tier sink discovery -- filesystem mock, mDNS, unicast DNS
+#+AUTHOR: Jason Walsh <j@wal.sh>
+#+DATE: 2026-06-01
+#+STATUS: Proposed
+#+PROPERTY: header-args :eval no
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* Abstract
+
+This document is the *reference implementation sketch* for the DNS-AID
+integration defined in =spec/dns-aid.org=. Where the spec answers
+*what* (label convention, TXT schema, resolution order, invariants),
+this contrib answers *how* (Go code sketch for the resolver, a
+filesystem mock format example, a one-liner mDNS publisher, integration
+point in =fanoutHTTP=).
+
+Like =contrib/http/=, this is *proposal only*: no edits to =main.go=
+land in this commit. Once the spec is accepted, =resolveDNSAID= and a
+small =dns_aid= config block fold into the core binary via the
+"Adding a New Transport" steps (=docs/adr/TRANSPORT-CONTRACT.org= §10),
+treating DNS-AID as a *resolver* rather than a transport.
+
+* 1. The =resolveDNSAID= contract
+
+#+begin_src go
+// resolveDNSAID resolves a DNS-AID well-known name to a set of TXT
+// records, trying cheap tiers before expensive ones. Returns (records,
+// true) on the first non-empty hit; returns (nil, false) if every tier
+// is empty or fails. NEVER returns an error -- silent failure is the
+// contract (consistent with every other aq transport).
+//
+// Tiers (in order):
+//   1. filesystem  cache_path/<name>.txt        (no network, no timeout)
+//   2. mDNS         multicast TXT query          (skip if mdnsTimeoutMS == 0)
+//   3. unicast DNS  net.LookupTXT                (skip if dnsTimeoutMS == 0)
+//
+// Each tier short-circuits the chain on first hit. Per-tier timeouts
+// bound the worst case to mdnsTimeoutMS + dnsTimeoutMS.
+func resolveDNSAID(name string, cfg dnsAidConfig) (records []dnsAidRecord, ok bool)
+#+end_src
+
+A =dnsAidRecord= is the parsed TXT field set:
+
+#+begin_src go
+type dnsAidRecord struct {
+    Endpoint  string   // required; e.g. "http://gossip-sink:7738/gossip"
+    Protocols []string // optional; e.g. ["http","udp"]
+    Version   string   // optional; e.g. "1.1"
+    TTL       int      // optional; seconds
+    Channel   string   // optional
+    Label     string   // optional human-readable identity
+}
+#+end_src
+
+Records with empty =Endpoint= are dropped silently. Records whose
+=Endpoint= scheme is not in =knownSchemes= (=http=, =https=, =mqtt=,
+=udp=) are dropped silently.
+
+* 2. Filesystem tier
+
+The lowest tier: read =<cache_path>/<name>.txt= and parse =key=value=
+pairs, one per line. Blocks separated by blank lines are independent
+records (a single name may resolve to multiple sinks).
+
+#+begin_src go
+func resolveFilesystem(cachePath, name string) ([]dnsAidRecord, bool) {
+    path := filepath.Join(expandHome(cachePath), name+".txt")
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, false // silent: no file means no record
+    }
+    defer f.Close()
+    return parseTXTBlocks(f), true
+}
+
+// parseTXTBlocks: blocks separated by blank lines; '#' starts a
+// comment; each non-comment, non-blank line is "key=value".
+func parseTXTBlocks(r io.Reader) []dnsAidRecord {
+    var out []dnsAidRecord
+    var cur map[string]string
+    s := bufio.NewScanner(r)
+    flush := func() {
+        if cur != nil {
+            if rec, ok := recordFromMap(cur); ok {
+                out = append(out, rec)
+            }
+            cur = nil
+        }
+    }
+    for s.Scan() {
+        line := strings.TrimSpace(s.Text())
+        if line == "" { flush(); continue }
+        if strings.HasPrefix(line, "#") { continue }
+        if cur == nil { cur = map[string]string{} }
+        if k, v, ok := strings.Cut(line, "="); ok {
+            cur[strings.TrimSpace(k)] = strings.TrimSpace(v)
+        }
+    }
+    flush()
+    return out
+}
+#+end_src
+
+This is the entire production codepath for the mock -- the same parser
+runs in tests, dev, and the optional write-through cache.
+
+* 3. mDNS tier
+
+Two implementation choices, in order of preference:
+
+** 3.1 System resolver (simple path)
+
+On hosts where mDNS is wired into the system resolver -- macOS
+(=mDNSResponder= is always available for =.local=), Linux with
+=nss-mdns= in =nsswitch.conf=, FreeBSD with =nss_mdns= -- a plain
+=net.LookupTXT= works:
+
+#+begin_src go
+func resolveMDNS_system(name string, timeoutMS int) ([]dnsAidRecord, bool) {
+    if timeoutMS <= 0 { return nil, false }
+    if !strings.HasSuffix(name, ".local") && !strings.HasSuffix(name, ".local.") {
+        return nil, false // mDNS scope is .local only
+    }
+    ctx, cancel := context.WithTimeout(context.Background(),
+        time.Duration(timeoutMS)*time.Millisecond)
+    defer cancel()
+    resolver := &net.Resolver{}
+    txts, err := resolver.LookupTXT(ctx, name)
+    if err != nil || len(txts) == 0 {
+        return nil, false
+    }
+    return parseTXTStrings(txts), true
+}
+#+end_src
+
+Stdlib-only, no extra dependencies. The downside: silent skip if mDNS
+is not in nsswitch (common on minimal Linux installs).
+
+** 3.2 Direct multicast query (robust path)
+
+When system mDNS is unavailable, send a raw multicast DNS query to
+=224.0.0.251:5353= and parse the response. This needs the wire-level
+DNS encoder/decoder; the cleanest stdlib path is
+=golang.org/x/net/dns/dnsmessage= (already used elsewhere in the Go
+ecosystem; contrib is allowed extra deps per the project memory).
+
+Sketch (omitted for brevity -- ~80 lines): build an =A_TXT= question,
+write it to a multicast UDP socket, read responses for up to
+=timeoutMS=, decode TXT records. Identical TXT-string parsing as the
+filesystem tier.
+
+* 4. Unicast DNS tier
+
+Stdlib =net.LookupTXT= with a bounded context. Skipped for =.local=
+names (those are mDNS scope by definition):
+
+#+begin_src go
+func resolveUnicast(name string, timeoutMS int) ([]dnsAidRecord, bool) {
+    if timeoutMS <= 0 { return nil, false }
+    if strings.HasSuffix(name, ".local") || strings.HasSuffix(name, ".local.") {
+        return nil, false
+    }
+    ctx, cancel := context.WithTimeout(context.Background(),
+        time.Duration(timeoutMS)*time.Millisecond)
+    defer cancel()
+    txts, err := net.DefaultResolver.LookupTXT(ctx, name)
+    if err != nil || len(txts) == 0 {
+        return nil, false
+    }
+    return parseTXTStrings(txts), true
+}
+#+end_src
+
+The same =parseTXTStrings= helper used by the mDNS tier turns a
+=[]string= of TXT chunks into =[]dnsAidRecord=.
+
+* 5. Composition
+
+#+begin_src go
+func resolveDNSAID(name string, cfg dnsAidConfig) ([]dnsAidRecord, bool) {
+    if !cfg.Enabled || name == "" {
+        return nil, false
+    }
+    // 1. filesystem mock
+    if recs, ok := resolveFilesystem(cfg.CachePath, name); ok && len(recs) > 0 {
+        return recs, true
+    }
+    // 2. mDNS (system resolver path; .local only)
+    if recs, ok := resolveMDNS_system(name, cfg.MDNSTimeoutMS); ok && len(recs) > 0 {
+        return recs, true
+    }
+    // 3. unicast DNS
+    if recs, ok := resolveUnicast(name, cfg.DNSTimeoutMS); ok && len(recs) > 0 {
+        return recs, true
+    }
+    return nil, false
+}
+#+end_src
+
+* 6. Integration into the core binary
+
+The integration is a *single guarded read* inside =fanoutHTTP= (and
+analogously inside any other transport that wants endpoint
+auto-discovery). Pseudocode:
+
+#+begin_src go
+func fanoutHTTP(b Broadcast, cfg httpConfig, dnsCfg dnsAidConfig) {
+    url := cfg.URL
+    if url == "" && dnsCfg.Enabled {
+        if recs, ok := resolveDNSAID(dnsCfg.Name, dnsCfg); ok {
+            for _, r := range recs {
+                if strings.HasPrefix(r.Endpoint, "http") {
+                    url = r.Endpoint
+                    break
+                }
+            }
+        }
+    }
+    if url == "" {
+        return // silent skip — no endpoint, no transport
+    }
+    // ... existing fanoutHTTP body, using `url` ...
+}
+#+end_src
+
+That is the entire change to the TX path. The RX side is unaffected
+(DNS-AID is for clients finding sinks; sinks are configured directly).
+
+=cmdDoctor= grows a =--resolve= flag that prints the resolved record
+set without sending any broadcast -- the analogue of =dig= for
+DNS-AID-for-aq:
+
+#+begin_src text
+$ aq doctor --resolve
+[dns-aid] resolving _aq._agents.local ...
+  tier=filesystem path=~/.aq/dns-aid/_aq._agents.local.txt
+  endpoint=http://localhost:7738/gossip  protocols=[http udp]  version=1.1
+$ aq doctor --resolve _aq._agents.example.com
+[dns-aid] resolving _aq._agents.example.com ...
+  tier=unicast-dns elapsed=312ms
+  endpoint=https://gossip.example.com:7738/gossip  protocols=[http]
+#+end_src
+
+* 7. Filesystem mock example
+
+See =contrib/dns-aid/index/_aq._agents.local.txt=. Drop a copy at
+=~/.aq/dns-aid/_aq._agents.local.txt= and =aq doctor --resolve= will
+pick it up at the filesystem tier -- no network calls, no DNS
+infrastructure.
+
+Single endpoint:
+
+#+begin_src text
+endpoint=http://localhost:7738/gossip
+protocols=http,udp
+version=1.1
+ttl=3600
+label=local-dev
+#+end_src
+
+Multiple endpoints (blank-line-separated blocks):
+
+#+begin_src text
+# primary
+endpoint=http://gossip-sink:7738/gossip
+protocols=http
+label=primary
+
+# fallback
+endpoint=udp://255.255.255.255:4181
+protocols=udp
+label=lan-broadcast
+#+end_src
+
+* 8. Optional mDNS publisher (LAN mock)
+
+For prototyping over real mDNS without standing up a Go responder,
+=avahi-publish-record= (Linux) registers an arbitrary TXT record at a
+=.local= name. See =contrib/dns-aid/publish-mdns.sh=. One-liner:
+
+#+begin_src bash
+avahi-publish-record -v _aq._agents.local TXT \
+  "endpoint=http://localhost:7738/gossip" \
+  "protocols=http,udp" \
+  "version=1.1" \
+  "ttl=3600"
+#+end_src
+
+On macOS, =dns-sd= cannot publish arbitrary TXT under non-DNS-SD names;
+the system-resolver mDNS path will still *read* the record published
+elsewhere on the LAN, but publishing from macOS requires a small Go
+mDNS responder (TODO: contrib follow-on, ~80 lines using
+=github.com/hashicorp/mdns= or =github.com/miekg/dns=).
+
+* 9. Conformance to the Transport Contract
+
+DNS-AID is a *resolver*, not a transport: it produces endpoints, it
+does not move broadcasts. So most of the contract is N/A. The relevant
+invariants and how this proposal honors them:
+
+| Invariant (TRANSPORT-CONTRACT.org §9)       | How DNS-AID resolution satisfies it                                   |
+|---------------------------------------------+-----------------------------------------------------------------------|
+| 1. Filesystem canonical                     | Filesystem tier checked first; works with no network at all.          |
+| 2. Transports independent                   | Resolution failure is silent; no transport is starved or made fatal.  |
+| 3. Self-exclusion on RX                     | N/A -- DNS-AID has no RX path.                                        |
+| 4. Dedup on RX                              | N/A.                                                                  |
+| 5. Materialized == local                    | N/A -- nothing is materialized into channels.                         |
+| 6. Config additive                          | =dns_aid= section is optional; new =config_version= increment (v4).   |
+| 7. UDP is base case                         | Unaffected; DNS-AID only fills *empty* endpoints, never overrides.    |
+| 8. No obligation                            | Records are hints; consumers pick any/none.                           |
+| 9. Wire format versioned                    | N/A -- DNS-AID does not define an aq wire format. Records may carry  |
+|                                             | a =version= TXT field (informational).                                |
+| 10. Config re-read each invocation          | Resolution runs per-invocation; result is not persisted to config.    |
+
+* 10. Open questions / future work
+
+- *Write-through cache.* After a successful network resolution, should
+  the resolver write the result to =cache_path= so subsequent
+  invocations resolve at the filesystem tier? Pro: speed + offline
+  resilience. Con: stale cache when a sink moves. Default: *off*;
+  opt-in via =dns_aid.cache_after_resolve = true=.
+- *SRV records.* DNS-AID v1 is TXT-only, but UDP/MQTT endpoints have
+  natural host+port semantics that SRV would express more cleanly.
+  Defer until DNS-AID upstream adds SRV.
+- *macOS mDNS publisher.* As noted in §8, needs a small Go responder.
+  Could share code with =contrib/mdns/= if that gains an RX path.
+- *DNSSEC.* The =resolveUnicast= path SHOULD validate when the system
+  resolver supports it. Stdlib =net.Resolver= does not expose this; a
+  future revision may use =miekg/dns= for explicit DNSSEC.
+
+* References
+
+- =spec/dns-aid.org= -- the project-level spec this implements
+- =contrib/http/http-transport.org= -- the primary client of resolved
+  endpoints
+- =contrib/mdns/mdns-transport.org= -- related but distinct (publishes
+  broadcasts; this resolves sinks)
+- =docs/adr/TRANSPORT-CONTRACT.org= -- invariants
+- RFC 6763 §6 -- TXT record encoding
