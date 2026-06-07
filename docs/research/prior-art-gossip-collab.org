@@ -349,6 +349,42 @@ topology. Measures how well agents form strategies, self-organize,
 and communicate effectively. Focuses on evaluation, not a specific
 coordination protocol.
 
+*** TraceFix: TLA+ Verification for Agent Coordination (May 2026)
+
+- URL: https://dl.acm.org/doi/10.1145/3786335.3813159
+- Conference: CAIS '26 (ACM Conference on AI and Agentic Systems)
+- Authors: Xia, Li, Ehsan, Ortiz (Rutgers)
+
+First system to apply formal verification (TLA+/PlusCal model
+checking) to LLM multi-agent coordination protocols. Uses a
+generate/check/repair loop: synthesizes a protocol topology IR,
+generates PlusCal coordination logic, and iteratively repairs
+using TLC counterexamples until verification succeeds.
+
+Key contributions:
+1. *Protocol topology IR*: structured intermediate representation
+   defining agents, shared resources (locks/counters), and directed
+   FIFO channels with label vocabularies
+2. *Counterexample-driven repair*: TLC produces minimal failure
+   traces, which guide protocol fixes (62.5% first-attempt pass,
+   100% within 4 iterations on 48-task benchmark)
+3. *Runtime topology enforcement*: monitor rejects out-of-topology
+   coordination operations while preserving agent autonomy for
+   domain tools
+
+Results across 3,456 runs: topology-monitored execution achieves
+89.4% average task completion vs. 75% for chat-only. Verified
+protocols reduce deadlock/livelock from 31.1% to 14.1%.
+
+Relevance to aq: TraceFix targets *verified enforcement* (heavyweight,
+centralized topology checking). aq targets *ambient awareness*
+(lightweight gossip, no enforcement). They are complementary:
+aq could surface potential conflicts early so TraceFix-style
+verification becomes less critical. The paper's Section I explicitly
+discusses when lock-and-channel coordination is appropriate vs.
+"isolation-based architectures, exemplified by Claude Code's
+per-agent git-worktree model" --- the pattern aq+sb+cprr enables.
+
 ** 4.2 Industry Frameworks
 
 *** Claude Code Agent Teams (2026)
@@ -669,6 +705,10 @@ when communication is unreliable.
 - Li et al. "Towards Adaptive, Scalable, and Robust Coordination of LLM
   Agents: A Dynamic Ad-Hoc Networking Perspective." arXiv:2602.08009,
   Feb 2026. https://arxiv.org/abs/2602.08009
+
+- Xia, Li, Ehsan, Ortiz. "TraceFix: Repairing Agent Coordination Protocols
+  with TLA+ Counterexamples." CAIS '26, May 2026.
+  https://dl.acm.org/doi/10.1145/3786335.3813159
 
 - Levin, Yehudai. "Alleviating Merge Conflicts with Fine-grained Visual
   Awareness." arXiv:1508.01872, Aug 2015.

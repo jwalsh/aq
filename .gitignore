@@ -42,6 +42,9 @@ worktrees/
 spec/*_TTrace_*.bin
 spec/*_TTrace_*.tla
 
+# Research PDFs (too large for git, refs in prior-art-gossip-collab.org)
+docs/research/*.pdf
+
 # Python
 __pycache__/
 *.pyc
