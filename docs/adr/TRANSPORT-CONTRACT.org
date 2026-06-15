@@ -503,7 +503,7 @@ These hold for any future transport implementation:
 10. *Config is re-read on every invocation.* There is no daemon-side
     config cache. Changing config.json takes effect on the next command.
 
-* 9. Adding a New Transport
+* 10. Adding a New Transport
 
 To add transport =foo=:
 
