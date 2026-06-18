@@ -1,0 +1,23 @@
+# Example DNS-AID filesystem mock for the LAN-mock label.
+#
+# Copy this file to ~/.aq/dns-aid/_aq._agents.local.txt and `aq doctor
+# --resolve` (once the dns-aid resolver lands) will pick it up at the
+# filesystem tier — no mDNS or DNS infrastructure required.
+#
+# Format: `key=value`, one per line. Lines starting with `#` are
+# comments. Blank lines separate independent records (multiple sinks
+# under the same name).
+
+# --- Primary sink: local HTTP gossip endpoint ---
+endpoint=http://localhost:7738/gossip
+protocols=http,udp
+version=1.1
+ttl=3600
+label=local-dev
+
+# --- Fallback: UDP subnet broadcast ---
+endpoint=udp://255.255.255.255:4181
+protocols=udp
+version=1.1
+ttl=3600
+label=lan-broadcast

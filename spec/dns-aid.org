@@ -1,0 +1,229 @@
+#+TITLE: DNS-AID Integration Specification
+#+SUBTITLE: Sink discovery for aq via DNS-AID conventions (with a filesystem-first mock)
+#+DATE: 2026-06-01
+#+STATUS: Draft
+#+CONFIG_VERSION: 4 (proposed)
+#+AUTHOR: jwalsh
+
+* Motivation
+
+aq's existing transports (=udp=, =mqtt=, =mdns=, =http=) all require a
+configured endpoint: the broadcast address, the broker host, the gossip
+URL. Today those endpoints live in =~/.aq/config.json= and are typed in
+by a human. A new agent joining a team has to know the sink's URL out of
+band.
+
+[[https://www.linuxfoundation.org/projects/dns-aid][DNS-AID]] is a Linux Foundation proposal for AI-agent discovery via DNS:
+each organization publishes well-known records under
+=_<protocol>._agents.<domain>= that tell joining agents *where to talk*.
+It is decentralized, vendor-neutral, and rides existing DNS
+infrastructure. The aq analogue is obvious: publish where an
+organization's aq gossip sink lives, so new agents bootstrap
+=http.url= (or any other transport endpoint) automatically.
+
+This spec defines that integration and -- critically -- a
+*filesystem-first mock* so the contract can be exercised end-to-end with
+zero infrastructure, in keeping with aq's anti-coupling axiom.
+
+* Scope and anti-goals
+
+** What DNS-AID-for-aq IS
+
+- A *sink-discovery* layer that resolves a well-known name to a transport
+  endpoint, so =aq= can populate an empty =http.url= (or other endpoint)
+  at runtime instead of hard-coding it in config.
+- *Read-only* from aq's perspective: aq queries, it does not publish.
+  Publishing happens via standard DNS tooling (or the mDNS mock).
+
+** What it is NOT
+
+- *Not a registry of running agents.* DNS-AID-for-aq publishes *sinks*,
+  not the agents themselves. The agents broadcast their presence via the
+  ordinary aq transports.
+- *Not a presence channel.* Presence is what aq broadcasts carry. DNS
+  records are too coarse-TTL'd (minutes-to-hours) to express the
+  ephemeral-presence semantics aq needs.
+- *Not authoritative.* Resolution failure is *normal* and silent --
+  identical to every other aq transport. A missing record means "no
+  sink configured for this name"; aq falls through to whatever endpoints
+  config provides directly.
+- *Not coordination.* Lookups carry no obligation. This is a hint, not a
+  contract.
+
+* The label convention
+
+DNS-AID uses =_<protocol>._agents.<domain>=. aq uses =_aq= as its
+protocol label:
+
+| Scope          | Label                            | Resolver           |
+|----------------+----------------------------------+--------------------|
+| WAN (real)     | =_aq._agents.{org-domain}=       | unicast DNS        |
+| LAN (mDNS mock)| =_aq._agents.local=              | mDNS (RFC 6762)    |
+| Local (mock)   | =~/.aq/dns-aid/_aq._agents.local.txt= | filesystem         |
+
+Note: =_aq._agents.{domain}= is *not* DNS-SD-browseable -- DNS-SD
+requires =_tcp=/=_udp= in the second label slot, and =_agents= is
+neither. This matches DNS-AID, which uses direct TXT lookups, not
+DNS-SD browse. Tools: =dig _aq._agents.local TXT @224.0.0.251 -p 5353=
+or =avahi-resolve --address -n _aq._agents.local=.
+
+* TXT field schema
+
+A resolved record carries one or more TXT strings (RFC 6763 §6 encoding:
+=key=value=, one pair per string, 255 bytes per string, ~1300 bytes
+aggregate). Fields:
+
+| Key          | Required | Max | Description                                                | Example                                     |
+|--------------+----------+-----+------------------------------------------------------------+---------------------------------------------|
+| =endpoint=   | yes      | 200 | Transport endpoint URL (=http://=, =mqtt://=, =udp://=)    | =http://gossip-sink.example.com:7738/gossip= |
+| =protocols=  | no       | 64  | Comma-separated protocols the sink accepts                 | =http,udp,mqtt=                             |
+| =version=    | no       | 16  | Broadcast payload version the sink expects                 | =1.1=                                       |
+| =ttl=        | no       | 6   | Hint to the resolver about cache lifetime (seconds)        | =3600=                                      |
+| =channel=    | no       | 64  | Default channel name (overrides =default_channel= if set)  | =broadcast=                                 |
+| =label=      | no       | 64  | Human-readable identity                                    | =defrecord-prod=                            |
+
+A record with only =endpoint= is sufficient. All other fields are
+hints; consumers tolerate omission.
+
+** Multiple endpoints
+
+A single name MAY return multiple TXT record sets (one per sink). The
+resolver returns the full set; the caller picks one (typically: first
+that matches its enabled transports). aq does not impose a selection
+algorithm.
+
+* Resolution order
+
+Per the [[file:../CLAUDE.md][filesystem-first constraint]], resolvers try cheap before expensive:
+
+#+begin_src text
+resolve(name) =
+  1. filesystem:  ~/.aq/dns-aid/<name>.txt        (no network)
+  2. mDNS:        query <name> TXT via 224.0.0.251 (LAN only, 1s timeout)
+  3. unicast DNS: query <name> TXT via system resolver (3s timeout)
+  4. ε:           return empty; silent failure
+#+end_src
+
+Each step times out fast and is best-effort. A single hit at any tier
+short-circuits the chain. This means:
+
+- *Tests / dev:* drop a file at =~/.aq/dns-aid/_aq._agents.local.txt=,
+  done -- no DNS infrastructure needed.
+- *Single-LAN team:* publish via =avahi-publish-record _aq._agents.local
+  TXT ...= on one host, all peers resolve over mDNS.
+- *Multi-site / production:* publish under the org's real domain in
+  unicast DNS; aq agents at any site resolve the same way.
+
+The contract is the same at every tier: same name, same TXT schema.
+
+* config_version impact
+
+Per the convention established by =spec/config-schema.md= (each new
+top-level transport-or-resolver section gets a =config_version=
+increment), DNS-AID lands as the next version after =network_filter=
+(v3) -- nominally *v4*, or folded into v3 if the two ship together.
+
+| config_version | Change                                                       |
+|----------------+--------------------------------------------------------------|
+| 4 (proposed)   | Added =dns_aid= resolver section.                            |
+
+The =dns_aid= block is *optional* and *additive* (Invariant 6). Older
+binaries silently ignore the key. With =dns_aid= absent, behavior is
+identical to today: endpoints come from config directly.
+
+** =dns_aid= section schema
+
+| Field           | Type     | Default                          | Description                                            |
+|-----------------+----------+----------------------------------+--------------------------------------------------------|
+| =enabled=       | bool     | =false=                          | Must be explicitly enabled.                            |
+| =name=          | string   | =_aq._agents.local=              | The well-known name to resolve.                        |
+| =cache_path=    | string   | =~/.aq/dns-aid/=                 | Filesystem mock directory; checked first.              |
+| =mdns_timeout_ms= | int    | =1000=                           | mDNS query timeout (skip step if =0=).                 |
+| =dns_timeout_ms=  | int    | =3000=                           | Unicast DNS timeout (skip step if =0=).                |
+| =refresh_seconds= | int    | =3600=                           | How often =aq doctor= re-resolves; =0= disables.       |
+
+** Filesystem mock format
+
+=~/.aq/dns-aid/<name>.txt= is plain text, one =key=value= pair per line:
+
+#+begin_src text
+# ~/.aq/dns-aid/_aq._agents.local.txt
+endpoint=http://localhost:7738/gossip
+protocols=http,udp
+version=1.1
+ttl=3600
+label=local-dev
+#+end_src
+
+Lines beginning with =#= are comments. Blank lines are ignored. Multiple
+endpoints: separate them by a blank-line-delimited block (each block is
+one record).
+
+* Bootstrap into existing config
+
+When =dns_aid.enabled == true= and the relevant transport endpoint is
+empty (e.g. =http.url == ""=), aq resolves =dns_aid.name= and -- if a
+record carries an =endpoint= matching that transport's URL scheme --
+populates the field at runtime. The config file on disk is NOT
+rewritten; resolution is per-invocation, in keeping with the contract's
+"config re-read each invocation" invariant.
+
+Resolution failure leaves the field empty. The corresponding transport
+then silently skips (per its own enable rule: empty URL means "TX off").
+No error, no fatal -- consistent with the broader aq philosophy.
+
+* Security notes
+
+- *No authentication.* DNS records are world-readable; the published
+  endpoint is the same trust boundary as any other config-supplied
+  endpoint. If the endpoint requires auth, that auth lives on the
+  endpoint (e.g. =http.auth= per the HTTP transport spec §5).
+- *Spoofing.* Unicast DNS results SHOULD be DNSSEC-validated when the
+  resolver supports it. mDNS is link-local; spoofing requires LAN
+  presence (same trust boundary as UDP multicast). The filesystem mock
+  is implicitly user-trusted.
+- *Information disclosure.* The published endpoint reveals that an org
+  runs aq. Treat it like an MX or SRV record: public by nature.
+- *Validation.* aq MUST reject endpoints whose scheme does not match a
+  known transport (=http=, =mqtt=, =udp=). Unknown-scheme records are
+  silently dropped.
+
+* Conformance to the Transport Contract
+
+DNS-AID-for-aq is *not* a transport -- it produces endpoints, it does
+not move broadcasts -- so the transport contract applies only by
+analogy. The relevant invariants it must honor:
+
+| Invariant (TRANSPORT-CONTRACT.org §9) | How DNS-AID resolution satisfies it                                |
+|---------------------------------------+--------------------------------------------------------------------|
+| 1. Filesystem canonical               | Filesystem mock is the first lookup tier; works without network.   |
+| 2. Transports independent             | Resolution failure is silent; no transport is starved or fatal.    |
+| 6. Config additive                    | =dns_aid= section is optional; new config_version increment (v4).  |
+| 7. UDP is base case                   | UDP enable-by-default is unaffected; DNS-AID only fills empty URLs. |
+| 8. No obligation                      | Records are hints; consumers pick any/none; no broadcast guarantee. |
+| 10. Config re-read each invocation    | Resolution is per-invocation; record is not persisted to config.   |
+
+* Open questions
+
+- Should aq cache DNS-AID resolutions to =~/.aq/dns-aid/= after a
+  network hit (write-through cache)? Pro: faster subsequent invocations,
+  resilience when DNS is down. Con: stale cache may point at a sink that
+  has moved.
+- Should =aq doctor= include a =--resolve= flag that prints what
+  DNS-AID would return for the configured name? Likely yes.
+- Should we publish a SRV record alongside TXT for endpoints that have
+  natural host+port semantics (UDP, MQTT)? DNS-AID itself is TXT-only
+  in v1; SRV would be an extension.
+
+* References
+
+- DNS-AID announcement (Linux Foundation, 2026):
+  https://www.linuxfoundation.org/projects/dns-aid
+- RFC 6763 -- DNS-Based Service Discovery
+- RFC 6762 -- Multicast DNS
+- =contrib/mdns/mdns-transport.org= -- LAN presence (related but
+  distinct: that publishes broadcasts, this resolves sink endpoints)
+- =contrib/http/http-transport.org= -- the primary client of resolved
+  endpoints
+- =docs/adr/TRANSPORT-CONTRACT.org= -- the invariants every transport
+  proposal must satisfy
